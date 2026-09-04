@@ -582,6 +582,10 @@ fn label_document_scroll_roots(nodes: &mut [SemanticNode], dom: &DomIndex) {
 }
 
 fn apply_page_occlusion(nodes: &mut [SemanticNode], dom: &DomIndex, layout: &LayoutIndex) {
+    // Most layout nodes are ordinary in-flow content and can never cover another
+    // control under this conservative occlusion model. Filter them once instead
+    // of running a pair of DOM ancestry walks for every semantic/layout pair.
+    let overlay_candidates = page_occlusion_candidates(layout);
     for node in nodes {
         if node.visibility != BrowserVisibility::InViewport {
             continue;
@@ -595,32 +599,48 @@ fn apply_page_occlusion(nodes: &mut [SemanticNode], dom: &DomIndex, layout: &Lay
         let (Some(target_bounds), Some(target_paint)) = (target.bounds, target.paint_order) else {
             continue;
         };
-        let covered = layout.nodes.iter().any(|(&backend, overlay)| {
+        let covered = overlay_candidates.iter().any(|(backend, overlay)| {
+            let backend = *backend;
             if backend == target_backend
-                || dom.shares_dom_branch(backend, target_backend)
                 || overlay
                     .paint_order
                     .is_none_or(|paint| paint <= target_paint)
-                || !overlay
-                    .styles
-                    .get("position")
-                    .is_some_and(|position| matches!(position.as_str(), "fixed" | "absolute"))
-                || overlay
-                    .styles
-                    .get("pointer-events")
-                    .is_some_and(|value| value == "none")
-                || layout_hidden(overlay)
             {
                 return false;
             }
-            overlay
+            let covers = overlay
                 .bounds
-                .is_some_and(|bounds| bounds.has_area() && bounds.covers(target_bounds))
+                .is_some_and(|bounds| bounds.covers(target_bounds));
+            covers && !dom.shares_dom_branch(backend, target_backend)
         });
         if covered {
             node.visibility = BrowserVisibility::PageOccluded;
         }
     }
+}
+
+fn page_occlusion_candidates(layout: &LayoutIndex) -> Vec<(i64, &LayoutMeta)> {
+    layout
+        .nodes
+        .iter()
+        .filter_map(|(&backend, overlay)| {
+            let positioned = overlay
+                .styles
+                .get("position")
+                .is_some_and(|position| matches!(position.as_str(), "fixed" | "absolute"));
+            let accepts_pointer_events = !overlay
+                .styles
+                .get("pointer-events")
+                .is_some_and(|value| value == "none");
+            let has_bounds = overlay.bounds.is_some_and(Rect::has_area);
+            (positioned
+                && accepts_pointer_events
+                && !layout_hidden(overlay)
+                && overlay.paint_order.is_some()
+                && has_bounds)
+                .then_some((backend, overlay))
+        })
+        .collect()
 }
 
 fn supplement_dom_actions(
@@ -1472,6 +1492,50 @@ mod tests {
             .iter()
             .all(|node| node.name.as_deref() != Some("Covered")));
         assert_eq!(page.omissions.page_occluded, 1);
+    }
+
+    #[test]
+    fn page_occlusion_prefilters_large_irrelevant_layout_before_branch_checks() {
+        let mut layout = LayoutIndex::default();
+        for backend in 1..=10_000 {
+            layout.nodes.insert(
+                backend,
+                LayoutMeta {
+                    bounds: Some(Rect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 800.0,
+                        height: 600.0,
+                    }),
+                    styles: HashMap::from([("position".to_owned(), "static".to_owned())]),
+                    paint_order: Some(backend),
+                    ..Default::default()
+                },
+            );
+        }
+        layout.nodes.insert(
+            10_001,
+            LayoutMeta {
+                bounds: Some(Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 800.0,
+                    height: 600.0,
+                }),
+                styles: HashMap::from([
+                    ("position".to_owned(), "fixed".to_owned()),
+                    ("pointer-events".to_owned(), "auto".to_owned()),
+                ]),
+                paint_order: Some(10_001),
+                ..Default::default()
+            },
+        );
+
+        // apply_page_occlusion only performs the expensive DOM-branch test on
+        // this prefiltered set, independent of the number of ordinary nodes.
+        let candidates = page_occlusion_candidates(&layout);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].0, 10_001);
     }
 
     #[test]
