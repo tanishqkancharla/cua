@@ -253,7 +253,7 @@ fn advertised_runtime_input_schema(tool_name: &str, schema: &Value) -> Value {
 ///   `accessibility.tree.bounded`, `accessibility.window_state`,
 ///   `accessibility.element_tokens` (Surface 6 — tool accepts the
 ///   opaque `element_token` arg alongside the integer `element_index`)
-/// - `app.launch`, `app.list`, `app.kill`, `window.list`,
+/// - `app.launch`, `app.list`, `app.kill`, `window.list`, `window.close`,
 ///   `window.activate`, `window.frame.set`, `window.debug_info`
 /// - `system.permissions.tcc`,
 ///   `system.permissions.tcc.accessibility`,
@@ -363,6 +363,7 @@ pub fn default_capabilities_for(tool_name: &str) -> Vec<String> {
         "kill_app" => &["app.kill"],
         "list_windows" => &["window.list"],
         "bring_to_front" => &["window.activate"],
+        "close_window" => &["window.close"],
         "set_window_frame" => &["window.frame.set"],
         "debug_window_info" => &["window.debug_info"],
 
@@ -2557,6 +2558,7 @@ fn is_physical_desktop_action(tool: &str) -> bool {
             | "hotkey"
             | "set_value"
             | "bring_to_front"
+            | "close_window"
             | "set_window_frame"
     )
 }
@@ -4923,6 +4925,7 @@ mod capability_tests {
         "kill_app",
         "list_windows",
         "bring_to_front",
+        "close_window",
         "set_window_frame",
         "debug_window_info",
         // permissions / config
@@ -5005,6 +5008,7 @@ mod capability_tests {
         "app.kill",
         "window.list",
         "window.activate",
+        "window.close",
         "window.frame.set",
         "window.debug_info",
         // permissions

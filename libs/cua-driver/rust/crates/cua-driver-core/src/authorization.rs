@@ -283,6 +283,7 @@ const DESKTOP_INPUT_OPERATIONS: &[&str] = &[
     "hotkey",
     "set_value",
     "bring_to_front",
+    "close_window",
     "set_window_frame",
 ];
 const DESKTOP_INPUT_SCOPE_KEYS: &[&str] = &[
@@ -892,6 +893,7 @@ pub fn advertised_risk_for(tool: &str) -> RiskAssessment {
         | "invoke_menu"
         | "launch_app"
         | "bring_to_front"
+        | "close_window"
         | "set_window_frame"
         | "start_session"
         | "end_session"
@@ -1189,6 +1191,7 @@ fn enforce_hard_invariants(
             | "set_value"
             | "kill_app"
             | "bring_to_front"
+            | "close_window"
             | "get_accessibility_tree"
             | "get_window_state"
             | "verify_state"

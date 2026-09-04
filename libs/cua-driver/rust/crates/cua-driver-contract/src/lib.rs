@@ -28,11 +28,11 @@ pub use cursor::{
 };
 pub use inputs::{
     action_target_schema, ActionTarget, CaptureScope, ClickButton, ClickInput, ClipboardReadInput,
-    ClipboardWriteInput, DesktopScope, DragInput, EndSessionInput, EscalateSessionInput,
-    EscalationReason, GetAgentCursorStateInput, GetCursorPositionInput, GetDesktopStateInput,
-    GetScreenSizeInput, GetSessionInput, GetSessionStateInput, HotkeyInput, InvokeMenuInput,
-    ListSessionsInput, MoveCursorInput, PressKeyInput, ScrollBy, ScrollDirection, ScrollInput,
-    SetAgentCursorEnabledInput, SetAgentCursorMotionInput, SetAgentCursorThemeInput,
+    ClipboardWriteInput, CloseWindowInput, DesktopScope, DragInput, EndSessionInput,
+    EscalateSessionInput, EscalationReason, GetAgentCursorStateInput, GetCursorPositionInput,
+    GetDesktopStateInput, GetScreenSizeInput, GetSessionInput, GetSessionStateInput, HotkeyInput,
+    InvokeMenuInput, ListSessionsInput, MoveCursorInput, PressKeyInput, ScrollBy, ScrollDirection,
+    ScrollInput, SetAgentCursorEnabledInput, SetAgentCursorMotionInput, SetAgentCursorThemeInput,
     SetWindowFrameInput, StartSessionInput, ToolInput, TypeTextInput,
     MULTI_CALL_SESSION_DESCRIPTION,
 };
@@ -40,12 +40,13 @@ pub use outputs::{
     advertised_output_schema, refusal_envelope_schema, ActionDelivery, ActionDeliveryMode,
     ActionEffect, ActionEscalation, ActionEscalationReason, ActionEscalationTarget, ActionEvidence,
     ActionEvidenceKind, ActionResult, ActionResultValidationError, ActionRoute,
-    ClipboardReadOutput, ClipboardWriteOutput, CursorMotionOutput, CursorPointOutput,
-    CursorPositionOutput, CursorThemeOutput, CursorVisualOutput, DesktopStateOutput,
-    EffectiveScope, EndSessionOutput, GetAgentCursorStateOutput, ListSessionsOutput,
-    ScreenSizeOutput, SessionClientKindOutput, SessionLifecycleState, SessionOutput,
-    SessionStateOutput, SessionTransportOutput, SetAgentCursorEnabledOutput,
-    SetAgentCursorMotionOutput, SetAgentCursorThemeOutput, StartSessionOutput, ToolOutput,
+    ClipboardReadOutput, ClipboardWriteOutput, CloseWindowOutput, CloseWindowStatus,
+    CursorMotionOutput, CursorPointOutput, CursorPositionOutput, CursorThemeOutput,
+    CursorVisualOutput, DesktopStateOutput, EffectiveScope, EndSessionOutput,
+    GetAgentCursorStateOutput, ListSessionsOutput, ScreenSizeOutput, SessionClientKindOutput,
+    SessionLifecycleState, SessionOutput, SessionStateOutput, SessionTransportOutput,
+    SetAgentCursorEnabledOutput, SetAgentCursorMotionOutput, SetAgentCursorThemeOutput,
+    StartSessionOutput, ToolOutput,
 };
 pub use verification::{
     BoundsExpectation, ElementPredicate, ElementSelector, PredicateOutcome, StatePredicate,
@@ -352,6 +353,7 @@ mod tests {
             "click",
             "clipboard_read",
             "clipboard_write",
+            "close_window",
             "drag",
             "get_cursor_position",
             "get_desktop_state",
@@ -447,6 +449,31 @@ mod tests {
         assert_eq!(
             contract.cursor_semantics.expect("cursor semantics").action,
             CursorAction::App
+        );
+    }
+
+    #[test]
+    fn close_window_is_exact_targeted_and_has_a_closed_success_shape() {
+        let contract = tool_contract("close_window").expect("close_window contract");
+        assert_eq!(
+            contract.input_schema["required"],
+            serde_json::json!(["pid", "window_id"])
+        );
+        assert_eq!(
+            contract.input_schema["properties"]["pid"]["minimum"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            contract.input_schema["properties"]["window_id"]["minimum"],
+            serde_json::json!(1)
+        );
+        assert!(contract.annotations.destructive);
+        assert!(!contract.annotations.idempotent);
+        assert_eq!(contract.schema_mode, SchemaMode::CanonicalRuntime);
+        assert_eq!(contract.capabilities, vec!["window.close"]);
+        assert_eq!(
+            contract.success_output_schema.expect("success schema")["properties"]["status"]["enum"],
+            serde_json::json!(["closed"])
         );
     }
 

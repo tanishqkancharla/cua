@@ -533,6 +533,26 @@ impl ToolInput for SetWindowFrameInput {
     const TOOL_NAME: &'static str = "set_window_frame";
 }
 
+/// Exact top-level window to close cooperatively through the operating
+/// system's accessibility/window-management API.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, uniffi::Record)]
+#[serde(deny_unknown_fields)]
+pub struct CloseWindowInput {
+    #[schemars(schema_with = "positive_integer_schema")]
+    pub pid: u32,
+    #[schemars(schema_with = "positive_integer_schema")]
+    pub window_id: u64,
+    /// For multi-call work, prefer a short public session label and repeat it on every call that
+    /// accepts it. Omit it to use the authenticated transport's implicit lifecycle session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "string_schema")]
+    pub session: Option<String>,
+}
+
+impl ToolInput for CloseWindowInput {
+    const TOOL_NAME: &'static str = "close_window";
+}
+
 /// Exact, immediate-child application menu path to resolve and invoke through
 /// the operating system's accessibility API. Path labels are matched after
 /// trimming surrounding whitespace and otherwise remain case-sensitive.

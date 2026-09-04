@@ -316,9 +316,9 @@ async fn track_overlay_drag(
     crate::overlay::send_command(key, cursor_overlay::OverlayCommand::SetPressed(false));
 }
 use cua_driver_contract::{
-    ClickButton, ClickInput, DragInput, GetCursorPositionInput, GetDesktopStateInput,
-    GetScreenSizeInput, HotkeyInput, InvokeMenuInput, MoveCursorInput, PressKeyInput,
-    ScrollDirection, ScrollInput, TypeTextInput,
+    ClickButton, ClickInput, CloseWindowInput, DragInput, GetCursorPositionInput,
+    GetDesktopStateInput, GetScreenSizeInput, HotkeyInput, InvokeMenuInput, MoveCursorInput,
+    PressKeyInput, ScrollDirection, ScrollInput, TypeTextInput,
 };
 use cua_driver_core::{
     protocol::ToolResult,
@@ -9213,12 +9213,12 @@ impl Tool for KillAppTool {
     fn def(&self) -> &ToolDef {
         KILL_DEF.get_or_init(|| ToolDef {
             name: "kill_app".into(),
-            description: "Force-terminate a process by pid. Use when the standard close path \
-                (Alt+F4 / WM_CLOSE via `click` on the X button) fails to make the process \
+            description: "Force-terminate a process by pid. Use when the cooperative \
+                close_window path fails to make the process \
                 exit — typical for UWP / WinUI3 apps (Calculator, Photos, modern Notepad) \
                 that route WM_CLOSE into a suspended-but-resident state. Equivalent to \
-                `taskkill /F /PID <pid>`. Unsaved state is lost. Prefer the click-the-X path \
-                first; only escalate to `kill_app` when polite close didn't terminate."
+                `taskkill /F /PID <pid>`. Unsaved state is lost. Prefer close_window; only \
+                escalate to `kill_app` when cooperative close didn't terminate."
                 .into(),
             input_schema: json!({"type":"object","required":["pid"],"properties":{
                 "pid":{"type":"integer","description":"PID of the process to terminate."}
@@ -9347,6 +9347,36 @@ fn kill_app_stale_process_refusal(message: String) -> ToolResult {
             "message": message,
         }
     }))
+}
+
+pub struct CloseWindowTool;
+static CLOSE_WINDOW_DEF: std::sync::OnceLock<ToolDef> = std::sync::OnceLock::new();
+
+#[async_trait]
+impl Tool for CloseWindowTool {
+    fn def(&self) -> &ToolDef {
+        CLOSE_WINDOW_DEF.get_or_init(|| {
+            let contract =
+                cua_driver_contract::tool_contract("close_window").expect("close_window contract");
+            ToolDef::from_contract(&contract)
+        })
+    }
+
+    async fn invoke(&self, args: Value) -> ToolResult {
+        let input: CloseWindowInput = match parse_typed_input("close_window", args) {
+            Ok(input) => input,
+            Err(error) => return error,
+        };
+        let message = "Windows exact-window close is not implemented yet; refusing instead of using Alt+F4, menu labels, coordinates, or process termination";
+        ToolResult::error(format!("close_window: {message}")).with_structured(json!({
+            "status": "unsupported",
+            "effect": "refused",
+            "code": "exact_window_close_unsupported",
+            "pid": input.pid,
+            "window_id": input.window_id,
+            "message": message,
+        }))
+    }
 }
 
 // ── debug_window_info ─────────────────────────────────────────────────────────
@@ -9710,6 +9740,7 @@ pub fn build_registry_with_provider(
     ));
     r.register(Box::new(LaunchAppTool));
     r.register(Box::new(KillAppTool));
+    r.register(Box::new(CloseWindowTool));
     let pid_window_candidates: WindowTargetCandidates = Arc::new(pid_window_target_candidates);
     r.register(pid_window_guarded(BringToFrontTool, &pid_window_candidates));
     r.register(Box::new(SetWindowFrameTool));

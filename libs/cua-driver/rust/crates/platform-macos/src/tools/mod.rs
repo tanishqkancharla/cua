@@ -24,6 +24,7 @@ mod type_text;
 // etc.) live elsewhere under CuaDriverCore::Capture and are reached
 // through GetWindowStateTool.
 mod check_permissions;
+mod close_window;
 mod cursor_tools;
 mod get_accessibility_tree;
 mod get_config;
@@ -901,6 +902,7 @@ pub fn register_all(
     ));
     registry.register(Box::new(launch_app::LaunchAppTool));
     registry.register(Box::new(kill_app::KillAppTool));
+    registry.register(Box::new(close_window::CloseWindowTool));
     let pid_window_candidates: WindowTargetCandidates = Arc::new(pid_window_target_candidates);
     registry.register(pid_window_guarded(
         bring_to_front::BringToFrontTool,

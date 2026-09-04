@@ -394,6 +394,78 @@
       }
     },
     {
+      "name": "close_window",
+      "description": "Cooperatively close one exact top-level window without activating it, then independently verify that the original window identity disappeared. The operation never falls back to hotkeys, menu labels, coordinates, or process termination. Missing, mismatched, ambiguous, disabled, unsupported, confirmation-required, and unconfirmed no-op outcomes fail closed.",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux"
+      ],
+      "capabilities": [
+        "window.close"
+      ],
+      "annotations": {
+        "read_only": false,
+        "destructive": true,
+        "idempotent": false,
+        "open_world": false
+      },
+      "schema_mode": "canonical_runtime",
+      "cursor_semantics": {
+        "action": "app"
+      },
+      "input_schema": {
+        "additionalProperties": false,
+        "description": "Exact top-level window to close cooperatively through the operating\nsystem's accessibility/window-management API.",
+        "properties": {
+          "pid": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "session": {
+            "description": "For multi-call work, prefer a short public session label and repeat it on every call that\naccepts it. Omit it to use the authenticated transport's implicit lifecycle session.",
+            "type": "string"
+          },
+          "window_id": {
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "pid",
+          "window_id"
+        ],
+        "type": "object"
+      },
+      "success_output_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "pid": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "closed"
+            ],
+            "type": "string"
+          },
+          "window_id": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "status",
+          "pid",
+          "window_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
       "name": "drag",
       "description": "Drag between two absolute points in get_desktop_state coordinates.",
       "platforms": [

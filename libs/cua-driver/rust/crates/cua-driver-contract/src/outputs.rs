@@ -358,6 +358,29 @@ pub struct CursorPositionOutput {
 
 impl ToolOutput for CursorPositionOutput {}
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq, uniffi::Enum)]
+#[serde(rename_all = "snake_case")]
+pub enum CloseWindowStatus {
+    Closed,
+}
+
+/// Successful result of an exact cooperative window close. Refused, missing,
+/// disabled, ambiguous, no-op, and confirmation-required outcomes use the
+/// standard typed refusal envelope instead.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, uniffi::Record)]
+#[serde(deny_unknown_fields)]
+pub struct CloseWindowOutput {
+    pub status: CloseWindowStatus,
+    pub pid: u32,
+    pub window_id: u64,
+}
+
+impl ToolOutput for CloseWindowOutput {
+    fn output_schema() -> Value {
+        output_schema_with_additional_properties::<Self>(false)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, uniffi::Record)]
 pub struct ClipboardReadOutput {
     pub supported: bool,

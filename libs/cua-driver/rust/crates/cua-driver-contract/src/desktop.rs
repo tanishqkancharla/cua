@@ -9,11 +9,11 @@
 
 use crate::{
     ActionResult, ClickInput, ClipboardReadInput, ClipboardReadOutput, ClipboardWriteInput,
-    ClipboardWriteOutput, CursorAction, CursorPositionOutput, CursorSemantics, DesktopStateOutput,
-    DragInput, GetCursorPositionInput, GetDesktopStateInput, GetScreenSizeInput, HotkeyInput,
-    InvokeMenuInput, MoveCursorInput, Platform, PressKeyInput, SchemaMode, ScreenSizeOutput,
-    ScrollInput, SetWindowFrameInput, ToolAnnotations, ToolContract, ToolInput, ToolOutput,
-    TypeTextInput,
+    ClipboardWriteOutput, CloseWindowInput, CloseWindowOutput, CursorAction, CursorPositionOutput,
+    CursorSemantics, DesktopStateOutput, DragInput, GetCursorPositionInput, GetDesktopStateInput,
+    GetScreenSizeInput, HotkeyInput, InvokeMenuInput, MoveCursorInput, Platform, PressKeyInput,
+    SchemaMode, ScreenSizeOutput, ScrollInput, SetWindowFrameInput, ToolAnnotations, ToolContract,
+    ToolInput, ToolOutput, TypeTextInput,
 };
 
 const ALL_PLATFORMS: [Platform; 3] = [Platform::Macos, Platform::Windows, Platform::Linux];
@@ -24,6 +24,7 @@ pub fn contracts() -> Vec<ToolContract> {
         get_screen_size(),
         get_cursor_position(),
         move_cursor(),
+        close_window(),
         set_window_frame(),
         invoke_menu(),
         click(),
@@ -215,6 +216,26 @@ fn set_window_frame() -> ToolContract {
         },
         CursorAction::App,
     )
+}
+
+fn close_window() -> ToolContract {
+    let mut contract = contract::<CloseWindowInput, CloseWindowOutput>(
+        "close_window",
+        "Cooperatively close one exact top-level window without activating it, then independently verify that the original window identity disappeared. The operation never falls back to hotkeys, menu labels, coordinates, or process termination. Missing, mismatched, ambiguous, disabled, unsupported, confirmation-required, and unconfirmed no-op outcomes fail closed.",
+        &["window.close"],
+        ToolAnnotations {
+            read_only: false,
+            destructive: true,
+            idempotent: false,
+            open_world: false,
+        },
+        CursorAction::App,
+    );
+    // Every backend advertises this exact schema. Platforms without a safe
+    // exact-window primitive return the standard structured unsupported
+    // refusal instead of substituting a different close mechanism.
+    contract.schema_mode = SchemaMode::CanonicalRuntime;
+    contract
 }
 
 fn invoke_menu() -> ToolContract {
