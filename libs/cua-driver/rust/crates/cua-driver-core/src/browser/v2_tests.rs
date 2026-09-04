@@ -28,8 +28,8 @@ use super::platform::{
 use super::pointer::BrowserPointerTool;
 use super::refusal::BrowserRefusal;
 use super::tools::{
-    browser_protected_resource_scope, BrowserClickTool, BrowserNavigateTool, BrowserPrepareTool,
-    BrowserTypeTool, GetBrowserStateTool,
+    browser_protected_resource_scope, BrowserClickTool, BrowserKeyTool, BrowserNavigateTool,
+    BrowserPrepareTool, BrowserTypeTool, GetBrowserStateTool,
 };
 use super::types::{
     BrowserClassification, BrowserEngineFamily, BrowserProcessRole, BrowserProduct,
@@ -554,6 +554,15 @@ fn fixture_handler(state: SharedState) -> MockHandler {
                 "frameId": "F_MAIN",
                 "loaderId": "L_MAIN_NAVIGATED",
             })),
+            "Page.getNavigationHistory" if is_tab => MockReply::ok(json!({
+                "currentIndex": 1,
+                "entries": [
+                    { "id": 40, "url": "https://previous.test/path?secret=hidden" },
+                    { "id": 41, "url": "https://fixture.test/" },
+                    { "id": 42, "url": "https://next.test/path?secret=hidden" }
+                ]
+            })),
+            "Page.navigateToHistoryEntry" | "Page.reload" if is_tab => MockReply::ok(json!({})),
             "Target.setAutoAttach" if is_tab => {
                 if call.params["autoAttach"].as_bool() == Some(false) {
                     return MockReply::ok(json!({}));
@@ -1142,6 +1151,15 @@ async fn approved_existing_profile_tools_stay_within_the_reviewed_cdp_surface() 
         }))
         .await;
     assert_eq!(structured(&typed)["status"], "ok", "{}", structured(&typed));
+    let keyed = BrowserKeyTool::new(f.engine.clone())
+        .invoke(json!({
+            "target_id": target,
+            "tab_id": tab,
+            "key": "Escape",
+            "session": SESSION
+        }))
+        .await;
+    assert_eq!(structured(&keyed)["status"], "ok", "{}", structured(&keyed));
     let navigated = BrowserNavigateTool::new(f.engine.clone())
         .invoke(json!({
             "target_id": target,
@@ -1756,6 +1774,183 @@ async fn navigation_targets_an_inactive_tab_without_activating_it() {
     );
     assert!(recorded_calls(&f, "Page.bringToFront").is_empty());
     assert!(recorded_calls(&f, "Target.activateTarget").is_empty());
+}
+
+#[tokio::test]
+async fn history_navigation_targets_only_the_exact_tab_and_does_not_expose_history_urls() {
+    for (action, entry_id) in [("back", 40), ("forward", 42)] {
+        let f = fixture().await;
+        let (target, tab) = bind(&f).await;
+        let result = BrowserNavigateTool::new(f.engine.clone())
+            .invoke(json!({
+                "target_id": target,
+                "tab_id": tab,
+                "action": action,
+                "session": SESSION,
+            }))
+            .await;
+
+        let output = structured(&result);
+        assert_eq!(output["status"], "ok", "{output}");
+        assert_eq!(output["action"], action, "{output}");
+        assert_eq!(output["refs_invalidated"], true, "{output}");
+        assert_eq!(output["history_destination_attested"], true, "{output}");
+        assert_eq!(output["url"], Value::Null, "{output}");
+        assert!(!output.to_string().contains("secret"), "{output}");
+        let calls = recorded_calls(&f, "Page.navigateToHistoryEntry");
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert_eq!(calls[0].1["entryId"], entry_id, "{calls:?}");
+        assert!(recorded_calls(&f, "Page.bringToFront").is_empty());
+        assert!(recorded_calls(&f, "Target.activateTarget").is_empty());
+    }
+}
+
+#[tokio::test]
+async fn reload_targets_only_the_exact_tab() {
+    let f = fixture().await;
+    let (target, tab) = bind(&f).await;
+    let result = BrowserNavigateTool::new(f.engine.clone())
+        .invoke(json!({
+            "target_id": target,
+            "tab_id": tab,
+            "action": "reload",
+            "session": SESSION,
+        }))
+        .await;
+    let output = structured(&result);
+    assert_eq!(output["status"], "ok", "{output}");
+    assert_eq!(output["action"], "reload", "{output}");
+    assert_eq!(output["history_destination_attested"], false, "{output}");
+    assert_eq!(recorded_calls(&f, "Page.reload").len(), 1);
+    assert!(recorded_calls(&f, "Page.bringToFront").is_empty());
+    assert!(recorded_calls(&f, "Target.activateTarget").is_empty());
+}
+
+#[tokio::test]
+async fn history_navigation_scope_attests_only_the_destination_origin() {
+    let f = fixture().await;
+    let (target, tab) = bind(&f).await;
+    let resource = browser_protected_resource_scope(
+        &f.engine,
+        &json!({
+            "target_id": target,
+            "tab_id": tab,
+            "action": "back",
+            "session": SESSION,
+        }),
+        "browser_navigate",
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(resource["live_origin"], "https://fixture.test");
+    assert_eq!(resource["requested_origin"], "https://previous.test");
+    assert!(!resource.to_string().contains("secret"), "{resource}");
+}
+
+#[tokio::test]
+async fn navigation_rejects_ambiguous_or_unknown_request_shapes_before_mutation() {
+    let f = fixture().await;
+    let (target, tab) = bind(&f).await;
+    let tool = BrowserNavigateTool::new(f.engine.clone());
+    for extra in [
+        json!({}),
+        json!({ "url": "https://fixture.test/x", "action": "back" }),
+        json!({ "action": "sideways" }),
+    ] {
+        let mut args = json!({
+            "target_id": target,
+            "tab_id": tab,
+            "session": SESSION,
+        });
+        args.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        assert_eq!(tool.invoke(args).await.is_error, Some(true));
+    }
+    assert!(recorded_calls(&f, "Page.navigate").is_empty());
+    assert!(recorded_calls(&f, "Page.navigateToHistoryEntry").is_empty());
+    assert!(recorded_calls(&f, "Page.reload").is_empty());
+}
+
+#[tokio::test]
+async fn browser_key_focuses_an_exact_ref_and_releases_the_complete_chord() {
+    let f = fixture().await;
+    let (target, tab) = bind(&f).await;
+    let snap = snapshot(&f, &target, &tab).await;
+    let input = ref_of(&snap, "main", "Shadow Input");
+    let result = BrowserKeyTool::new(f.engine.clone())
+        .invoke(json!({
+            "target_id": target,
+            "tab_id": tab,
+            "ref": input,
+            "key": "ctrl+a",
+            "session": SESSION,
+        }))
+        .await;
+    let output = structured(&result);
+    assert_eq!(output["status"], "ok", "{output}");
+    assert_eq!(output["path"], "cdp_input", "{output}");
+    assert_eq!(output["effect"], "unverifiable", "{output}");
+    assert_eq!(recorded_calls(&f, "DOM.focus").len(), 1);
+    let focus = recorded_calls(&f, "Emulation.setFocusEmulationEnabled");
+    assert_eq!(focus.len(), 2, "{focus:?}");
+    assert_eq!(focus[0].1["enabled"], true, "{focus:?}");
+    assert_eq!(focus[1].1["enabled"], false, "{focus:?}");
+    let events = recorded_calls(&f, "Input.dispatchKeyEvent");
+    assert_eq!(events.len(), 4, "{events:?}");
+    assert_eq!(events[0].1["type"], "rawKeyDown", "{events:?}");
+    assert_eq!(events[0].1["key"], "Control", "{events:?}");
+    assert_eq!(events[1].1["type"], "rawKeyDown", "{events:?}");
+    assert_eq!(events[1].1["key"], "a", "{events:?}");
+    assert_eq!(events[2].1["type"], "keyUp", "{events:?}");
+    assert_eq!(events[3].1["type"], "keyUp", "{events:?}");
+    assert_eq!(events[3].1["key"], "Control", "{events:?}");
+    assert_eq!(events[3].1["modifiers"], 0, "{events:?}");
+    assert!(recorded_calls(&f, "Page.bringToFront").is_empty());
+    assert!(recorded_calls(&f, "Target.activateTarget").is_empty());
+}
+
+#[tokio::test]
+async fn browser_key_disables_focus_emulation_after_delivery_failure() {
+    let f = fixture_with(|state| state.fail_key_down_after = Some(0)).await;
+    let (target, tab) = bind(&f).await;
+    let result = BrowserKeyTool::new(f.engine.clone())
+        .invoke(json!({
+            "target_id": target,
+            "tab_id": tab,
+            "key": "a",
+            "session": SESSION,
+        }))
+        .await;
+    let output = structured(&result);
+    assert_eq!(
+        output["refusal"]["code"], "browser_input_incomplete",
+        "{output}"
+    );
+    assert_eq!(output["refusal"]["detail"]["retryable"], false, "{output}");
+    let focus = recorded_calls(&f, "Emulation.setFocusEmulationEnabled");
+    assert_eq!(focus.len(), 2, "{focus:?}");
+    assert_eq!(focus[1].1["enabled"], false, "{focus:?}");
+}
+
+#[tokio::test]
+async fn browser_key_rejects_invalid_chords_before_cdp_input() {
+    let f = fixture().await;
+    let (target, tab) = bind(&f).await;
+    for key in ["", "ctrl+shift", "fn+a", "a+b"] {
+        let result = BrowserKeyTool::new(f.engine.clone())
+            .invoke(json!({
+                "target_id": target,
+                "tab_id": tab,
+                "key": key,
+                "session": SESSION,
+            }))
+            .await;
+        assert_eq!(result.is_error, Some(true), "key={key:?}");
+    }
+    assert!(recorded_calls(&f, "Input.dispatchKeyEvent").is_empty());
+    assert!(recorded_calls(&f, "Emulation.setFocusEmulationEnabled").is_empty());
 }
 
 #[tokio::test]

@@ -1625,6 +1625,7 @@ mod tests {
             "browser_navigate",
             "browser_click",
             "browser_type",
+            "browser_key",
             "browser_set_input_files",
             "browser_download",
             "browser_pointer",

@@ -60,8 +60,11 @@ const EXISTING_PROFILE_METHODS: &[&str] = &[
     "Page.enable",
     "Page.getFrameTree",
     "Page.getLayoutMetrics",
+    "Page.getNavigationHistory",
     "Page.handleJavaScriptDialog",
     "Page.navigate",
+    "Page.navigateToHistoryEntry",
+    "Page.reload",
     "Runtime.callFunctionOn",
     "Runtime.evaluate",
     "Target.activateTarget",
@@ -712,6 +715,12 @@ mod tests {
 
     #[tokio::test]
     async fn existing_profile_policy_rejects_fingerprint_and_interception_methods() {
+        assert!(
+            EXISTING_PROFILE_METHODS
+                .windows(2)
+                .all(|pair| pair[0] < pair[1]),
+            "binary-search policy allowlist must stay sorted and unique"
+        );
         let seen = StdArc::new(StdMutex::new(Vec::<String>::new()));
         let server_seen = seen.clone();
         let server = MockCdpServer::start(StdArc::new(move |call| {
@@ -743,10 +752,27 @@ mod tests {
             "refused methods must not reach the browser socket"
         );
 
-        conn.call(None, "Target.getTargets", json!({}))
-            .await
-            .expect("reviewed method remains available");
-        assert_eq!(&*seen.lock().unwrap(), &["Target.getTargets"]);
+        for method in [
+            "Target.getTargets",
+            "Page.getNavigationHistory",
+            "Page.navigateToHistoryEntry",
+            "Page.reload",
+            "Input.dispatchKeyEvent",
+        ] {
+            conn.call(None, method, json!({}))
+                .await
+                .unwrap_or_else(|error| panic!("reviewed method {method} unavailable: {error}"));
+        }
+        assert_eq!(
+            &*seen.lock().unwrap(),
+            &[
+                "Target.getTargets",
+                "Page.getNavigationHistory",
+                "Page.navigateToHistoryEntry",
+                "Page.reload",
+                "Input.dispatchKeyEvent",
+            ]
+        );
     }
 
     #[tokio::test]

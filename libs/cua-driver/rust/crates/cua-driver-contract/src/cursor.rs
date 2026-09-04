@@ -227,7 +227,9 @@ pub fn classify_cursor_semantics(name: &str, args: &Value) -> Option<CursorSeman
         "drag" | "browser_drag" => CursorAction::Drag,
         "scroll" | "browser_scroll" => CursorAction::Scroll,
         "type_text" | "set_value" | "browser_type" | "browser_fill" => CursorAction::Text,
-        "press_key" | "hotkey" | "browser_press_key" | "browser_hotkey" => CursorAction::Key,
+        "press_key" | "hotkey" | "browser_key" | "browser_press_key" | "browser_hotkey" => {
+            CursorAction::Key
+        }
 
         "move_cursor" | "browser_navigate" | "browser_go_back" | "browser_go_forward"
         | "browser_reload" | "browser_new_tab" | "browser_close_tab" | "browser_select_tab" => {

@@ -407,6 +407,7 @@ pub fn default_capabilities_for(tool_name: &str) -> Vec<String> {
         "browser_navigate" => &["browser.navigate"],
         "browser_click" => &["browser.input.click"],
         "browser_type" => &["browser.input.type"],
+        "browser_key" => &["browser.input.key"],
         "browser_dialog" => &["browser.dialog"],
         "browser_set_input_files" => &["browser.input.files"],
         "browser_download" => &["browser.download"],
@@ -4960,6 +4961,7 @@ mod capability_tests {
         "browser_navigate",
         "browser_click",
         "browser_type",
+        "browser_key",
         "browser_dialog",
         "browser_set_input_files",
         "browser_download",
@@ -5046,6 +5048,7 @@ mod capability_tests {
         "browser.navigate",
         "browser.input.click",
         "browser.input.type",
+        "browser.input.key",
         "browser.input.files",
         "browser.dialog",
         "browser.download",
@@ -5369,7 +5372,13 @@ mod capability_tests {
     fn action_tools_advertise_the_same_closed_output_schema() {
         let expected =
             <cua_driver_contract::ActionResult as cua_driver_contract::ToolOutput>::output_schema();
-        for name in ["click", "browser_click", "browser_pointer", "browser_type"] {
+        for name in [
+            "click",
+            "browser_click",
+            "browser_pointer",
+            "browser_type",
+            "browser_key",
+        ] {
             let entry = action_tool_entry(name);
             // The success variant is unchanged and still closed; it now sits
             // beside the refusal envelope instead of standing alone.

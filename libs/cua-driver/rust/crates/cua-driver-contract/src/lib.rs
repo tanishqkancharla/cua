@@ -91,6 +91,7 @@ pub const ACTION_RESULT_TOOLS: &[&str] = &[
     "browser_click",
     "browser_pointer",
     "browser_type",
+    "browser_key",
 ];
 
 pub fn is_action_result_tool(name: &str) -> bool {

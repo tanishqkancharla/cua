@@ -1,4 +1,4 @@
-//! BrowserEngine — the semantic core behind the five browser tools.
+//! BrowserEngine — the semantic core behind the first-class browser tools.
 //!
 //! Owns the target/ref store, the CDP connection pool, and every
 //! exact-or-refused decision. The platform adapter is consulted for OS
@@ -103,6 +103,23 @@ fn authorize_live_browser_origin(
     manifest
         .authorize_browser_url(live_url)
         .map_err(|error| refuse(BrowserRefusalCode::BrowserOriginOutsideScope, error))
+}
+
+/// Re-check a destination discovered only after browser revalidation (for
+/// example a back/forward history entry) against the current delegated
+/// session. Explicit URL navigation is authorized from its public argument;
+/// history navigation has no caller-provided URL, so it must perform this
+/// second, in-lock check immediately before mutation.
+pub(crate) fn authorize_current_browser_destination(
+    destination_url: &str,
+) -> Result<(), BrowserRefusal> {
+    let Some(context) = crate::tool::current_dispatch_authorization_context() else {
+        return Ok(());
+    };
+    let Some(manifest) = context.capability_manifest() else {
+        return Ok(());
+    };
+    authorize_live_browser_origin(Some(manifest), destination_url)
 }
 
 fn protected_live_origin_scope(raw: &str) -> Result<String, BrowserRefusal> {

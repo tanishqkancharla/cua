@@ -351,6 +351,7 @@ const BROWSER_BOUND_INPUT_OPERATIONS: &[&str] = &[
     "browser_navigate",
     "browser_click",
     "browser_type",
+    "browser_key",
     "browser_pointer",
 ];
 const BROWSER_BOUND_INPUT_SCOPE_KEYS: &[&str] = &[
@@ -922,6 +923,7 @@ pub fn advertised_risk_for(tool: &str) -> RiskAssessment {
         | "browser_navigate"
         | "browser_click"
         | "browser_type"
+        | "browser_key"
         | "browser_pointer"
         | "history_status"
         | "history_query" => RiskClass::R2,

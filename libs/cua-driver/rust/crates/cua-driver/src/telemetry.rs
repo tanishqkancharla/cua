@@ -576,6 +576,7 @@ impl AgentSessionState {
                 | "browser_navigate"
                 | "browser_click"
                 | "browser_type"
+                | "browser_key"
                 | "browser_dialog"
                 | "browser_set_input_files"
                 | "browser_download"

@@ -557,7 +557,7 @@ fn requested_delivery(tool_name: &str, args: &serde_json::Value) -> RequestedDel
         }
         _ if matches!(
             tool_name,
-            "browser_click" | "browser_pointer" | "browser_type"
+            "browser_click" | "browser_pointer" | "browser_type" | "browser_key"
         ) =>
         {
             RequestedDelivery::NotApplicable
@@ -702,6 +702,9 @@ fn transport_from_legacy(
         }
         "dom_event" => ActionTransport::BrowserCdpRuntimeFunction,
         "trusted" => ActionTransport::BrowserCdpInputMouse,
+        "cdp_input" if matches!(tool_name, "browser_type" | "browser_key") => {
+            ActionTransport::BrowserCdpInputKey
+        }
         "key_events" | "key_events_fg" => {
             let foreground = path.ends_with("_fg")
                 || args
@@ -760,7 +763,9 @@ fn transport_from_legacy(
                 ActionTransport::BrowserCdpInputMouse
             }
         }
-        "" if tool_name == "browser_type" => ActionTransport::BrowserCdpInputKey,
+        "" if matches!(tool_name, "browser_type" | "browser_key") => {
+            ActionTransport::BrowserCdpInputKey
+        }
         "" if tool_name == "move_cursor"
             && args.get("scope").and_then(serde_json::Value::as_str) != Some("desktop") =>
         {
@@ -860,7 +865,7 @@ fn actual_delivery_from_legacy(
     }
     if matches!(
         tool_name,
-        "browser_click" | "browser_pointer" | "browser_type"
+        "browser_click" | "browser_pointer" | "browser_type" | "browser_key"
     ) {
         return Some(ActualDelivery::Background);
     }
@@ -1842,6 +1847,7 @@ mod tests {
             "browser_click",
             "browser_pointer",
             "browser_type",
+            "browser_key",
         ];
 
         for tool in tools {
@@ -1860,5 +1866,19 @@ mod tests {
                 .public_result()
                 .unwrap_or_else(|error| panic!("{tool} must publish: {error:?}"));
         }
+    }
+
+    #[test]
+    fn exact_browser_key_uses_the_cdp_keyboard_transport() {
+        let record = ActionExecutionRecord::from_legacy(
+            "browser_key",
+            &serde_json::json!({"key": "private chord"}),
+            &serde_json::json!({"path": "cdp_input", "effect": "unverifiable"}),
+        )
+        .expect("browser key should normalize");
+        assert_eq!(record.transport, ActionTransport::BrowserCdpInputKey);
+        assert_eq!(record.actual_delivery, Some(ActualDelivery::Background));
+        assert_eq!(record.requested_delivery, RequestedDelivery::NotApplicable);
+        assert!(!format!("{record:?}").contains("private chord"));
     }
 }

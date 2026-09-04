@@ -16,7 +16,9 @@ use crate::tool_args::ArgsExt;
 
 use super::cdp_ws::CdpConnection;
 use super::download::BrowserDownloadTool;
-use super::engine::{BrowserEngine, BrowserTabScreenshot};
+use super::engine::{
+    authorize_current_browser_destination, BrowserEngine, BrowserTabScreenshot, ValidatedTab,
+};
 use super::platform::{BrowserVisualActionKind, PrepareProfile, PrepareRequest, PrepareStrategy};
 use super::pointer::BrowserPointerTool;
 use super::refusal::{BrowserRefusal, BrowserRefusalCode};
@@ -33,6 +35,7 @@ pub fn register_browser_tools(engine: &Arc<BrowserEngine>, registry: &mut ToolRe
     registry.register(Box::new(BrowserNavigateTool::new(engine.clone())));
     registry.register(Box::new(BrowserClickTool::new(engine.clone())));
     registry.register(Box::new(BrowserTypeTool::new(engine.clone())));
+    registry.register(Box::new(BrowserKeyTool::new(engine.clone())));
     registry.register(Box::new(BrowserDialogTool::new(engine.clone())));
     registry.register(Box::new(BrowserSetInputFilesTool::new(engine.clone())));
     registry.register(Box::new(BrowserDownloadTool::new(engine.clone())));
@@ -142,17 +145,29 @@ pub(crate) async fn browser_protected_resource_scope(
         .attest_protected_tab(&runtime_session, target_id, tab_id)
         .await
         .map_err(|error| error.message)?;
-    let target = validated.record;
-    let tab = validated.tab;
+    let target = &validated.record;
+    let tab = &validated.tab;
     let requested_origin = if tool_name == "browser_navigate" {
-        let requested = args
-            .get("url")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "browser_navigate requires a destination URL".to_owned())?;
+        let requested = match parse_navigation_request(args).map_err(|error| error.to_string())? {
+            NavigationRequest::Url(url) => url,
+            NavigationRequest::Reload => live_origin.clone(),
+            NavigationRequest::Back => {
+                history_destination(&validated, -1)
+                    .await
+                    .map_err(|error| error.message)?
+                    .url
+            }
+            NavigationRequest::Forward => {
+                history_destination(&validated, 1)
+                    .await
+                    .map_err(|error| error.message)?
+                    .url
+            }
+        };
         if requested.to_ascii_lowercase().starts_with("about:") {
             Some("about:".to_owned())
         } else {
-            let parsed = url::Url::parse(requested)
+            let parsed = url::Url::parse(&requested)
                 .map_err(|_| "the destination URL is invalid".to_owned())?;
             Some(parsed.origin().ascii_serialization())
         }
@@ -739,6 +754,124 @@ impl Tool for BrowserPrepareTool {
 
 // ── browser_navigate ─────────────────────────────────────────────────────────
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NavigationRequest {
+    Url(String),
+    Back,
+    Forward,
+    Reload,
+}
+
+impl NavigationRequest {
+    fn action_name(&self) -> &'static str {
+        match self {
+            Self::Url(_) => "url",
+            Self::Back => "back",
+            Self::Forward => "forward",
+            Self::Reload => "reload",
+        }
+    }
+}
+
+fn parse_navigation_request(args: &Value) -> Result<NavigationRequest, &'static str> {
+    let url = args.get("url").and_then(Value::as_str);
+    let action = args.get("action").and_then(Value::as_str);
+    match (url, action) {
+        (Some(url), None) if !url.is_empty() => Ok(NavigationRequest::Url(url.to_owned())),
+        (None, Some("back")) => Ok(NavigationRequest::Back),
+        (None, Some("forward")) => Ok(NavigationRequest::Forward),
+        (None, Some("reload")) => Ok(NavigationRequest::Reload),
+        (Some(_), Some(_)) => Err("browser_navigate accepts either url or action, not both"),
+        (None, Some(_)) => Err("action must be back, forward, or reload"),
+        _ => Err("browser_navigate requires exactly one of url or action"),
+    }
+}
+
+fn navigation_url_is_supported(url: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    match parsed.scheme() {
+        "http" | "https" => parsed.host_str().is_some(),
+        "about" => true,
+        _ => false,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HistoryDestination {
+    entry_id: i64,
+    url: String,
+}
+
+async fn history_destination(
+    validated: &ValidatedTab,
+    offset: i64,
+) -> Result<HistoryDestination, BrowserRefusal> {
+    let history = validated
+        .conn
+        .call(
+            Some(&validated.cdp_session),
+            "Page.getNavigationHistory",
+            json!({}),
+        )
+        .await
+        .map_err(|error| {
+            BrowserRefusal::new(
+                BrowserRefusalCode::BrowserActionUnavailable,
+                format!("the exact tab's navigation history is unavailable: {error}"),
+            )
+        })?;
+    let current = history
+        .get("currentIndex")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| {
+            BrowserRefusal::new(
+                BrowserRefusalCode::BrowserActionUnavailable,
+                "the exact tab returned malformed navigation history",
+            )
+        })?;
+    let desired = current.checked_add(offset).ok_or_else(|| {
+        BrowserRefusal::new(
+            BrowserRefusalCode::BrowserActionUnavailable,
+            "the requested navigation history direction is unavailable",
+        )
+    })?;
+    let entry = usize::try_from(desired)
+        .ok()
+        .and_then(|index| history.get("entries").and_then(Value::as_array)?.get(index))
+        .ok_or_else(|| {
+            BrowserRefusal::new(
+                BrowserRefusalCode::BrowserActionUnavailable,
+                "the requested navigation history direction is unavailable",
+            )
+        })?;
+    let entry_id = entry.get("id").and_then(Value::as_i64).ok_or_else(|| {
+        BrowserRefusal::new(
+            BrowserRefusalCode::BrowserActionUnavailable,
+            "the exact tab returned a malformed navigation history entry",
+        )
+    })?;
+    let url = entry
+        .get("url")
+        .and_then(Value::as_str)
+        .filter(|url| !url.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            BrowserRefusal::new(
+                BrowserRefusalCode::BrowserActionUnavailable,
+                "the exact tab returned a history entry without a destination URL",
+            )
+        })?;
+    if !navigation_url_is_supported(&url) {
+        return Err(BrowserRefusal::new(
+            BrowserRefusalCode::BrowserActionUnavailable,
+            "the requested history entry is not an http, https, or about destination",
+        ));
+    }
+    Ok(HistoryDestination { entry_id, url })
+}
+
 pub struct BrowserNavigateTool {
     def: ToolDef,
     engine: Arc<BrowserEngine>,
@@ -749,8 +882,10 @@ impl BrowserNavigateTool {
         let def = ToolDef {
             name: "browser_navigate".into(),
             description: "Navigate one tab of an exactly-bound browser target to a \
-                new URL (http/https/about only). Refused for heuristic bindings. \
-                Navigation invalidates all p<snapshot>:<index> refs for the tab."
+                new URL (http/https/about only), backward or forward by one history \
+                entry, or reload it. Pass exactly one of url or action. Refused for \
+                heuristic bindings. Navigation invalidates all p<snapshot>:<index> \
+                refs for the tab."
                 .into(),
             input_schema: json!({
                 "type": "object",
@@ -758,9 +893,14 @@ impl BrowserNavigateTool {
                     "target_id": schema_target_id(),
                     "tab_id": schema_tab_id(),
                     "url": { "type": "string", "description": "Destination URL (http:, https:, or about:)." },
+                    "action": {
+                        "type": "string",
+                        "enum": ["back", "forward", "reload"],
+                        "description": "Exact-tab history or reload action; alternative to url."
+                    },
                     "session": schema_session(),
                 },
-                "required": ["target_id", "tab_id", "url"],
+                "required": ["target_id", "tab_id"],
                 "additionalProperties": true
             }),
             read_only: false,
@@ -803,26 +943,25 @@ impl Tool for BrowserNavigateTool {
     }
 
     async fn invoke(&self, args: Value) -> ToolResult {
-        let (target_id, tab_id, url) = match (
-            args.require_str("target_id"),
-            args.require_str("tab_id"),
-            args.require_str("url"),
-        ) {
-            (Ok(t), Ok(tab), Ok(u)) => (t, tab, u),
-            (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => return e,
+        let (target_id, tab_id) = match (args.require_str("target_id"), args.require_str("tab_id"))
+        {
+            (Ok(t), Ok(tab)) => (t, tab),
+            (Err(e), _) | (_, Err(e)) => return e,
+        };
+        let request = match parse_navigation_request(&args) {
+            Ok(request) => request,
+            Err(error) => return ToolResult::error(error),
         };
         let session = match require_explicit_session(&args) {
             Ok(s) => s,
             Err(e) => return e,
         };
-        let lower = url.to_ascii_lowercase();
-        if !(lower.starts_with("http://")
-            || lower.starts_with("https://")
-            || lower.starts_with("about:"))
-        {
-            return ToolResult::error(format!(
-                "browser_navigate only accepts http/https/about URLs, got: {url}"
-            ));
+        if let NavigationRequest::Url(url) = &request {
+            if !navigation_url_is_supported(url) {
+                return ToolResult::error(format!(
+                    "browser_navigate only accepts http/https/about URLs, got: {url}"
+                ));
+            }
         }
 
         let _mutation = match self
@@ -842,13 +981,32 @@ impl Tool for BrowserNavigateTool {
             Err(refusal) => return refusal.to_tool_result(),
         };
 
+        let (method, params, destination_url) = match &request {
+            NavigationRequest::Url(url) => ("Page.navigate", json!({ "url": url }), None),
+            NavigationRequest::Reload => ("Page.reload", json!({}), None),
+            NavigationRequest::Back | NavigationRequest::Forward => {
+                let offset = if request == NavigationRequest::Back {
+                    -1
+                } else {
+                    1
+                };
+                let destination = match history_destination(&validated, offset).await {
+                    Ok(destination) => destination,
+                    Err(refusal) => return refusal.to_tool_result(),
+                };
+                if let Err(refusal) = authorize_current_browser_destination(&destination.url) {
+                    return refusal.to_tool_result();
+                }
+                (
+                    "Page.navigateToHistoryEntry",
+                    json!({ "entryId": destination.entry_id }),
+                    Some(destination.url),
+                )
+            }
+        };
         match validated
             .conn
-            .call(
-                Some(&validated.cdp_session),
-                "Page.navigate",
-                json!({ "url": url }),
-            )
+            .call(Some(&validated.cdp_session), method, params)
             .await
         {
             Ok(result) => {
@@ -859,15 +1017,22 @@ impl Tool for BrowserNavigateTool {
                 self.engine
                     .store
                     .invalidate_tab_snapshots(&session, &target_id, &tab_id);
-                ToolResult::text(format!("navigated {tab_id} to {url}")).with_structured(json!({
+                let action = request.action_name();
+                let text = match &request {
+                    NavigationRequest::Url(url) => format!("navigated {tab_id} to {url}"),
+                    _ => format!("performed exact-tab {action} in {tab_id}"),
+                };
+                ToolResult::text(text).with_structured(json!({
                     "status": "ok",
                     "target_id": target_id,
                     "tab_id": tab_id,
-                    "url": url,
+                    "url": match &request { NavigationRequest::Url(url) => Some(url), _ => None },
+                    "action": action,
+                    "history_destination_attested": destination_url.is_some(),
                     "refs_invalidated": true,
                 }))
             }
-            Err(e) => ToolResult::error(format!("Page.navigate failed: {e}")),
+            Err(e) => ToolResult::error(format!("{method} failed: {e}")),
         }
     }
 }
@@ -2064,6 +2229,512 @@ impl Tool for BrowserTypeTool {
     }
 }
 
+// ── browser_key ──────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BrowserKeyRequest {
+    key: String,
+    code: String,
+    virtual_key_code: Option<u32>,
+    text: String,
+    modifiers: Vec<CdpModifier>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CdpModifier {
+    Alt,
+    Control,
+    Meta,
+    Shift,
+}
+
+impl CdpModifier {
+    fn bit(self) -> u8 {
+        match self {
+            Self::Alt => 1,
+            Self::Control => 2,
+            Self::Meta => 4,
+            Self::Shift => 8,
+        }
+    }
+
+    fn cdp_identity(self) -> (&'static str, &'static str, u32) {
+        match self {
+            Self::Alt => ("Alt", "AltLeft", 18),
+            Self::Control => ("Control", "ControlLeft", 17),
+            Self::Meta => ("Meta", "MetaLeft", 91),
+            Self::Shift => ("Shift", "ShiftLeft", 16),
+        }
+    }
+}
+
+fn parse_modifier(value: &str) -> Result<CdpModifier, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "alt" | "option" => Ok(CdpModifier::Alt),
+        "ctrl" | "control" => Ok(CdpModifier::Control),
+        "cmd" | "command" | "meta" | "super" | "win" | "windows" => Ok(CdpModifier::Meta),
+        "shift" => Ok(CdpModifier::Shift),
+        "fn" => Err("browser_key cannot represent the hardware Fn modifier through CDP".into()),
+        other => Err(format!("unsupported browser_key modifier {other:?}")),
+    }
+}
+
+fn key_identity(raw: &str) -> Result<(String, String, Option<u32>, String), String> {
+    let lower = raw.trim().to_ascii_lowercase();
+    let named = match lower.as_str() {
+        "return" | "enter" | "kp_enter" => Some(("Enter", "Enter", 13, "\r")),
+        "tab" => Some(("Tab", "Tab", 9, "")),
+        "escape" | "esc" => Some(("Escape", "Escape", 27, "")),
+        "space" | "spacebar" => Some((" ", "Space", 32, " ")),
+        "backspace" | "back_space" => Some(("Backspace", "Backspace", 8, "")),
+        "delete" | "del" => Some(("Delete", "Delete", 46, "")),
+        "home" => Some(("Home", "Home", 36, "")),
+        "end" => Some(("End", "End", 35, "")),
+        "pageup" | "page_up" | "prior" => Some(("PageUp", "PageUp", 33, "")),
+        "pagedown" | "page_down" | "next" => Some(("PageDown", "PageDown", 34, "")),
+        "left" | "arrowleft" | "leftarrow" => Some(("ArrowLeft", "ArrowLeft", 37, "")),
+        "up" | "arrowup" | "uparrow" => Some(("ArrowUp", "ArrowUp", 38, "")),
+        "right" | "arrowright" | "rightarrow" => Some(("ArrowRight", "ArrowRight", 39, "")),
+        "down" | "arrowdown" | "downarrow" => Some(("ArrowDown", "ArrowDown", 40, "")),
+        "plus" => Some(("+", "Equal", 187, "+")),
+        "minus" => Some(("-", "Minus", 189, "-")),
+        "comma" => Some((",", "Comma", 188, ",")),
+        "period" => Some((".", "Period", 190, ".")),
+        _ => None,
+    };
+    if let Some((key, code, virtual_key_code, text)) = named {
+        return Ok((
+            key.to_owned(),
+            code.to_owned(),
+            Some(virtual_key_code),
+            text.to_owned(),
+        ));
+    }
+    if let Some(number) = lower
+        .strip_prefix('f')
+        .and_then(|value| value.parse::<u32>().ok())
+    {
+        if (1..=24).contains(&number) {
+            return Ok((
+                format!("F{number}"),
+                format!("F{number}"),
+                Some(111 + number),
+                String::new(),
+            ));
+        }
+    }
+    if let Some(number) = lower
+        .strip_prefix("kp_")
+        .or_else(|| lower.strip_prefix("kp-"))
+        .and_then(|value| value.parse::<u32>().ok())
+    {
+        if number <= 9 {
+            return Ok((
+                number.to_string(),
+                format!("Numpad{number}"),
+                Some(96 + number),
+                number.to_string(),
+            ));
+        }
+    }
+    let mut chars = raw.chars();
+    let Some(character) = chars.next() else {
+        return Err("browser_key requires a non-empty key".into());
+    };
+    if chars.next().is_some() {
+        return Err(format!("unsupported browser_key key {raw:?}"));
+    }
+    let key = character.to_string();
+    let code = if character.is_ascii_alphabetic() {
+        format!("Key{}", character.to_ascii_uppercase())
+    } else if character.is_ascii_digit() {
+        format!("Digit{character}")
+    } else {
+        String::new()
+    };
+    let virtual_key_code = character
+        .is_ascii_alphanumeric()
+        .then_some(character.to_ascii_uppercase() as u32);
+    Ok((key.clone(), code, virtual_key_code, key))
+}
+
+fn parse_browser_key(args: &Value) -> Result<BrowserKeyRequest, String> {
+    let raw = args
+        .get("key")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "browser_key requires a non-empty key".to_owned())?;
+    let parts: Vec<&str> = if raw == "+" {
+        vec!["plus"]
+    } else if raw.contains('+') {
+        raw.split('+')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .collect()
+    } else {
+        vec![raw]
+    };
+    let mut modifiers = Vec::new();
+    let mut base = None;
+    for part in parts {
+        match parse_modifier(part) {
+            Ok(modifier) => {
+                if !modifiers.contains(&modifier) {
+                    modifiers.push(modifier);
+                }
+            }
+            Err(_) if base.is_none() => base = Some(part),
+            Err(_) => return Err("browser_key accepts exactly one non-modifier key".into()),
+        }
+    }
+    for raw_modifier in args.str_array("modifiers") {
+        let modifier = parse_modifier(&raw_modifier)?;
+        if !modifiers.contains(&modifier) {
+            modifiers.push(modifier);
+        }
+    }
+    let base = base.ok_or_else(|| "browser_key requires one non-modifier key".to_owned())?;
+    let (mut key, code, virtual_key_code, mut text) = key_identity(base)?;
+    if modifiers.contains(&CdpModifier::Shift) && key.len() == 1 && key.is_ascii() {
+        key.make_ascii_uppercase();
+        text.make_ascii_uppercase();
+    }
+    if modifiers.iter().any(|modifier| {
+        matches!(
+            modifier,
+            CdpModifier::Alt | CdpModifier::Control | CdpModifier::Meta
+        )
+    }) {
+        text.clear();
+    }
+    Ok(BrowserKeyRequest {
+        key,
+        code,
+        virtual_key_code,
+        text,
+        modifiers,
+    })
+}
+
+async fn dispatch_browser_key(
+    conn: &CdpConnection,
+    cdp_session: &str,
+    request: &BrowserKeyRequest,
+) -> Result<(), String> {
+    let mut mask = 0_u8;
+    let mut pressed = Vec::new();
+    for modifier in &request.modifiers {
+        mask |= modifier.bit();
+        let (key, code, virtual_key_code) = modifier.cdp_identity();
+        if let Err(error) = conn
+            .call(
+                Some(cdp_session),
+                "Input.dispatchKeyEvent",
+                json!({
+                    "type": "rawKeyDown", "key": key, "code": code,
+                    "windowsVirtualKeyCode": virtual_key_code,
+                    "nativeVirtualKeyCode": virtual_key_code,
+                    "modifiers": mask,
+                }),
+            )
+            .await
+        {
+            // The failed modifier was never acknowledged, so do not include
+            // its bit while releasing the already-pressed prefix.
+            let cleanup =
+                release_browser_modifiers(conn, cdp_session, &pressed, mask & !modifier.bit())
+                    .await;
+            return Err(join_key_cleanup_error(
+                format!("modifier key-down failed: {error}"),
+                cleanup,
+            ));
+        }
+        pressed.push(*modifier);
+    }
+    let mut down = json!({
+        "type": if request.text.is_empty() { "rawKeyDown" } else { "keyDown" },
+        "key": request.key,
+        "code": request.code,
+        "modifiers": mask,
+    });
+    if let Some(virtual_key_code) = request.virtual_key_code {
+        down["windowsVirtualKeyCode"] = json!(virtual_key_code);
+        down["nativeVirtualKeyCode"] = json!(virtual_key_code);
+    }
+    if !request.text.is_empty() {
+        down["text"] = json!(request.text);
+        down["unmodifiedText"] = json!(request.text);
+    }
+    let down_result = conn
+        .call(Some(cdp_session), "Input.dispatchKeyEvent", down)
+        .await;
+    let up_result = if down_result.is_ok() {
+        let mut up = json!({
+            "type": "keyUp", "key": request.key, "code": request.code, "modifiers": mask,
+        });
+        if let Some(virtual_key_code) = request.virtual_key_code {
+            up["windowsVirtualKeyCode"] = json!(virtual_key_code);
+            up["nativeVirtualKeyCode"] = json!(virtual_key_code);
+        }
+        conn.call(Some(cdp_session), "Input.dispatchKeyEvent", up)
+            .await
+    } else {
+        Ok(json!({}))
+    };
+    let cleanup = release_browser_modifiers(conn, cdp_session, &pressed, mask).await;
+    match (down_result, up_result, cleanup.is_empty()) {
+        (Ok(_), Ok(_), true) => Ok(()),
+        (Err(error), _, _) => Err(join_key_cleanup_error(
+            format!("base key-down failed: {error}"),
+            cleanup,
+        )),
+        (Ok(_), Err(error), _) => Err(join_key_cleanup_error(
+            format!("base key-up failed after key-down was acknowledged: {error}"),
+            cleanup,
+        )),
+        (Ok(_), Ok(_), false) => Err(join_key_cleanup_error(
+            "base key was acknowledged but modifier cleanup failed".to_owned(),
+            cleanup,
+        )),
+    }
+}
+
+async fn release_browser_modifiers(
+    conn: &CdpConnection,
+    cdp_session: &str,
+    pressed: &[CdpModifier],
+    mut mask: u8,
+) -> Vec<String> {
+    let mut errors = Vec::new();
+    for modifier in pressed.iter().rev() {
+        mask &= !modifier.bit();
+        let (key, code, virtual_key_code) = modifier.cdp_identity();
+        if let Err(error) = conn
+            .call(
+                Some(cdp_session),
+                "Input.dispatchKeyEvent",
+                json!({
+                    "type": "keyUp", "key": key, "code": code,
+                    "windowsVirtualKeyCode": virtual_key_code,
+                    "nativeVirtualKeyCode": virtual_key_code,
+                    "modifiers": mask,
+                }),
+            )
+            .await
+        {
+            errors.push(format!("{key} key-up failed: {error}"));
+        }
+    }
+    errors
+}
+
+fn join_key_cleanup_error(primary: String, cleanup: Vec<String>) -> String {
+    if cleanup.is_empty() {
+        primary
+    } else {
+        format!("{primary}; cleanup was incomplete: {}", cleanup.join("; "))
+    }
+}
+
+pub struct BrowserKeyTool {
+    def: ToolDef,
+    engine: Arc<BrowserEngine>,
+}
+
+impl BrowserKeyTool {
+    pub fn new(engine: Arc<BrowserEngine>) -> Self {
+        Self {
+            def: ToolDef {
+                name: "browser_key".into(),
+                description: "Press one xdotool-style key or modifier combination in an exactly-bound browser tab through trusted CDP Input events. The event is delivered to the page's current focus without activating browser chrome. Optionally pass a current type-capable semantic ref to focus that exact editable node first. Browser-level shortcuts are not emulated; use browser_navigate for back, forward, and reload.".into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "target_id": schema_target_id(),
+                        "tab_id": schema_tab_id(),
+                        "session": schema_session(),
+                        "key": { "type": "string", "description": "One key or combination, for example Return, Tab, Escape, super+v, ctrl+a, Up, F5, or KP_0." },
+                        "modifiers": { "type": "array", "items": { "type": "string" }, "description": "Optional modifier aliases; equivalent to including them in key." },
+                        "ref": schema_ref()
+                    },
+                    "required": ["target_id", "tab_id", "key"],
+                    "additionalProperties": true
+                }),
+                read_only: false,
+                destructive: false,
+                idempotent: false,
+                open_world: true,
+            },
+            engine,
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for BrowserKeyTool {
+    fn def(&self) -> &ToolDef {
+        &self.def
+    }
+
+    async fn protected_resource_ownership(
+        &self,
+        adapter_id: &str,
+        args: &Value,
+    ) -> ProtectedResourceOwnership {
+        if adapter_id == "browser_bound_input" {
+            browser_resource_ownership(&self.engine, args)
+        } else {
+            ProtectedResourceOwnership::UserOwned
+        }
+    }
+
+    async fn protected_resource_scope(
+        &self,
+        adapter_id: &str,
+        args: &Value,
+    ) -> Result<Option<Value>, String> {
+        if adapter_id == "browser_bound_input" {
+            browser_protected_resource_scope(&self.engine, args, "browser_key").await
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn invoke(&self, args: Value) -> ToolResult {
+        let (target_id, tab_id) = match (args.require_str("target_id"), args.require_str("tab_id"))
+        {
+            (Ok(target), Ok(tab)) => (target, tab),
+            (Err(error), _) | (_, Err(error)) => return error,
+        };
+        let session = match require_explicit_session(&args) {
+            Ok(session) => session,
+            Err(error) => return error,
+        };
+        let request = match parse_browser_key(&args) {
+            Ok(request) => request,
+            Err(error) => return ToolResult::error(error),
+        };
+        let _mutation = match self
+            .engine
+            .lock_mutation(&session, &target_id, &tab_id)
+            .await
+        {
+            Ok(guard) => guard,
+            Err(refusal) => return refusal.to_tool_result(),
+        };
+        let validated = match self
+            .engine
+            .revalidate_for_mutation(&session, &target_id, Some(&tab_id))
+            .await
+        {
+            Ok(validated) => validated,
+            Err(refusal) => return refusal.to_tool_result(),
+        };
+        let mut cdp_session = validated.cdp_session.clone();
+        let mut external_ref = None;
+        if let Some(reference) = args.opt_str("ref") {
+            let entry = match self
+                .engine
+                .store
+                .resolve_ref(&session, &target_id, &tab_id, &reference)
+            {
+                Ok(entry) => entry,
+                Err(refusal) => return refusal.to_tool_result(),
+            };
+            if entry.semantic && !entry.actions.contains(&BrowserActionKind::Type) {
+                return BrowserRefusal::new(
+                    BrowserRefusalCode::BrowserActionUnavailable,
+                    format!("semantic ref {reference} does not declare the type action"),
+                )
+                .to_tool_result();
+            }
+            cdp_session = match self
+                .engine
+                .frame_session_for_mutation(&session, &target_id, &tab_id, &validated, &entry.frame)
+                .await
+            {
+                Ok(cdp_session) => cdp_session,
+                Err(refusal) => return refusal.to_tool_result(),
+            };
+            if let Err(error) = validated
+                .conn
+                .call(
+                    Some(&cdp_session),
+                    "DOM.focus",
+                    json!({ "backendNodeId": entry.backend_node_id }),
+                )
+                .await
+            {
+                return BrowserRefusal::new(
+                    BrowserRefusalCode::BrowserRefStale,
+                    format!("the key target can no longer be focused: {error}"),
+                )
+                .to_tool_result();
+            }
+            external_ref = Some(reference);
+        }
+        if let Err(error) = validated
+            .conn
+            .call(
+                Some(&cdp_session),
+                "Emulation.setFocusEmulationEnabled",
+                json!({ "enabled": true }),
+            )
+            .await
+        {
+            return BrowserRefusal::new(
+                BrowserRefusalCode::BrowserInputTrustUnavailable,
+                format!("the exact tab could not enter CDP focus emulation: {error}"),
+            )
+            .to_tool_result();
+        }
+        let delivered = dispatch_browser_key(&validated.conn, &cdp_session, &request).await;
+        let cleanup = validated
+            .conn
+            .call(
+                Some(&cdp_session),
+                "Emulation.setFocusEmulationEnabled",
+                json!({ "enabled": false }),
+            )
+            .await;
+        match (delivered, cleanup) {
+            (Ok(()), Ok(_)) => ToolResult::text(format!(
+                "pressed {} in exact tab {tab_id}",
+                request.key
+            ))
+            .with_structured(json!({
+                "status": "ok",
+                "target_id": target_id,
+                "tab_id": tab_id,
+                "ref": external_ref,
+                "key": request.key,
+                "modifier_count": request.modifiers.len(),
+                "path": "cdp_input",
+                "effect": "unverifiable",
+            })),
+            (Err(error), Ok(_)) => BrowserRefusal::new(
+                BrowserRefusalCode::BrowserInputIncomplete,
+                format!("exact-tab key delivery was not completed: {error}"),
+            )
+            .with_detail(json!({ "delivery": "unknown", "retryable": false }))
+            .to_tool_result(),
+            (Err(error), Err(cleanup_error)) => BrowserRefusal::new(
+                BrowserRefusalCode::BrowserInputTrustUnavailable,
+                format!("exact-tab key delivery was not completed ({error}) and focus emulation could not be restored ({cleanup_error}); delivery is unknown and must not be retried automatically"),
+            )
+            .with_detail(json!({ "delivery": "unknown", "retryable": false }))
+            .to_tool_result(),
+            (Ok(()), Err(error)) => BrowserRefusal::new(
+                BrowserRefusalCode::BrowserInputTrustUnavailable,
+                format!("the key was acknowledged but focus emulation could not be restored ({error}); delivery is unknown and must not be retried automatically"),
+            )
+            .with_detail(json!({ "delivery": "unknown", "retryable": false }))
+            .to_tool_result(),
+        }
+    }
+}
+
 // ── browser_dialog ──────────────────────────────────────────────────────────
 
 pub struct BrowserDialogTool {
@@ -2682,6 +3353,7 @@ mod tests {
                 BrowserTypeTool::new(e.clone()).def().clone(),
                 "browser_type",
             ),
+            (BrowserKeyTool::new(e.clone()).def().clone(), "browser_key"),
             (
                 BrowserDialogTool::new(e.clone()).def().clone(),
                 "browser_dialog",
@@ -2710,6 +3382,7 @@ mod tests {
             BrowserNavigateTool::new(e.clone()).def().clone(),
             BrowserClickTool::new(e.clone()).def().clone(),
             BrowserTypeTool::new(e.clone()).def().clone(),
+            BrowserKeyTool::new(e.clone()).def().clone(),
             BrowserDialogTool::new(e.clone()).def().clone(),
             BrowserSetInputFilesTool::new(e.clone()).def().clone(),
             BrowserDownloadTool::new(e.clone()).def().clone(),
@@ -2734,12 +3407,33 @@ mod tests {
                 "browser_navigate",
                 "browser_click",
                 "browser_type",
+                "browser_key",
                 "browser_dialog",
                 "browser_set_input_files",
                 "browser_download",
                 "browser_pointer"
             ]
         );
+    }
+
+    #[test]
+    fn browser_key_parser_normalizes_common_chords_without_guessing_layout_punctuation() {
+        let control = parse_browser_key(&json!({"key": "CTRL+a"})).unwrap();
+        assert_eq!(control.key, "a");
+        assert_eq!(control.code, "KeyA");
+        assert!(control.text.is_empty());
+        assert_eq!(control.modifiers, vec![CdpModifier::Control]);
+
+        let shifted = parse_browser_key(&json!({"key": "shift+a"})).unwrap();
+        assert_eq!(shifted.key, "A");
+        assert_eq!(shifted.text, "A");
+
+        let tab = parse_browser_key(&json!({"key": "Tab"})).unwrap();
+        assert!(tab.text.is_empty());
+
+        let punctuation = parse_browser_key(&json!({"key": "@"})).unwrap();
+        assert_eq!(punctuation.text, "@");
+        assert_eq!(punctuation.virtual_key_code, None);
     }
 
     #[test]
@@ -3008,13 +3702,15 @@ mod tests {
     #[tokio::test]
     async fn mutations_reject_bad_url_and_bad_route_before_binding() {
         let e = engine();
-        let nav = BrowserNavigateTool::new(e.clone())
-            .invoke(json!({
-                "target_id": "bt1", "tab_id": "tab1", "url": "file:///etc/passwd",
-                "_session_id": "run-1"
-            }))
-            .await;
-        assert_eq!(nav.is_error, Some(true));
+        for url in ["file:///etc/passwd", "https://"] {
+            let nav = BrowserNavigateTool::new(e.clone())
+                .invoke(json!({
+                    "target_id": "bt1", "tab_id": "tab1", "url": url,
+                    "_session_id": "run-1"
+                }))
+                .await;
+            assert_eq!(nav.is_error, Some(true), "url={url}");
+        }
 
         let click = BrowserClickTool::new(e)
             .invoke(json!({
