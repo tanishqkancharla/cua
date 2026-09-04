@@ -194,7 +194,7 @@ pub(crate) async fn browser_protected_resource_scope(
 }
 
 fn semantic_ref_value(listed: &super::engine::SemanticListedRef) -> Value {
-    json!({
+    let mut value = json!({
         "ref": listed.external,
         "role": listed.node.role,
         "name": listed.node.name,
@@ -203,7 +203,14 @@ fn semantic_ref_value(listed: &super::engine::SemanticListedRef) -> Value {
         "actions": listed.node.actions.iter().map(|action| action.as_str()).collect::<Vec<_>>(),
         "frame": listed.node.frame.kind.as_str(),
         "visibility": listed.node.visibility.as_str(),
-    })
+    });
+    // Page-authored destination text is observational metadata only. Ref
+    // resolution and action authorization continue to use the opaque ref and
+    // the internally stored capability record, never this URL.
+    if let Some(destination_url) = &listed.node.destination_url {
+        value["url"] = Value::String(destination_url.clone());
+    }
+    value
 }
 
 fn with_tab_screenshot(mut result: ToolResult, screenshot: BrowserTabScreenshot) -> ToolResult {
@@ -2470,11 +2477,40 @@ impl Tool for BrowserSetInputFilesTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+
     use crate::browser::platform::{BrowserPlatform, PrepareOutcome, PrepareRequest};
     use crate::browser::types::{
         BrowserClassification, BrowserEngineFamily, BrowserProduct, NativeWindowInfo,
         OwnedEndpoint, ProcessFingerprint,
     };
+
+    #[test]
+    fn semantic_ref_serializes_link_destination_as_metadata() {
+        let listed = crate::browser::engine::SemanticListedRef {
+            external: "p7:0".to_owned(),
+            node: crate::browser::semantic::SemanticNode {
+                ax_id: "link".to_owned(),
+                parent_ax_id: None,
+                child_ax_ids: Vec::new(),
+                backend_node_id: Some(42),
+                role: "link".to_owned(),
+                name: Some("Documentation".to_owned()),
+                value: None,
+                destination_url: Some("https://example.test/docs".to_owned()),
+                states: BTreeMap::new(),
+                frame: crate::browser::store::FrameRef::main_unproven(),
+                visibility: crate::browser::store::BrowserVisibility::InViewport,
+                actions: vec![crate::browser::store::BrowserActionKind::Click],
+                document_order: 0,
+            },
+        };
+
+        let serialized = semantic_ref_value(&listed);
+        assert_eq!(serialized["url"], "https://example.test/docs");
+        assert_eq!(serialized["actions"], json!(["click"]));
+        assert_eq!(serialized["ref"], "p7:0");
+    }
 
     /// Minimal adapter: pid 1 is a CDP-capable browser with no endpoint
     /// (setup required); pid 2 is not a browser; pid 3 is Safari-like

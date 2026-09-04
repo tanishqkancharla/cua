@@ -9,6 +9,7 @@ use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde_json::Value;
+use url::Url;
 
 use super::store::{BrowserActionKind, BrowserVisibility, FrameRef, RefEntry};
 
@@ -26,6 +27,7 @@ pub(crate) const SEMANTIC_COMPUTED_STYLES: &[&str] = &[
 pub(crate) const DEFAULT_SEMANTIC_NODE_BUDGET: usize = 300;
 const NEAR_VIEWPORT_MARGIN: f64 = 1_000.0;
 const MAX_SEMANTIC_TEXT_CHARS: usize = 1_000;
+const MAX_LINK_DESTINATION_CHARS: usize = 2_048;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Rect {
@@ -78,6 +80,7 @@ impl Rect {
 struct DomMeta {
     tag: String,
     attrs: HashMap<String, String>,
+    destination_url: Option<String>,
     order: usize,
     css_hidden: bool,
     parent_backend_node_id: Option<i64>,
@@ -118,6 +121,9 @@ pub(crate) struct SemanticNode {
     pub(crate) role: String,
     pub(crate) name: Option<String>,
     pub(crate) value: Option<String>,
+    /// Display-only page-authored metadata. This is never consulted when a
+    /// ref is resolved or when its mutation capabilities are checked.
+    pub(crate) destination_url: Option<String>,
     pub(crate) states: BTreeMap<String, Value>,
     pub(crate) frame: FrameRef,
     pub(crate) visibility: BrowserVisibility,
@@ -280,6 +286,7 @@ pub(crate) fn build_dom_index(root: &Value) -> DomIndex {
         inherited_hidden: bool,
         parent_backend_node_id: Option<i64>,
         inherited_frame_id: Option<&str>,
+        inherited_base_url: Option<&Url>,
         order: &mut usize,
         index: &mut DomIndex,
     ) {
@@ -291,6 +298,19 @@ pub(crate) fn build_dom_index(root: &Value) -> DomIndex {
             node.get("frameId").and_then(Value::as_str)
         } else {
             inherited_frame_id
+        };
+        let document_base_url = (node_type == 9)
+            .then(|| {
+                node.get("baseURL")
+                    .or_else(|| node.get("documentURL"))
+                    .and_then(Value::as_str)
+                    .and_then(|value| Url::parse(value).ok())
+            })
+            .flatten();
+        let base_url = if node_type == 9 {
+            document_base_url.as_ref()
+        } else {
+            inherited_base_url
         };
         if let Some(backend) = backend_node_id {
             let tag = node
@@ -305,6 +325,9 @@ pub(crate) fn build_dom_index(root: &Value) -> DomIndex {
                 backend,
                 DomMeta {
                     tag,
+                    destination_url: attrs
+                        .get("href")
+                        .and_then(|href| resolve_link_destination(href, base_url)),
                     attrs,
                     order: *order,
                     css_hidden: hidden,
@@ -321,6 +344,7 @@ pub(crate) fn build_dom_index(root: &Value) -> DomIndex {
                     hidden,
                     backend_node_id.or(parent_backend_node_id),
                     frame_id,
+                    base_url,
                     order,
                     index,
                 );
@@ -336,6 +360,7 @@ pub(crate) fn build_dom_index(root: &Value) -> DomIndex {
                     hidden,
                     backend_node_id.or(parent_backend_node_id),
                     frame_id,
+                    base_url,
                     order,
                     index,
                 );
@@ -347,6 +372,7 @@ pub(crate) fn build_dom_index(root: &Value) -> DomIndex {
                 hidden,
                 backend_node_id.or(parent_backend_node_id),
                 content_document.get("frameId").and_then(Value::as_str),
+                None,
                 order,
                 index,
             );
@@ -360,10 +386,36 @@ pub(crate) fn build_dom_index(root: &Value) -> DomIndex {
         false,
         None,
         root.get("frameId").and_then(Value::as_str),
+        None,
         &mut order,
         &mut index,
     );
     index
+}
+
+fn resolve_link_destination(raw: &str, base_url: Option<&Url>) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty() || raw.len() > MAX_LINK_DESTINATION_CHARS {
+        return None;
+    }
+    let resolved = Url::parse(raw)
+        .or_else(|_| {
+            base_url
+                .ok_or(url::ParseError::RelativeUrlWithoutBase)?
+                .join(raw)
+        })
+        .ok()?;
+    if !matches!(resolved.scheme(), "http" | "https" | "about" | "mailto") {
+        return None;
+    }
+    if matches!(resolved.scheme(), "http" | "https") && resolved.host_str().is_none() {
+        return None;
+    }
+    if !resolved.username().is_empty() || resolved.password().is_some() {
+        return None;
+    }
+    let destination = resolved.to_string();
+    (destination.len() <= MAX_LINK_DESTINATION_CHARS).then_some(destination)
 }
 
 pub(crate) fn build_layout_index(snapshot: &Value) -> LayoutIndex {
@@ -525,6 +577,9 @@ pub(crate) fn compose_accessibility_tree(
         let actions = action_kinds(&role, dom_meta, &states, layout_meta);
         let name = ax_value_string(ax.get("name")).and_then(clean_semantic_text);
         let value = ax_value_string(ax.get("value")).and_then(clean_semantic_text);
+        let destination_url = (role == "link")
+            .then(|| dom_meta.and_then(|meta| meta.destination_url.clone()))
+            .flatten();
         let document_order = dom_meta.map_or(fallback_order, |meta| meta.order);
         nodes.push(SemanticNode {
             ax_id,
@@ -546,6 +601,7 @@ pub(crate) fn compose_accessibility_tree(
             role,
             name,
             value,
+            destination_url,
             states,
             frame: frame.clone(),
             visibility,
@@ -710,6 +766,9 @@ fn supplement_dom_actions(
             .iter()
             .find_map(|key| meta.attrs.get(*key).cloned())
             .and_then(clean_semantic_text);
+        let destination_url = (role == "link")
+            .then(|| meta.destination_url.clone())
+            .flatten();
         nodes.push(SemanticNode {
             ax_id: format!("dom-{backend_node_id}"),
             parent_ax_id: meta
@@ -724,6 +783,7 @@ fn supplement_dom_actions(
                 .get("value")
                 .cloned()
                 .and_then(clean_semantic_text),
+            destination_url,
             states,
             frame: frame.clone(),
             visibility,
@@ -1207,6 +1267,7 @@ mod tests {
         let dom = DomMeta {
             tag: "input".into(),
             attrs: HashMap::from([("type".into(), "file".into())]),
+            destination_url: None,
             order: 0,
             css_hidden: false,
             parent_backend_node_id: None,
@@ -1216,6 +1277,76 @@ mod tests {
             action_kinds("textbox", Some(&dom), &BTreeMap::new(), None),
             vec![BrowserActionKind::Upload]
         );
+    }
+
+    #[test]
+    fn link_destinations_are_resolved_and_limited_to_observational_schemes() {
+        let base = Url::parse("https://fixture.test/inbox/item-2").unwrap();
+        assert_eq!(
+            resolve_link_destination("../archive?view=all#today", Some(&base)).as_deref(),
+            Some("https://fixture.test/archive?view=all#today")
+        );
+        assert_eq!(
+            resolve_link_destination("mailto:help@example.test", Some(&base)).as_deref(),
+            Some("mailto:help@example.test")
+        );
+        assert_eq!(
+            resolve_link_destination("about:blank", Some(&base)).as_deref(),
+            Some("about:blank")
+        );
+        for unsafe_destination in [
+            "javascript:alert(1)",
+            "data:text/plain,secret",
+            "file:///etc/passwd",
+            "https://user:password@example.test/private",
+        ] {
+            assert_eq!(
+                resolve_link_destination(unsafe_destination, Some(&base)),
+                None,
+                "unexpected destination metadata for {unsafe_destination}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_semantic_links_inherit_dom_destination_metadata() {
+        let dom = build_dom_index(&json!({
+            "nodeType": 9,
+            "baseURL": "https://fixture.test/base/",
+            "children": [
+                {"nodeType": 1, "nodeName": "A", "backendNodeId": 1,
+                 "attributes": ["href", "reports/latest"]},
+                {"nodeType": 1, "nodeName": "BUTTON", "backendNodeId": 2,
+                 "attributes": ["href", "should-not-surface"]}
+            ]
+        }));
+        let document = compose_accessibility_tree(
+            &json!({"nodes": [
+                {"nodeId": "link", "ignored": false, "backendDOMNodeId": 1,
+                 "role": {"value": "link"}, "name": {"value": "Latest report"}},
+                {"nodeId": "button", "ignored": false, "backendDOMNodeId": 2,
+                 "role": {"value": "button"}, "name": {"value": "Odd button"}}
+            ]}),
+            &dom,
+            &LayoutIndex::default(),
+            &Viewport::default(),
+            frame(),
+        );
+        let link = document
+            .nodes
+            .iter()
+            .find(|node| node.ax_id == "link")
+            .unwrap();
+        let button = document
+            .nodes
+            .iter()
+            .find(|node| node.ax_id == "button")
+            .unwrap();
+        assert_eq!(
+            link.destination_url.as_deref(),
+            Some("https://fixture.test/base/reports/latest")
+        );
+        assert_eq!(button.destination_url, None);
     }
     use crate::browser::store::FrameRef;
 
