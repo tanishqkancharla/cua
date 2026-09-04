@@ -555,6 +555,7 @@ pub(crate) fn compose_accessibility_tree(
     }
 
     supplement_dom_actions(&mut nodes, dom, layout, viewport, &frame);
+    label_document_scroll_roots(&mut nodes, dom);
     apply_page_occlusion(&mut nodes, dom, layout);
     remove_redundant_static_text(&mut nodes);
     SemanticDocument {
@@ -562,6 +563,21 @@ pub(crate) fn compose_accessibility_tree(
         css_hidden_dom_count: dom.css_hidden_count,
         unprovable_frame_count: 0,
         complete: true,
+    }
+}
+
+fn label_document_scroll_roots(nodes: &mut [SemanticNode], dom: &DomIndex) {
+    for node in nodes {
+        let is_document_body = node
+            .backend_node_id
+            .and_then(|backend| dom.nodes.get(&backend))
+            .is_some_and(|meta| meta.tag == "body");
+        if is_document_body
+            && node.name.is_none()
+            && node.actions.contains(&BrowserActionKind::Scroll)
+        {
+            node.name = Some("Document".to_owned());
+        }
     }
 }
 
@@ -861,7 +877,7 @@ fn action_kinds(
         if !actions.is_empty() {
             actions.push(BrowserActionKind::Pointer);
         }
-        if layout_is_scrollable(layout) {
+        if layout_is_scrollable(layout) || (tag == "body" && layout_has_scroll_extent(layout)) {
             actions.push(BrowserActionKind::Scroll);
         }
     }
@@ -886,6 +902,13 @@ fn layout_is_scrollable(layout: &LayoutMeta) -> bool {
             scroll.height,
             client.height,
         )
+}
+
+fn layout_has_scroll_extent(layout: &LayoutMeta) -> bool {
+    let (Some(client), Some(scroll)) = (layout.client_rect, layout.scroll_rect) else {
+        return false;
+    };
+    scroll.width > client.width + 0.5 || scroll.height > client.height + 0.5
 }
 
 fn ax_states(node: &Value) -> BTreeMap<String, Value> {
@@ -1274,24 +1297,27 @@ mod tests {
             "children": [
                 {"nodeType": 1, "nodeName": "DIV", "backendNodeId": 1,
                  "attributes": ["aria-label", "Scrollable archive"]},
-                {"nodeType": 1, "nodeName": "DIV", "backendNodeId": 2,
-                 "attributes": ["aria-label", "Overflow-visible panel"]}
+                {"nodeType": 1, "nodeName": "BODY", "backendNodeId": 2,
+                 "attributes": ["aria-label", "Scrollable document root"]},
+                {"nodeType": 1, "nodeName": "HTML", "backendNodeId": 3,
+                 "attributes": ["aria-label", "Duplicate HTML document root"]}
             ]
         }));
         let layout = build_layout_index(&json!({
             "strings": ["block", "visible", "1", "auto", "default", "static", "0", "scroll"],
             "documents": [{
-                "nodes": {"backendNodeId": [1, 2]},
+                "nodes": {"backendNodeId": [1, 2, 3]},
                 "layout": {
-                    "nodeIndex": [0, 1],
-                    "bounds": [[10, 10, 100, 50], [10, 80, 100, 50]],
-                    "clientRects": [[10, 10, 100, 50], [10, 80, 100, 50]],
-                    "scrollRects": [[0, 0, 100, 250], [0, 0, 100, 250]],
+                    "nodeIndex": [0, 1, 2],
+                    "bounds": [[10, 10, 100, 50], [10, 80, 100, 50], [10, 80, 100, 50]],
+                    "clientRects": [[10, 10, 100, 50], [10, 80, 100, 50], [10, 80, 100, 50]],
+                    "scrollRects": [[0, 0, 100, 250], [0, 0, 100, 250], [0, 0, 100, 250]],
                     "styles": [
                         [0, 1, 2, 3, 4, 5, 6, 3, 7],
+                        [0, 1, 2, 3, 4, 5, 6, 1, 1],
                         [0, 1, 2, 3, 4, 5, 6, 1, 1]
                     ],
-                    "paintOrders": [1, 2]
+                    "paintOrders": [1, 2, 3]
                 }
             }]
         }));
@@ -1314,10 +1340,55 @@ mod tests {
             .find(|node| node.name.as_deref() == Some("Scrollable archive"))
             .expect("scrollable DOM supplement");
         assert_eq!(scrollable.actions, vec![BrowserActionKind::Scroll]);
+        let document_root = page
+            .selected
+            .iter()
+            .find(|node| node.name.as_deref() == Some("Scrollable document root"))
+            .expect("overflow-visible body root must expose document scrolling");
+        assert_eq!(document_root.actions, vec![BrowserActionKind::Scroll]);
         assert!(page
             .selected
             .iter()
-            .all(|node| node.name.as_deref() != Some("Overflow-visible panel")));
+            .all(|node| node.name.as_deref() != Some("Duplicate HTML document root")));
+    }
+
+    #[test]
+    fn unnamed_scrollable_body_is_labeled_as_the_document() {
+        let dom = build_dom_index(&json!({
+            "nodeType": 9,
+            "children": [{"nodeType": 1, "nodeName": "BODY", "backendNodeId": 1}]
+        }));
+        let layout = build_layout_index(&json!({
+            "strings": ["block", "visible", "1", "auto", "default", "static", "0"],
+            "documents": [{
+                "nodes": {"backendNodeId": [1]},
+                "layout": {
+                    "nodeIndex": [0],
+                    "bounds": [[0, 0, 800, 600]],
+                    "clientRects": [[0, 0, 800, 600]],
+                    "scrollRects": [[0, 0, 800, 1200]],
+                    "styles": [[0, 1, 2, 3, 4, 5, 6, 1, 1]],
+                    "paintOrders": [1]
+                }
+            }]
+        }));
+        let document = compose_accessibility_tree(
+            &json!({"nodes": [{"nodeId": "root", "ignored": false,
+                "role": {"value": "RootWebArea"}, "childIds": []}]}),
+            &dom,
+            &layout,
+            &parse_viewport(&json!({"cssVisualViewport": {
+                "pageX": 0.0, "pageY": 0.0, "clientWidth": 800.0, "clientHeight": 600.0
+            }})),
+            frame(),
+        );
+        let page = document.page(0, 300, None, None);
+        let root = page
+            .selected
+            .iter()
+            .find(|node| node.name.as_deref() == Some("Document"))
+            .expect("scrollable body label");
+        assert_eq!(root.actions, vec![BrowserActionKind::Scroll]);
     }
 
     #[test]
