@@ -756,11 +756,30 @@ pub(crate) fn compose_accessibility_tree(
         };
     };
 
+    // Chrome may retain ignored structural intermediates (notably rowgroup)
+    // between exposed semantic nodes. Collapse only those exact raw AX edges;
+    // unknown, duplicate, or cyclic ids remain unresolved so later hierarchy
+    // checks fail closed rather than inventing ancestry.
+    let mut raw_by_id: HashMap<String, Option<&Value>> = HashMap::new();
+    let mut retained_ids = HashSet::new();
+    for ax in ax_nodes {
+        let Some(id) = ax.get("nodeId").and_then(Value::as_str) else {
+            continue;
+        };
+        raw_by_id
+            .entry(id.to_owned())
+            .and_modify(|entry| *entry = None)
+            .or_insert(Some(ax));
+        let role = ax_value_string(ax.get("role"))
+            .unwrap_or_else(|| "unknown".to_owned())
+            .to_ascii_lowercase();
+        if ax.get("ignored").and_then(Value::as_bool) != Some(true) && role != "inlinetextbox" {
+            retained_ids.insert(id.to_owned());
+        }
+    }
+
     let mut nodes = Vec::new();
     for (fallback_order, ax) in ax_nodes.iter().enumerate() {
-        if ax.get("ignored").and_then(Value::as_bool) == Some(true) {
-            continue;
-        }
         let ax_id = ax
             .get("nodeId")
             .and_then(Value::as_str)
@@ -772,7 +791,10 @@ pub(crate) fn compose_accessibility_tree(
         let role = ax_value_string(ax.get("role"))
             .unwrap_or_else(|| "unknown".to_owned())
             .to_ascii_lowercase();
-        if role == "inlinetextbox" {
+        if ax.get("ignored").and_then(Value::as_bool) == Some(true)
+            || role == "inlinetextbox"
+            || !retained_ids.contains(&ax_id)
+        {
             continue;
         }
         let backend_node_id = ax.get("backendDOMNodeId").and_then(Value::as_i64);
@@ -789,20 +811,8 @@ pub(crate) fn compose_accessibility_tree(
         let document_order = dom_meta.map_or(fallback_order, |meta| meta.order);
         nodes.push(SemanticNode {
             ax_id,
-            parent_ax_id: ax
-                .get("parentId")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
-            child_ax_ids: ax
-                .get("childIds")
-                .and_then(Value::as_array)
-                .map(|ids| {
-                    ids.iter()
-                        .filter_map(Value::as_str)
-                        .map(str::to_owned)
-                        .collect()
-                })
-                .unwrap_or_default(),
+            parent_ax_id: normalized_ax_parent(ax, &raw_by_id, &retained_ids),
+            child_ax_ids: normalized_ax_children(ax, &raw_by_id, &retained_ids),
             backend_node_id,
             role,
             name,
@@ -826,6 +836,76 @@ pub(crate) fn compose_accessibility_tree(
         unprovable_frame_count: 0,
         complete: true,
     }
+}
+
+fn normalized_ax_parent(
+    ax: &Value,
+    raw_by_id: &HashMap<String, Option<&Value>>,
+    retained_ids: &HashSet<String>,
+) -> Option<String> {
+    let mut current = ax.get("parentId").and_then(Value::as_str)?.to_owned();
+    let mut visited = HashSet::new();
+    while visited.insert(current.clone()) {
+        if retained_ids.contains(&current) {
+            return Some(current);
+        }
+        let Some(Some(raw)) = raw_by_id.get(&current) else {
+            return Some(current);
+        };
+        let Some(parent) = raw.get("parentId").and_then(Value::as_str) else {
+            return None;
+        };
+        current = parent.to_owned();
+    }
+    Some(current)
+}
+
+fn normalized_ax_children(
+    ax: &Value,
+    raw_by_id: &HashMap<String, Option<&Value>>,
+    retained_ids: &HashSet<String>,
+) -> Vec<String> {
+    fn expand(
+        id: &str,
+        raw_by_id: &HashMap<String, Option<&Value>>,
+        retained_ids: &HashSet<String>,
+        path: &mut HashSet<String>,
+        out: &mut Vec<String>,
+    ) {
+        if retained_ids.contains(id) {
+            out.push(id.to_owned());
+            return;
+        }
+        if !path.insert(id.to_owned()) {
+            out.push(id.to_owned());
+            return;
+        }
+        match raw_by_id.get(id) {
+            Some(Some(raw)) => {
+                if let Some(children) = raw.get("childIds").and_then(Value::as_array) {
+                    for child in children.iter().filter_map(Value::as_str) {
+                        expand(child, raw_by_id, retained_ids, path, out);
+                    }
+                }
+            }
+            Some(None) | None => out.push(id.to_owned()),
+        }
+        path.remove(id);
+    }
+
+    let mut out = Vec::new();
+    if let Some(children) = ax.get("childIds").and_then(Value::as_array) {
+        for child in children.iter().filter_map(Value::as_str) {
+            expand(
+                child,
+                raw_by_id,
+                retained_ids,
+                &mut HashSet::new(),
+                &mut out,
+            );
+        }
+    }
+    out
 }
 
 fn label_document_scroll_roots(nodes: &mut [SemanticNode], dom: &DomIndex) {
@@ -1796,6 +1876,56 @@ mod tests {
             .iter()
             .filter_map(|n| n.name.as_deref())
             .collect()
+    }
+
+    #[test]
+    fn ignored_ax_rowgroup_is_collapsed_without_losing_table_context() {
+        let ax = json!({"nodes": [
+            {"nodeId":"root","ignored":false,"role":{"value":"RootWebArea"},"childIds":["main"]},
+            {"nodeId":"main","parentId":"root","ignored":false,"role":{"value":"main"},"childIds":["table"]},
+            {"nodeId":"table","parentId":"main","ignored":false,"role":{"value":"table"},"name":{"value":"Records"},"childIds":["rowgroup"]},
+            {"nodeId":"rowgroup","parentId":"table","ignored":true,"childIds":["earlier","current"]},
+            {"nodeId":"earlier","parentId":"rowgroup","ignored":false,"role":{"value":"row"},"childIds":["earlier-cell"]},
+            {"nodeId":"earlier-cell","parentId":"earlier","ignored":false,"role":{"value":"cell"},"name":{"value":"Earlier"},"childIds":[]},
+            {"nodeId":"current","parentId":"rowgroup","ignored":false,"role":{"value":"row"},"childIds":["current-cell"]},
+            {"nodeId":"current-cell","parentId":"current","ignored":false,"role":{"value":"cell"},"name":{"value":"Inspect"},"childIds":["button"]},
+            {"nodeId":"button","parentId":"current-cell","ignored":false,"backendDOMNodeId":42,"role":{"value":"button"},"name":{"value":"Inspect"},"childIds":[]}
+        ]});
+        let document = compose_accessibility_tree(
+            &ax,
+            &DomIndex::default(),
+            &LayoutIndex::default(),
+            &Viewport::default(),
+            identified_main_frame(),
+        );
+        let button = document
+            .nodes
+            .iter()
+            .find(|node| node.ax_id == "button")
+            .unwrap()
+            .to_ref_entry()
+            .unwrap();
+
+        let row = document.context(&button).unwrap();
+
+        assert_eq!(row.group.ax_id, "current");
+        assert_eq!(
+            row.parent_group.as_ref().map(|node| node.ax_id.as_str()),
+            Some("table")
+        );
+        assert!(row.group_complete);
+
+        let table = document
+            .nodes
+            .iter()
+            .find(|node| node.ax_id == "table")
+            .unwrap()
+            .to_context_ref_entry();
+        let table_page = document.context(&table).unwrap();
+        let earlier = table_page.outline.find("Earlier").unwrap();
+        let inspect = table_page.outline.find("Inspect").unwrap();
+        assert!(earlier < inspect);
+        assert!(table_page.group_complete);
     }
 
     fn context_fixture(count: usize) -> SemanticDocument {
