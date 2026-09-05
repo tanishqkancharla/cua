@@ -349,6 +349,7 @@ impl SemanticDocument {
         let parent_group = groups.get(1).map(|idx| self.nodes[*idx].clone());
 
         let mut members = HashSet::new();
+        let mut member_order = Vec::new();
         let mut stack: Vec<(usize, Option<usize>)> = vec![(group_idx, None)];
         let mut structure_complete = true;
         while let Some((idx, expected_parent)) = stack.pop() {
@@ -364,7 +365,10 @@ impl SemanticDocument {
                 structure_complete = false;
                 continue;
             }
-            for child_id in &self.nodes[idx].child_ax_ids {
+            member_order.push(idx);
+            // Stack traversal reverses insertion, so push children in reverse
+            // to preserve the validated AX childIds preorder.
+            for child_id in self.nodes[idx].child_ax_ids.iter().rev() {
                 match ax_lookup(&by_ax_id, &self.nodes[idx].frame, child_id) {
                     AxLookup::Unique(child_idx) => stack.push((child_idx, Some(idx))),
                     AxLookup::Missing | AxLookup::Ambiguous | AxLookup::Unproven => {
@@ -375,7 +379,7 @@ impl SemanticDocument {
         }
 
         let mut eligible = Vec::new();
-        for idx in members {
+        for idx in member_order.iter().copied() {
             if ancestor_indices(&self.nodes, &by_ax_id, idx).is_none() {
                 structure_complete = false;
                 continue;
@@ -387,21 +391,6 @@ impl SemanticDocument {
                 eligible.push(idx);
             }
         }
-        let mut observed_orders = HashSet::new();
-        if eligible
-            .iter()
-            .any(|idx| !observed_orders.insert(self.nodes[*idx].document_order))
-        {
-            // DOM preorder and AX fallback order are different evidence
-            // domains. Equal values do not prove a relative ordinal.
-            structure_complete = false;
-        }
-        eligible.sort_by(|left, right| {
-            self.nodes[*left]
-                .document_order
-                .cmp(&self.nodes[*right].document_order)
-                .then_with(|| self.nodes[*left].ax_id.cmp(&self.nodes[*right].ax_id))
-        });
         let anchor_position = eligible
             .iter()
             .position(|idx| *idx == *anchor_idx)
@@ -419,7 +408,11 @@ impl SemanticDocument {
         .min(eligible.len());
         let selected_indices = &eligible[start..end];
         let selected = with_ancestors(&self.nodes, selected_indices);
-        let outline = render_outline(&self.nodes, &selected);
+        let mut context_order =
+            ancestor_indices(&self.nodes, &by_ax_id, group_idx).unwrap_or_default();
+        context_order.reverse();
+        context_order.extend(member_order);
+        let outline = render_outline_ordered(&self.nodes, &selected, context_order);
         let before_omitted = start;
         let after_omitted = eligible.len().saturating_sub(end);
         let group_complete =
@@ -1455,7 +1448,6 @@ fn with_ancestors(nodes: &[SemanticNode], selected: &[usize]) -> HashSet<usize> 
 }
 
 fn render_outline(nodes: &[SemanticNode], selected: &HashSet<usize>) -> String {
-    let by_ax_id = unique_ax_indices(nodes);
     let mut ordered: Vec<usize> = selected.iter().copied().collect();
     ordered.sort_by(|left, right| {
         nodes[*left]
@@ -1463,8 +1455,20 @@ fn render_outline(nodes: &[SemanticNode], selected: &HashSet<usize>) -> String {
             .cmp(&nodes[*right].document_order)
             .then_with(|| nodes[*left].ax_id.cmp(&nodes[*right].ax_id))
     });
+    render_outline_ordered(nodes, selected, ordered)
+}
+
+fn render_outline_ordered(
+    nodes: &[SemanticNode],
+    selected: &HashSet<usize>,
+    ordered: impl IntoIterator<Item = usize>,
+) -> String {
+    let by_ax_id = unique_ax_indices(nodes);
     let mut lines = Vec::new();
     for idx in ordered {
+        if !selected.contains(&idx) {
+            continue;
+        }
         let node = &nodes[idx];
         if matches!(node.role.as_str(), "rootwebarea" | "webarea") {
             continue;
@@ -1893,23 +1897,30 @@ mod tests {
     }
 
     #[test]
-    fn semantic_context_tied_order_is_deterministic_but_not_claimed_complete() {
+    fn semantic_context_uses_proven_ax_child_order_not_mixed_numeric_domains() {
         let mut document = context_fixture(2);
-        document.nodes[2].document_order = 7;
-        document.nodes[3].document_order = 7;
-        document.nodes[2].ax_id = "later-id".into();
-        document.nodes[3].ax_id = "earlier-id".into();
-        document.nodes[1].child_ax_ids = vec!["later-id".into(), "earlier-id".into()];
-        document.nodes[2].parent_ax_id = Some("node-1".into());
-        document.nodes[3].parent_ax_id = Some("node-1".into());
+        // Simulate a backend-less AX fallback order that is numerically later
+        // than an unrelated DOM preorder. The validated AX childIds remain the
+        // only shared structural ordering evidence.
+        document.nodes[2].backend_node_id = None;
+        document.nodes[2].document_order = 20;
+        document.nodes[3].document_order = 5;
         let anchor = document.nodes[1].to_context_ref_entry();
 
         let first = document.context(&anchor).unwrap();
         let second = document.context(&anchor).unwrap();
 
         assert_eq!(first.outline, second.outline);
-        assert!(first.outline.find("Row 3") < first.outline.find("Row 2"));
-        assert!(!first.group_complete);
+        assert!(first.outline.find("Row 2") < first.outline.find("Row 3"));
+        assert_eq!(
+            first
+                .nodes
+                .iter()
+                .filter_map(|node| node.name.as_deref())
+                .collect::<Vec<_>>(),
+            vec!["Results", "Row 2", "Row 3"]
+        );
+        assert!(first.group_complete);
     }
 
     #[test]
