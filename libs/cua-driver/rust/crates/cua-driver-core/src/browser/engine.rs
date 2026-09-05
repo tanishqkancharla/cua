@@ -2477,7 +2477,11 @@ impl BrowserEngine {
                 refs.push(listed);
             }
         }
-        let complete = document_complete && page.next_offset.is_none();
+        let complete = semantic_snapshot_complete(
+            document_complete,
+            page.next_offset.is_some(),
+            page.hierarchy_complete,
+        );
         (
             SemanticSnapshotOutcome {
                 snapshot_id,
@@ -2782,6 +2786,14 @@ impl BrowserEngine {
     }
 }
 
+fn semantic_snapshot_complete(
+    document_complete: bool,
+    has_next_page: bool,
+    hierarchy_complete: bool,
+) -> bool {
+    document_complete && !has_next_page && hierarchy_complete
+}
+
 /// Attribute names that make an element interactive-enough to ref.
 const INTERACTIVE_ATTRS: &[&str] = &["onclick", "role", "contenteditable", "tabindex", "href"];
 /// Element names always considered interactive.
@@ -2899,6 +2911,14 @@ fn collect_interactive(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn semantic_snapshot_completeness_includes_rendered_hierarchy() {
+        assert!(semantic_snapshot_complete(true, false, true));
+        assert!(!semantic_snapshot_complete(false, false, true));
+        assert!(!semantic_snapshot_complete(true, true, true));
+        assert!(!semantic_snapshot_complete(true, false, false));
+    }
 
     #[test]
     fn endpoint_access_policy_requires_grants_for_standalone_consumers() {

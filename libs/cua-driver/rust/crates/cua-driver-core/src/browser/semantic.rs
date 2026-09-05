@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use serde_json::Value;
 use url::Url;
 
-use super::store::{BrowserActionKind, BrowserVisibility, FrameRef, RefEntry};
+use super::store::{BrowserActionKind, BrowserVisibility, FrameKind, FrameRef, RefEntry};
 
 pub(crate) const SEMANTIC_COMPUTED_STYLES: &[&str] = &[
     "display",
@@ -165,6 +165,7 @@ pub(crate) struct SemanticPage {
     pub(crate) total_nodes: usize,
     pub(crate) next_offset: Option<usize>,
     pub(crate) omissions: OmissionCounts,
+    pub(crate) hierarchy_complete: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -216,8 +217,22 @@ impl SemanticDocument {
 
         let start = offset.min(candidates.len());
         let end = (start + budget.max(1)).min(candidates.len());
-        let page_slice = &candidates[start..end];
-        let selected = with_ancestors(&self.nodes, page_slice);
+        let ancestry = unique_ax_indices(&self.nodes);
+        let raw_page_slice = &candidates[start..end];
+        let mut page_slice = Vec::with_capacity(raw_page_slice.len());
+        let mut malformed_hierarchy = 0;
+        let mut hierarchy_complete = true;
+        for idx in raw_page_slice {
+            if ancestor_indices(&self.nodes, &ancestry, *idx).is_some() {
+                page_slice.push(*idx);
+            } else {
+                hierarchy_complete = false;
+                if self.nodes[*idx].visibility != BrowserVisibility::Unknown {
+                    malformed_hierarchy += 1;
+                }
+            }
+        }
+        let selected = with_ancestors(&self.nodes, &page_slice);
         let outline = render_outline(&self.nodes, &selected);
         let selected_nodes = page_slice
             .iter()
@@ -243,6 +258,10 @@ impl SemanticDocument {
                 BrowserVisibility::InViewport | BrowserVisibility::NearViewport => {}
             }
         }
+        // Cyclic parent graphs are not truthful hierarchy evidence. Omit their
+        // selected nodes and account for them through the existing unknown
+        // omission bucket without extending the public response schema.
+        omissions.unknown += malformed_hierarchy;
         omissions.budget = candidates.len().saturating_sub(end);
 
         SemanticPage {
@@ -252,6 +271,7 @@ impl SemanticDocument {
             total_nodes: candidates.len(),
             next_offset: (end < candidates.len()).then_some(end),
             omissions,
+            hierarchy_complete,
         }
     }
 }
@@ -1097,38 +1117,37 @@ fn scoped_indices(
     query: Option<&str>,
     scope_backend_node_id: Option<i64>,
 ) -> Vec<usize> {
-    let by_ax_id: HashMap<&str, usize> = nodes
-        .iter()
-        .enumerate()
-        .map(|(idx, node)| (node.ax_id.as_str(), idx))
-        .collect();
+    let by_ax_id = unique_ax_indices(nodes);
     let mut allowed = HashSet::new();
     if let Some(scope_backend) = scope_backend_node_id {
-        if let Some(scope) = nodes
+        if let Some((scope_idx, _)) = nodes
             .iter()
-            .find(|node| node.backend_node_id == Some(scope_backend))
+            .enumerate()
+            .find(|(_, node)| node.backend_node_id == Some(scope_backend))
         {
-            let mut stack = vec![scope.ax_id.as_str()];
-            while let Some(ax_id) = stack.pop() {
-                if !allowed.insert(ax_id.to_owned()) {
+            let mut stack = vec![scope_idx];
+            while let Some(idx) = stack.pop() {
+                if !allowed.insert(idx) {
                     continue;
                 }
-                if let Some(idx) = by_ax_id.get(ax_id) {
-                    stack.extend(nodes[*idx].child_ax_ids.iter().map(String::as_str));
+                for child_id in &nodes[idx].child_ax_ids {
+                    if let Some(child_idx) = unique_ax_index(&by_ax_id, &nodes[idx].frame, child_id)
+                    {
+                        stack.push(child_idx);
+                    }
                 }
             }
         }
     }
     let query = query.map(|value| value.trim().to_ascii_lowercase());
-    let in_scope =
-        |node: &SemanticNode| scope_backend_node_id.is_none() || allowed.contains(&node.ax_id);
+    let in_scope = |idx: usize| scope_backend_node_id.is_none() || allowed.contains(&idx);
     let term_count = query
         .as_deref()
         .map_or(0, |query| query_terms(query).count());
     let exact_match_exists = query.as_ref().is_some_and(|query| {
         !query.is_empty()
-            && nodes.iter().any(|node| {
-                in_scope(node)
+            && nodes.iter().enumerate().any(|(idx, node)| {
+                in_scope(idx)
                     && !matches!(
                         node.visibility,
                         BrowserVisibility::CssHidden | BrowserVisibility::PageOccluded
@@ -1139,8 +1158,8 @@ fn scoped_indices(
     nodes
         .iter()
         .enumerate()
-        .filter(|(_, node)| {
-            in_scope(node)
+        .filter(|(idx, node)| {
+            in_scope(*idx)
                 && query.as_ref().is_none_or(|query| {
                     query.is_empty()
                         || if exact_match_exists {
@@ -1198,33 +1217,21 @@ fn query_score(node: &SemanticNode, query: &str) -> usize {
 }
 
 fn with_ancestors(nodes: &[SemanticNode], selected: &[usize]) -> HashSet<usize> {
-    let by_ax_id: HashMap<&str, usize> = nodes
-        .iter()
-        .enumerate()
-        .map(|(idx, node)| (node.ax_id.as_str(), idx))
-        .collect();
+    let by_ax_id = unique_ax_indices(nodes);
     let mut keep: HashSet<usize> = selected.iter().copied().collect();
     for idx in selected {
-        let mut parent = nodes[*idx].parent_ax_id.as_deref();
-        while let Some(parent_id) = parent {
-            let Some(parent_idx) = by_ax_id.get(parent_id).copied() else {
-                break;
-            };
-            if !keep.insert(parent_idx) {
-                break;
-            }
-            parent = nodes[parent_idx].parent_ax_id.as_deref();
+        // A cyclic or ambiguous ancestry chain cannot truthfully supply
+        // context. The page path filters it; callers of this helper get no
+        // invented partial ancestry.
+        if let Some(ancestors) = ancestor_indices(nodes, &by_ax_id, *idx) {
+            keep.extend(ancestors);
         }
     }
     keep
 }
 
 fn render_outline(nodes: &[SemanticNode], selected: &HashSet<usize>) -> String {
-    let by_ax_id: HashMap<&str, usize> = nodes
-        .iter()
-        .enumerate()
-        .map(|(idx, node)| (node.ax_id.as_str(), idx))
-        .collect();
+    let by_ax_id = unique_ax_indices(nodes);
     let mut ordered: Vec<usize> = selected.iter().copied().collect();
     ordered.sort_by_key(|idx| nodes[*idx].document_order);
     let mut lines = Vec::new();
@@ -1233,19 +1240,18 @@ fn render_outline(nodes: &[SemanticNode], selected: &HashSet<usize>) -> String {
         if matches!(node.role.as_str(), "rootwebarea" | "webarea") {
             continue;
         }
-        let mut depth = 0;
-        let mut parent = node.parent_ax_id.as_deref();
-        while let Some(parent_id) = parent {
-            let Some(parent_idx) = by_ax_id.get(parent_id).copied() else {
-                break;
-            };
-            if selected.contains(&parent_idx)
-                && !matches!(nodes[parent_idx].role.as_str(), "rootwebarea" | "webarea")
-            {
-                depth += 1;
-            }
-            parent = nodes[parent_idx].parent_ax_id.as_deref();
-        }
+        // Page selection already omits cyclic nodes. Retain that fail-closed
+        // behavior if this renderer is ever called with an unchecked set.
+        let Some(ancestors) = ancestor_indices(nodes, &by_ax_id, idx) else {
+            continue;
+        };
+        let depth = ancestors
+            .into_iter()
+            .filter(|parent_idx| {
+                selected.contains(parent_idx)
+                    && !matches!(nodes[*parent_idx].role.as_str(), "rootwebarea" | "webarea")
+            })
+            .count();
         let mut line = format!("{}- {}", "  ".repeat(depth), node.role);
         if let Some(name) = &node.name {
             line.push(' ');
@@ -1269,6 +1275,87 @@ fn render_outline(nodes: &[SemanticNode], selected: &HashSet<usize>) -> String {
         lines.push(line);
     }
     lines.join("\n")
+}
+
+type SemanticAxKey<'a> = (
+    &'static str,
+    Option<&'a str>,
+    Option<&'a str>,
+    Option<&'a str>,
+    &'a str,
+);
+
+fn semantic_ax_key<'a>(frame: &'a FrameRef, ax_id: &'a str) -> Option<SemanticAxKey<'a>> {
+    let identity = frame.identity.as_ref();
+    let authority_is_proven = match frame.kind {
+        FrameKind::Main => frame.oopif_target_id.is_none(),
+        FrameKind::Iframe => identity.is_some() && frame.oopif_target_id.is_none(),
+        FrameKind::Oopif => identity.is_some() && frame.oopif_target_id.is_some(),
+    };
+    if !authority_is_proven {
+        return None;
+    }
+    Some((
+        frame.kind.as_str(),
+        frame.oopif_target_id.as_deref(),
+        identity.map(|identity| identity.frame_id.as_str()),
+        identity.map(|identity| identity.loader_id.as_str()),
+        ax_id,
+    ))
+}
+
+fn unique_ax_indices(nodes: &[SemanticNode]) -> HashMap<SemanticAxKey<'_>, Option<usize>> {
+    let mut indices = HashMap::new();
+    for (idx, node) in nodes.iter().enumerate() {
+        let Some(key) = semantic_ax_key(&node.frame, &node.ax_id) else {
+            continue;
+        };
+        indices
+            .entry(key)
+            .and_modify(|existing| *existing = None)
+            .or_insert(Some(idx));
+    }
+    indices
+}
+
+fn unique_ax_index(
+    indices: &HashMap<SemanticAxKey<'_>, Option<usize>>,
+    frame: &FrameRef,
+    ax_id: &str,
+) -> Option<usize> {
+    let key = semantic_ax_key(frame, ax_id)?;
+    indices.get(&key).copied().flatten()
+}
+
+/// Return the unique, same-frame ancestry for one node. `None` means the
+/// declared parent graph is cyclic or ambiguous. A dangling parent terminates
+/// the chain without guessing. The visited set bounds traversal by node count.
+fn ancestor_indices(
+    nodes: &[SemanticNode],
+    by_ax_id: &HashMap<SemanticAxKey<'_>, Option<usize>>,
+    start_idx: usize,
+) -> Option<Vec<usize>> {
+    let start_key = semantic_ax_key(&nodes[start_idx].frame, &nodes[start_idx].ax_id)?;
+    if !matches!(by_ax_id.get(&start_key), Some(Some(idx)) if *idx == start_idx) {
+        return None;
+    }
+    let mut ancestors = Vec::new();
+    let mut visited = HashSet::from([start_idx]);
+    let mut current_idx = start_idx;
+    while let Some(parent_id) = nodes[current_idx].parent_ax_id.as_deref() {
+        let parent_key = semantic_ax_key(&nodes[current_idx].frame, parent_id)?;
+        let parent_idx = match by_ax_id.get(&parent_key) {
+            None => break,
+            Some(None) => return None,
+            Some(Some(parent_idx)) => *parent_idx,
+        };
+        if !visited.insert(parent_idx) {
+            return None;
+        }
+        ancestors.push(parent_idx);
+        current_idx = parent_idx;
+    }
+    Some(ancestors)
 }
 
 #[cfg(test)]
@@ -1363,10 +1450,32 @@ mod tests {
         );
         assert_eq!(button.destination_url, None);
     }
-    use crate::browser::store::FrameRef;
+    use crate::browser::store::{FrameIdentity, FrameKind, FrameRef};
 
     fn frame() -> FrameRef {
         FrameRef::main_unproven()
+    }
+
+    fn identified_frame(frame_id: &str, loader_id: &str) -> FrameRef {
+        FrameRef {
+            kind: FrameKind::Iframe,
+            oopif_target_id: None,
+            identity: Some(FrameIdentity {
+                frame_id: frame_id.to_owned(),
+                loader_id: loader_id.to_owned(),
+            }),
+        }
+    }
+
+    fn oopif_frame(target_id: &str, frame_id: &str, loader_id: &str) -> FrameRef {
+        FrameRef {
+            kind: FrameKind::Oopif,
+            oopif_target_id: Some(target_id.to_owned()),
+            identity: Some(FrameIdentity {
+                frame_id: frame_id.to_owned(),
+                loader_id: loader_id.to_owned(),
+            }),
+        }
     }
 
     fn query_fixture(labels: &[(&str, BrowserVisibility)]) -> SemanticDocument {
@@ -1400,6 +1509,205 @@ mod tests {
             .iter()
             .filter_map(|n| n.name.as_deref())
             .collect()
+    }
+
+    #[test]
+    fn semantic_outline_preserves_valid_tree_text_and_depth() {
+        use BrowserVisibility::InViewport;
+        let mut document = query_fixture(&[("Parent", InViewport), ("Child", InViewport)]);
+        document.nodes[0].role = "generic".into();
+        document.nodes[0].child_ax_ids = vec!["node-1".into()];
+        document.nodes[1].parent_ax_id = Some("node-0".into());
+
+        let page = document.page(0, 300, Some("Child"), None);
+
+        assert_eq!(page.outline, "- generic \"Parent\"\n  - link \"Child\"");
+        assert_eq!(page.selected_nodes, 1);
+        assert_eq!(page.omissions.unknown, 0);
+        assert!(page.hierarchy_complete);
+    }
+
+    #[test]
+    fn semantic_outline_omits_self_cycle_without_unbounded_parent_walk() {
+        use BrowserVisibility::InViewport;
+        let mut document = query_fixture(&[("Loop", InViewport)]);
+        document.nodes[0].parent_ax_id = Some("node-0".into());
+        document.nodes[0].child_ax_ids = vec!["node-0".into()];
+
+        // This page call never returned before ancestry traversal was bounded.
+        let page = document.page(0, 300, Some("Loop"), None);
+
+        assert!(page.outline.is_empty());
+        assert!(page.selected.is_empty());
+        assert_eq!(page.selected_nodes, 0);
+        assert_eq!(page.total_nodes, 1);
+        assert_eq!(page.omissions.unknown, 1);
+        assert!(!page.hierarchy_complete);
+    }
+
+    #[test]
+    fn semantic_outline_does_not_double_count_unknown_cycle_omission() {
+        let mut document = query_fixture(&[("Loop", BrowserVisibility::Unknown)]);
+        document.nodes[0].parent_ax_id = Some("node-0".into());
+
+        let page = document.page(0, 300, Some("Loop"), None);
+
+        assert!(page.outline.is_empty());
+        assert_eq!(page.omissions.unknown, 1);
+        assert!(!page.hierarchy_complete);
+    }
+
+    #[test]
+    fn semantic_outline_omits_descendant_whose_ancestry_enters_cycle() {
+        use BrowserVisibility::InViewport;
+        let mut document = query_fixture(&[
+            ("Cycle A", InViewport),
+            ("Cycle B", InViewport),
+            ("Descendant", InViewport),
+        ]);
+        document.nodes[0].parent_ax_id = Some("node-1".into());
+        document.nodes[1].parent_ax_id = Some("node-0".into());
+        document.nodes[2].parent_ax_id = Some("node-0".into());
+
+        let page = document.page(0, 300, Some("Descendant"), None);
+
+        assert!(page.outline.is_empty());
+        assert!(page.selected.is_empty());
+        assert_eq!(page.selected_nodes, 0);
+        assert_eq!(page.omissions.unknown, 1);
+        assert!(!page.hierarchy_complete);
+    }
+
+    #[test]
+    fn semantic_outline_treats_dangling_parent_as_unavailable_context() {
+        use BrowserVisibility::InViewport;
+        let mut document = query_fixture(&[("Orphan", InViewport)]);
+        document.nodes[0].parent_ax_id = Some("ignored-or-missing-parent".into());
+
+        let page = document.page(0, 300, Some("Orphan"), None);
+
+        assert_eq!(page.outline, "- link \"Orphan\"");
+        assert_eq!(page.selected_nodes, 1);
+        assert_eq!(page.omissions.unknown, 0);
+        assert!(page.hierarchy_complete);
+    }
+
+    #[test]
+    fn semantic_outline_resolves_repeated_ax_ids_within_their_own_frames() {
+        use BrowserVisibility::InViewport;
+        let mut first = query_fixture(&[
+            ("Frame one parent", InViewport),
+            ("Frame one child", InViewport),
+        ]);
+        first.nodes[0].ax_id = "parent".into();
+        first.nodes[0].role = "generic".into();
+        first.nodes[0].child_ax_ids = vec!["child".into()];
+        first.nodes[1].ax_id = "child".into();
+        first.nodes[1].parent_ax_id = Some("parent".into());
+        for node in &mut first.nodes {
+            node.frame = identified_frame("frame-one", "loader-one");
+        }
+
+        let mut second = query_fixture(&[
+            ("Frame two parent", InViewport),
+            ("Frame two child", InViewport),
+        ]);
+        second.nodes[0].ax_id = "parent".into();
+        second.nodes[0].role = "generic".into();
+        second.nodes[0].child_ax_ids = vec!["child".into()];
+        second.nodes[1].ax_id = "child".into();
+        second.nodes[1].parent_ax_id = Some("parent".into());
+        for node in &mut second.nodes {
+            node.frame = identified_frame("frame-two", "loader-two");
+        }
+        first.extend(second);
+
+        let page = first.page(0, 300, Some("Frame one child"), None);
+
+        assert_eq!(
+            page.outline,
+            "- generic \"Frame one parent\"\n  - link \"Frame one child\""
+        );
+        assert!(!page.outline.contains("Frame two parent"));
+        assert_eq!(page.omissions.unknown, 0);
+    }
+
+    #[test]
+    fn semantic_outline_resolves_repeated_ax_ids_within_distinct_oopif_targets() {
+        use BrowserVisibility::InViewport;
+        let mut first = query_fixture(&[
+            ("Target one parent", InViewport),
+            ("Target one child", InViewport),
+        ]);
+        first.nodes[0].ax_id = "parent".into();
+        first.nodes[0].role = "generic".into();
+        first.nodes[1].ax_id = "child".into();
+        first.nodes[1].parent_ax_id = Some("parent".into());
+        for node in &mut first.nodes {
+            node.frame = oopif_frame("target-one", "frame", "loader");
+        }
+
+        let mut second = query_fixture(&[
+            ("Target two parent", InViewport),
+            ("Target two child", InViewport),
+        ]);
+        second.nodes[0].ax_id = "parent".into();
+        second.nodes[0].role = "generic".into();
+        second.nodes[1].ax_id = "child".into();
+        second.nodes[1].parent_ax_id = Some("parent".into());
+        for node in &mut second.nodes {
+            node.frame = oopif_frame("target-two", "frame", "loader");
+        }
+        first.extend(second);
+
+        let page = first.page(0, 300, Some("Target one child"), None);
+
+        assert_eq!(
+            page.outline,
+            "- generic \"Target one parent\"\n  - link \"Target one child\""
+        );
+        assert!(!page.outline.contains("Target two parent"));
+        assert_eq!(page.omissions.unknown, 0);
+    }
+
+    #[test]
+    fn semantic_outline_does_not_choose_between_duplicate_ids_in_one_frame() {
+        use BrowserVisibility::InViewport;
+        let mut document = query_fixture(&[
+            ("First ambiguous parent", InViewport),
+            ("Second ambiguous parent", InViewport),
+            ("Ambiguous child", InViewport),
+        ]);
+        document.nodes[0].ax_id = "parent".into();
+        document.nodes[1].ax_id = "parent".into();
+        document.nodes[2].ax_id = "child".into();
+        document.nodes[2].parent_ax_id = Some("parent".into());
+
+        let page = document.page(0, 300, Some("Ambiguous child"), None);
+
+        assert!(page.outline.is_empty());
+        assert!(page.selected.is_empty());
+        assert_eq!(page.selected_nodes, 0);
+        assert_eq!(page.omissions.unknown, 1);
+        assert!(!page.hierarchy_complete);
+    }
+
+    #[test]
+    fn semantic_outline_does_not_invent_authority_for_unidentified_iframe() {
+        use BrowserVisibility::InViewport;
+        let mut document = query_fixture(&[("Unidentified frame node", InViewport)]);
+        document.nodes[0].frame = FrameRef {
+            kind: FrameKind::Iframe,
+            oopif_target_id: None,
+            identity: None,
+        };
+
+        let page = document.page(0, 300, Some("Unidentified frame node"), None);
+
+        assert!(page.outline.is_empty());
+        assert!(page.selected.is_empty());
+        assert_eq!(page.omissions.unknown, 1);
+        assert!(!page.hierarchy_complete);
     }
 
     #[test]
