@@ -200,7 +200,8 @@ impl SemanticDocument {
         query: Option<&str>,
         scope_backend_node_id: Option<i64>,
     ) -> SemanticPage {
-        let mut candidates = scoped_indices(&self.nodes, query, scope_backend_node_id);
+        let scoped = scoped_indices(&self.nodes, query, scope_backend_node_id);
+        let mut candidates = scoped.indices;
         candidates.retain(|idx| {
             !matches!(
                 self.nodes[*idx].visibility,
@@ -221,7 +222,7 @@ impl SemanticDocument {
         let raw_page_slice = &candidates[start..end];
         let mut page_slice = Vec::with_capacity(raw_page_slice.len());
         let mut malformed_hierarchy = 0;
-        let mut hierarchy_complete = true;
+        let mut hierarchy_complete = scoped.hierarchy_complete;
         for idx in raw_page_slice {
             if ancestor_indices(&self.nodes, &ancestry, *idx).is_some() {
                 page_slice.push(*idx);
@@ -1112,28 +1113,55 @@ fn rank(node: &SemanticNode) -> u8 {
     }
 }
 
+struct ScopedIndices {
+    indices: Vec<usize>,
+    hierarchy_complete: bool,
+}
+
 fn scoped_indices(
     nodes: &[SemanticNode],
     query: Option<&str>,
     scope_backend_node_id: Option<i64>,
-) -> Vec<usize> {
+) -> ScopedIndices {
     let by_ax_id = unique_ax_indices(nodes);
+    let unproven_ax_ids = nodes
+        .iter()
+        .filter(|node| semantic_ax_key(&node.frame, &node.ax_id).is_none())
+        .map(|node| node.ax_id.as_str())
+        .collect::<HashSet<_>>();
     let mut allowed = HashSet::new();
+    let mut hierarchy_complete = true;
     if let Some(scope_backend) = scope_backend_node_id {
-        if let Some((scope_idx, _)) = nodes
+        let mut matches = nodes
             .iter()
             .enumerate()
-            .find(|(_, node)| node.backend_node_id == Some(scope_backend))
-        {
+            .filter(|(_, node)| node.backend_node_id == Some(scope_backend));
+        let first = matches.next().map(|(idx, _)| idx);
+        let duplicate = matches.next().is_some();
+        if duplicate {
+            // Backend ids are not a cross-frame authority. Refuse to choose an
+            // arbitrary subtree when merged documents contain a collision.
+            hierarchy_complete = false;
+        } else if let Some(scope_idx) = first {
             let mut stack = vec![scope_idx];
             while let Some(idx) = stack.pop() {
                 if !allowed.insert(idx) {
                     continue;
                 }
                 for child_id in &nodes[idx].child_ax_ids {
-                    if let Some(child_idx) = unique_ax_index(&by_ax_id, &nodes[idx].frame, child_id)
-                    {
-                        stack.push(child_idx);
+                    match scoped_child_index(
+                        &by_ax_id,
+                        &unproven_ax_ids,
+                        &nodes[idx].frame,
+                        child_id,
+                    ) {
+                        AxLookup::Unique(child_idx) => stack.push(child_idx),
+                        // Missing children can be nodes deliberately ignored by
+                        // collection and do not make the selected outline false.
+                        AxLookup::Missing => {}
+                        AxLookup::Ambiguous | AxLookup::Unproven => {
+                            hierarchy_complete = false;
+                        }
                     }
                 }
             }
@@ -1155,7 +1183,7 @@ fn scoped_indices(
                     && node_contains_query(node, query)
             })
     });
-    nodes
+    let indices = nodes
         .iter()
         .enumerate()
         .filter(|(idx, node)| {
@@ -1173,7 +1201,11 @@ fn scoped_indices(
                 })
         })
         .map(|(idx, _)| idx)
-        .collect()
+        .collect();
+    ScopedIndices {
+        indices,
+        hierarchy_complete,
+    }
 }
 
 fn node_contains_query(node: &SemanticNode, query: &str) -> bool {
@@ -1318,13 +1350,28 @@ fn unique_ax_indices(nodes: &[SemanticNode]) -> HashMap<SemanticAxKey<'_>, Optio
     indices
 }
 
-fn unique_ax_index(
+enum AxLookup {
+    Unique(usize),
+    Missing,
+    Ambiguous,
+    Unproven,
+}
+
+fn scoped_child_index(
     indices: &HashMap<SemanticAxKey<'_>, Option<usize>>,
+    unproven_ax_ids: &HashSet<&str>,
     frame: &FrameRef,
     ax_id: &str,
-) -> Option<usize> {
-    let key = semantic_ax_key(frame, ax_id)?;
-    indices.get(&key).copied().flatten()
+) -> AxLookup {
+    let Some(key) = semantic_ax_key(frame, ax_id) else {
+        return AxLookup::Unproven;
+    };
+    match indices.get(&key) {
+        Some(Some(idx)) => AxLookup::Unique(*idx),
+        Some(None) => AxLookup::Ambiguous,
+        None if unproven_ax_ids.contains(ax_id) => AxLookup::Unproven,
+        None => AxLookup::Missing,
+    }
 }
 
 /// Return the unique, same-frame ancestry for one node. `None` means the
@@ -1790,6 +1837,75 @@ mod tests {
         let page = document.page(0, 300, Some("annual report"), Some(1));
         assert_eq!(query_names(&page), vec!["Annual summary"]);
         assert_eq!(page.total_nodes, 1);
+        assert!(page.hierarchy_complete);
+    }
+
+    #[test]
+    fn semantic_scope_marks_ambiguous_child_lookup_incomplete() {
+        use BrowserVisibility::InViewport;
+        let mut document = query_fixture(&[
+            ("Scope root", InViewport),
+            ("First duplicate", InViewport),
+            ("Second duplicate", InViewport),
+        ]);
+        document.nodes[0].role = "generic".into();
+        document.nodes[0].child_ax_ids = vec!["duplicate".into()];
+        document.nodes[1].ax_id = "duplicate".into();
+        document.nodes[2].ax_id = "duplicate".into();
+
+        let page = document.page(0, 300, None, Some(1));
+
+        assert_eq!(page.outline, "- generic \"Scope root\"");
+        assert_eq!(page.total_nodes, 1);
+        assert!(!page.hierarchy_complete);
+    }
+
+    #[test]
+    fn semantic_scope_keeps_missing_collected_child_policy_complete() {
+        use BrowserVisibility::InViewport;
+        let mut document = query_fixture(&[("Scope root", InViewport)]);
+        document.nodes[0].role = "generic".into();
+        document.nodes[0].child_ax_ids = vec!["ignored-child".into()];
+
+        let page = document.page(0, 300, None, Some(1));
+
+        assert_eq!(page.outline, "- generic \"Scope root\"");
+        assert!(page.hierarchy_complete);
+    }
+
+    #[test]
+    fn semantic_scope_marks_unproven_child_authority_incomplete() {
+        use BrowserVisibility::InViewport;
+        let mut document = query_fixture(&[("Scope root", InViewport), ("Child", InViewport)]);
+        document.nodes[0].role = "generic".into();
+        document.nodes[0].child_ax_ids = vec!["child".into()];
+        document.nodes[1].ax_id = "child".into();
+        document.nodes[1].frame = FrameRef {
+            kind: FrameKind::Iframe,
+            oopif_target_id: None,
+            identity: None,
+        };
+
+        let page = document.page(0, 300, None, Some(1));
+
+        assert_eq!(page.outline, "- generic \"Scope root\"");
+        assert!(!page.hierarchy_complete);
+    }
+
+    #[test]
+    fn semantic_scope_refuses_duplicate_backend_ids_across_frames() {
+        use BrowserVisibility::InViewport;
+        let mut document =
+            query_fixture(&[("Main match", InViewport), ("Frame match", InViewport)]);
+        document.nodes[1].backend_node_id = Some(1);
+        document.nodes[1].frame = identified_frame("frame-two", "loader-two");
+
+        let page = document.page(0, 300, None, Some(1));
+
+        assert!(page.outline.is_empty());
+        assert!(page.selected.is_empty());
+        assert_eq!(page.total_nodes, 0);
+        assert!(!page.hierarchy_complete);
     }
 
     #[test]
