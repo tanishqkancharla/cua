@@ -1122,11 +1122,19 @@ fn scoped_indices(
     let query = query.map(|value| value.trim().to_ascii_lowercase());
     let in_scope =
         |node: &SemanticNode| scope_backend_node_id.is_none() || allowed.contains(&node.ax_id);
+    let term_count = query
+        .as_deref()
+        .map_or(0, |query| query_terms(query).count());
     let exact_match_exists = query.as_ref().is_some_and(|query| {
         !query.is_empty()
-            && nodes
-                .iter()
-                .any(|node| in_scope(node) && node_contains_query(node, query))
+            && nodes.iter().any(|node| {
+                in_scope(node)
+                    && !matches!(
+                        node.visibility,
+                        BrowserVisibility::CssHidden | BrowserVisibility::PageOccluded
+                    )
+                    && node_contains_query(node, query)
+            })
     });
     nodes
         .iter()
@@ -1137,6 +1145,9 @@ fn scoped_indices(
                     query.is_empty()
                         || if exact_match_exists {
                             node_contains_query(node, query)
+                                // A phrase is preferred by ranking, but must not
+                                // erase a result containing all reordered terms.
+                                || (term_count > 0 && query_score(node, query) == term_count)
                         } else {
                             query_score(node, query) > 0
                         }
@@ -1158,6 +1169,12 @@ fn node_contains_query(node: &SemanticNode, query: &str) -> bool {
             .is_some_and(|value| value.to_ascii_lowercase().contains(query))
 }
 
+fn query_terms(query: &str) -> impl Iterator<Item = &str> {
+    query
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|term| !term.is_empty())
+}
+
 fn query_score(node: &SemanticNode, query: &str) -> usize {
     let query = query.trim().to_ascii_lowercase();
     if query.is_empty() {
@@ -1175,9 +1192,7 @@ fn query_score(node: &SemanticNode, query: &str) -> usize {
     .flatten()
     .map(str::to_ascii_lowercase)
     .collect::<Vec<_>>();
-    query
-        .split(|character: char| !character.is_alphanumeric())
-        .filter(|term| !term.is_empty())
+    query_terms(&query)
         .filter(|term| fields.iter().any(|field| field.contains(term)))
         .count()
 }
@@ -1352,6 +1367,184 @@ mod tests {
 
     fn frame() -> FrameRef {
         FrameRef::main_unproven()
+    }
+
+    fn query_fixture(labels: &[(&str, BrowserVisibility)]) -> SemanticDocument {
+        SemanticDocument {
+            nodes: labels
+                .iter()
+                .enumerate()
+                .map(|(order, (label, visibility))| SemanticNode {
+                    ax_id: format!("node-{order}"),
+                    parent_ax_id: None,
+                    child_ax_ids: Vec::new(),
+                    backend_node_id: Some(order as i64 + 1),
+                    role: "link".into(),
+                    name: Some((*label).into()),
+                    value: None,
+                    destination_url: None,
+                    states: BTreeMap::new(),
+                    frame: frame(),
+                    visibility: *visibility,
+                    actions: vec![BrowserActionKind::Click],
+                    document_order: order,
+                })
+                .collect(),
+            complete: true,
+            ..Default::default()
+        }
+    }
+
+    fn query_names(page: &SemanticPage) -> Vec<&str> {
+        page.selected
+            .iter()
+            .filter_map(|n| n.name.as_deref())
+            .collect()
+    }
+
+    #[test]
+    fn semantic_query_recall_retains_reordered_terms_across_label_families() {
+        use BrowserVisibility::InViewport;
+        for (query, reordered, phrase, partial) in [
+            (
+                "annual report",
+                "Report: annual summary",
+                "Annual report",
+                "Report archive",
+            ),
+            (
+                "keyboard navigation",
+                "Navigation with a keyboard",
+                "Keyboard navigation",
+                "Keyboard",
+            ),
+            ("water bottle", "Bottle for water", "Water bottle", "Water"),
+        ] {
+            let document = query_fixture(&[
+                (reordered, InViewport),
+                (phrase, InViewport),
+                (partial, InViewport),
+            ]);
+            let page = document.page(0, 300, Some(query), None);
+            assert_eq!(query_names(&page), vec![phrase, reordered], "query={query}");
+            assert_eq!(page.total_nodes, 2);
+            assert!(page.next_offset.is_none());
+        }
+    }
+
+    #[test]
+    fn semantic_query_recall_ignores_excluded_phrases_when_selecting_fallback() {
+        use BrowserVisibility::{CssHidden, InViewport, PageOccluded};
+        for excluded in [CssHidden, PageOccluded] {
+            for visible in ["Report: annual summary", "Annual summary"] {
+                let document = query_fixture(&[("Annual report", excluded), (visible, InViewport)]);
+                let page = document.page(0, 300, Some("annual report"), None);
+                assert_eq!(query_names(&page), vec![visible], "excluded={excluded:?}");
+                assert_eq!(page.total_nodes, 1);
+            }
+        }
+    }
+
+    #[test]
+    fn semantic_query_recall_preserves_partial_fallback_without_a_phrase() {
+        use BrowserVisibility::InViewport;
+        let document = query_fixture(&[
+            ("Archive item 304", InViewport),
+            ("Reply", InViewport),
+            ("Unrelated", InViewport),
+        ]);
+        let page = document.page(0, 300, Some("reply archive 304"), None);
+        assert_eq!(query_names(&page), vec!["Archive item 304", "Reply"]);
+        // Preserve fallback breadth even if a non-phrase node has every term.
+        let page = document.page(0, 300, Some("304 archive"), None);
+        assert_eq!(query_names(&page), vec!["Archive item 304"]);
+        let document = query_fixture(&[
+            ("Report: annual summary", InViewport),
+            ("Annual summary", InViewport),
+        ]);
+        let page = document.page(0, 300, Some("annual report"), None);
+        assert_eq!(
+            query_names(&page),
+            vec!["Report: annual summary", "Annual summary"]
+        );
+    }
+
+    #[test]
+    fn semantic_query_recall_applies_subtree_scope_before_phrase_preference() {
+        use BrowserVisibility::InViewport;
+        let mut document = query_fixture(&[
+            ("Section", InViewport),
+            ("Annual summary", InViewport),
+            ("Annual report", InViewport),
+        ]);
+        document.nodes[0].child_ax_ids = vec!["node-1".into()];
+        document.nodes[1].parent_ax_id = Some("node-0".into());
+        let page = document.page(0, 300, Some("annual report"), Some(1));
+        assert_eq!(query_names(&page), vec!["Annual summary"]);
+        assert_eq!(page.total_nodes, 1);
+    }
+
+    #[test]
+    fn semantic_query_recall_preserves_normalization_and_empty_term_behavior() {
+        use BrowserVisibility::InViewport;
+        let document = query_fixture(&[
+            ("ANNUAL report report", InViewport),
+            ("Report: annual summary", InViewport),
+            ("...", InViewport),
+            ("unrelated", InViewport),
+        ]);
+        let page = document.page(0, 300, Some(" annual REPORT report "), None);
+        assert_eq!(
+            query_names(&page),
+            vec!["ANNUAL report report", "Report: annual summary"]
+        );
+        let punctuation = document.page(0, 300, Some("..."), None);
+        assert_eq!(query_names(&punctuation), vec!["..."]);
+        assert_eq!(document.page(0, 300, Some("!!!"), None).total_nodes, 0);
+        assert_eq!(document.page(0, 300, Some("   "), None).total_nodes, 4);
+        assert_eq!(document.page(0, 300, None, None).total_nodes, 4);
+    }
+
+    #[test]
+    fn semantic_query_recall_preserves_cross_field_substring_matching() {
+        use BrowserVisibility::InViewport;
+        let mut document = query_fixture(&[
+            ("link annual", InViewport),
+            ("Annually updated", InViewport),
+            ("Other", InViewport),
+        ]);
+        document.nodes[2].value = Some("annual".into());
+        let page = document.page(0, 300, Some("link annual"), None);
+        assert_eq!(
+            query_names(&page),
+            vec!["link annual", "Annually updated", "Other"]
+        );
+    }
+
+    #[test]
+    fn semantic_query_recall_preserves_visibility_ranking_and_bounded_pages() {
+        use BrowserVisibility::{InViewport, NoLayout, Offscreen, Unknown};
+        let document = query_fixture(&[
+            ("Report: annual summary", InViewport),
+            ("Annual report", Offscreen),
+            ("Report: annual draft", Unknown),
+            ("Report: annual notes", NoLayout),
+            ("Annual unrelated", InViewport),
+        ]);
+        let first = document.page(0, 1, Some("annual report"), None);
+        assert_eq!(query_names(&first), vec!["Annual report"]);
+        assert_eq!(first.selected[0].visibility, Offscreen);
+        assert_eq!(first.total_nodes, 4);
+        assert_eq!(first.omissions.budget, 3);
+        let second = document.page(first.next_offset.unwrap(), 1, Some("annual report"), None);
+        assert_eq!(query_names(&second), vec!["Report: annual summary"]);
+        let last = document.page(second.next_offset.unwrap(), 2, Some("annual report"), None);
+        assert_eq!(
+            query_names(&last),
+            vec!["Report: annual draft", "Report: annual notes"]
+        );
+        assert!(last.next_offset.is_none());
+        assert_eq!(last.selected_nodes, 2);
     }
 
     #[test]
