@@ -1775,6 +1775,13 @@ async fn semantic_context_reuses_exact_snapshot_without_recollection_or_action_i
         .and_then(|entry| entry["ref"].as_str())
         .unwrap()
         .to_owned();
+    let anchor_actions = queried["refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["ref"] == anchor)
+        .map(|entry| entry["actions"].clone())
+        .unwrap();
     let prior_action = queried["refs"]
         .as_array()
         .unwrap()
@@ -1817,6 +1824,14 @@ async fn semantic_context_reuses_exact_snapshot_without_recollection_or_action_i
         .chain(context["content_refs"].as_array().unwrap())
         .collect::<Vec<_>>();
     assert!(response_refs.iter().any(|entry| entry["ref"] == anchor));
+    let returned_anchor = response_refs
+        .iter()
+        .find(|entry| entry["ref"] == anchor)
+        .unwrap();
+    assert_eq!(
+        returned_anchor["actions"], anchor_actions,
+        "an actually issued action ref retains its exact declared capability"
+    );
     assert!(response_refs
         .iter()
         .any(|entry| entry["ref"] == context["context"]["group_ref"]));
@@ -1824,6 +1839,14 @@ async fn semantic_context_reuses_exact_snapshot_without_recollection_or_action_i
         .iter()
         .any(|entry| entry["ref"] == parent_group_ref));
     assert!(response_refs.iter().all(|entry| entry["frame"] == "main"));
+    assert!(
+        context["content_refs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry["actions"] == json!([])),
+        "content-only refs must not advertise source-node action hints"
+    );
     assert_eq!(
         recorded_calls(&f, "Accessibility.getFullAXTree").len(),
         collections_before,

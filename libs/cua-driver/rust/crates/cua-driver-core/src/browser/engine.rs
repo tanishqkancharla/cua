@@ -2935,9 +2935,11 @@ impl BrowserEngine {
             .zip(entries[cursor..].iter())
             .zip(external[cursor..].iter())
         {
+            let mut projected_node = node.clone();
+            projected_node.actions = entry.actions.clone();
             let listed = SemanticListedRef {
                 external: external.clone(),
-                node: node.clone(),
+                node: projected_node,
             };
             if entry.actions.is_empty() || entry.context_only {
                 content_refs.push(listed);
@@ -2954,16 +2956,20 @@ impl BrowserEngine {
             .map(|listed| listed.external.clone())
             .collect::<HashSet<_>>();
         if emitted.insert(group_ref.clone()) {
+            let mut node = page.group.clone();
+            node.actions.clear();
             content_refs.push(SemanticListedRef {
                 external: group_ref.clone(),
-                node: page.group.clone(),
+                node,
             });
         }
         if let (Some(parent), Some(external)) = (&page.parent_group, &parent_group_ref) {
             if emitted.insert(external.clone()) {
+                let mut node = parent.clone();
+                node.actions.clear();
                 content_refs.push(SemanticListedRef {
                     external: external.clone(),
-                    node: parent.clone(),
+                    node,
                 });
             }
         }

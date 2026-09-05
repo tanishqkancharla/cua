@@ -349,16 +349,24 @@ impl SemanticDocument {
         let parent_group = groups.get(1).map(|idx| self.nodes[*idx].clone());
 
         let mut members = HashSet::new();
-        let mut stack = vec![group_idx];
+        let mut stack: Vec<(usize, Option<usize>)> = vec![(group_idx, None)];
         let mut structure_complete = true;
-        while let Some(idx) = stack.pop() {
+        while let Some((idx, expected_parent)) = stack.pop() {
+            if let Some(parent_idx) = expected_parent {
+                if self.nodes[idx].parent_ax_id.as_deref()
+                    != Some(self.nodes[parent_idx].ax_id.as_str())
+                {
+                    structure_complete = false;
+                    continue;
+                }
+            }
             if !members.insert(idx) {
                 structure_complete = false;
                 continue;
             }
             for child_id in &self.nodes[idx].child_ax_ids {
                 match ax_lookup(&by_ax_id, &self.nodes[idx].frame, child_id) {
-                    AxLookup::Unique(child_idx) => stack.push(child_idx),
+                    AxLookup::Unique(child_idx) => stack.push((child_idx, Some(idx))),
                     AxLookup::Missing | AxLookup::Ambiguous | AxLookup::Unproven => {
                         structure_complete = false;
                     }
@@ -366,16 +374,34 @@ impl SemanticDocument {
             }
         }
 
-        let mut eligible = members
-            .into_iter()
-            .filter(|idx| {
-                !matches!(
-                    self.nodes[*idx].visibility,
-                    BrowserVisibility::CssHidden | BrowserVisibility::PageOccluded
-                ) && ancestor_indices(&self.nodes, &by_ax_id, *idx).is_some()
-            })
-            .collect::<Vec<_>>();
-        eligible.sort_by_key(|idx| self.nodes[*idx].document_order);
+        let mut eligible = Vec::new();
+        for idx in members {
+            if ancestor_indices(&self.nodes, &by_ax_id, idx).is_none() {
+                structure_complete = false;
+                continue;
+            }
+            if !matches!(
+                self.nodes[idx].visibility,
+                BrowserVisibility::CssHidden | BrowserVisibility::PageOccluded
+            ) {
+                eligible.push(idx);
+            }
+        }
+        let mut observed_orders = HashSet::new();
+        if eligible
+            .iter()
+            .any(|idx| !observed_orders.insert(self.nodes[*idx].document_order))
+        {
+            // DOM preorder and AX fallback order are different evidence
+            // domains. Equal values do not prove a relative ordinal.
+            structure_complete = false;
+        }
+        eligible.sort_by(|left, right| {
+            self.nodes[*left]
+                .document_order
+                .cmp(&self.nodes[*right].document_order)
+                .then_with(|| self.nodes[*left].ax_id.cmp(&self.nodes[*right].ax_id))
+        });
         let anchor_position = eligible
             .iter()
             .position(|idx| *idx == *anchor_idx)
@@ -1431,7 +1457,12 @@ fn with_ancestors(nodes: &[SemanticNode], selected: &[usize]) -> HashSet<usize> 
 fn render_outline(nodes: &[SemanticNode], selected: &HashSet<usize>) -> String {
     let by_ax_id = unique_ax_indices(nodes);
     let mut ordered: Vec<usize> = selected.iter().copied().collect();
-    ordered.sort_by_key(|idx| nodes[*idx].document_order);
+    ordered.sort_by(|left, right| {
+        nodes[*left]
+            .document_order
+            .cmp(&nodes[*right].document_order)
+            .then_with(|| nodes[*left].ax_id.cmp(&nodes[*right].ax_id))
+    });
     let mut lines = Vec::new();
     for idx in ordered {
         let node = &nodes[idx];
@@ -1844,6 +1875,41 @@ mod tests {
 
         assert!(!page.group_complete);
         assert!(page.document_collection_complete);
+    }
+
+    #[test]
+    fn semantic_context_marks_descendant_parent_contradictions_incomplete() {
+        for contradictory_parent in ["node-2", "node-0"] {
+            let mut document = context_fixture(1);
+            document.nodes[2].parent_ax_id = Some(contradictory_parent.into());
+            let anchor = document.nodes[1].to_context_ref_entry();
+
+            let page = document.context(&anchor).unwrap();
+
+            assert!(!page.group_complete);
+            assert_eq!(page.total_nodes, 1);
+            assert!(!page.outline.contains("Row 2"));
+        }
+    }
+
+    #[test]
+    fn semantic_context_tied_order_is_deterministic_but_not_claimed_complete() {
+        let mut document = context_fixture(2);
+        document.nodes[2].document_order = 7;
+        document.nodes[3].document_order = 7;
+        document.nodes[2].ax_id = "later-id".into();
+        document.nodes[3].ax_id = "earlier-id".into();
+        document.nodes[1].child_ax_ids = vec!["later-id".into(), "earlier-id".into()];
+        document.nodes[2].parent_ax_id = Some("node-1".into());
+        document.nodes[3].parent_ax_id = Some("node-1".into());
+        let anchor = document.nodes[1].to_context_ref_entry();
+
+        let first = document.context(&anchor).unwrap();
+        let second = document.context(&anchor).unwrap();
+
+        assert_eq!(first.outline, second.outline);
+        assert!(first.outline.find("Row 3") < first.outline.find("Row 2"));
+        assert!(!first.group_complete);
     }
 
     #[test]
