@@ -11,7 +11,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use serde_json::Value;
 use url::Url;
 
-use super::store::{BrowserActionKind, BrowserVisibility, FrameKind, FrameRef, RefEntry};
+use super::store::{
+    BrowserActionKind, BrowserVisibility, FrameKind, FrameRef, RefEntry, SemanticNodeIdentity,
+};
 
 pub(crate) const SEMANTIC_COMPUTED_STYLES: &[&str] = &[
     "display",
@@ -25,6 +27,8 @@ pub(crate) const SEMANTIC_COMPUTED_STYLES: &[&str] = &[
     "overflow-y",
 ];
 pub(crate) const DEFAULT_SEMANTIC_NODE_BUDGET: usize = 300;
+pub(crate) const CONTEXT_BEFORE_NODES: usize = 8;
+pub(crate) const CONTEXT_AFTER_NODES: usize = 16;
 const NEAR_VIEWPORT_MARGIN: f64 = 1_000.0;
 const MAX_SEMANTIC_TEXT_CHARS: usize = 1_000;
 const MAX_LINK_DESTINATION_CHARS: usize = 2_048;
@@ -132,6 +136,14 @@ pub(crate) struct SemanticNode {
 }
 
 impl SemanticNode {
+    pub(crate) fn identity(&self) -> SemanticNodeIdentity {
+        SemanticNodeIdentity {
+            ax_id: self.ax_id.clone(),
+            document_order: self.document_order,
+            frame: self.frame.clone(),
+        }
+    }
+
     pub(crate) fn to_ref_entry(&self) -> Option<RefEntry> {
         let backend_node_id = self.backend_node_id?;
         Some(RefEntry {
@@ -141,8 +153,24 @@ impl SemanticNode {
             actions: self.actions.clone(),
             visibility: Some(self.visibility),
             semantic: true,
+            context_only: false,
+            semantic_node: Some(self.identity()),
             frame: self.frame.clone(),
         })
+    }
+
+    pub(crate) fn to_context_ref_entry(&self) -> RefEntry {
+        RefEntry {
+            backend_node_id: self.backend_node_id.unwrap_or(0),
+            node_name: self.role.clone(),
+            label: self.name.clone(),
+            actions: Vec::new(),
+            visibility: Some(self.visibility),
+            semantic: true,
+            context_only: true,
+            semantic_node: Some(self.identity()),
+            frame: self.frame.clone(),
+        }
     }
 }
 
@@ -166,6 +194,28 @@ pub(crate) struct SemanticPage {
     pub(crate) next_offset: Option<usize>,
     pub(crate) omissions: OmissionCounts,
     pub(crate) hierarchy_complete: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SemanticContextError {
+    AnchorUnproven,
+    AnchorAmbiguous,
+    GroupUnavailable,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SemanticContextPage {
+    pub(crate) outline: String,
+    pub(crate) nodes: Vec<SemanticNode>,
+    pub(crate) group: SemanticNode,
+    pub(crate) parent_group: Option<SemanticNode>,
+    pub(crate) selected_nodes: usize,
+    pub(crate) total_nodes: usize,
+    pub(crate) before_omitted: usize,
+    pub(crate) after_omitted: usize,
+    pub(crate) group_complete: bool,
+    pub(crate) document_collection_complete: bool,
+    pub(crate) omissions: OmissionCounts,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -239,6 +289,136 @@ impl SemanticDocument {
             .iter()
             .map(|idx| self.nodes[*idx].clone())
             .collect::<Vec<_>>();
+        let mut omissions = self.omission_counts();
+        // Cyclic parent graphs are not truthful hierarchy evidence. Omit their
+        // selected nodes and account for them through the existing unknown
+        // omission bucket without extending the public response schema.
+        omissions.unknown += malformed_hierarchy;
+        omissions.budget = candidates.len().saturating_sub(end);
+
+        SemanticPage {
+            outline,
+            selected: selected_nodes,
+            selected_nodes: page_slice.len(),
+            total_nodes: candidates.len(),
+            next_offset: (end < candidates.len()).then_some(end),
+            omissions,
+            hierarchy_complete,
+        }
+    }
+
+    pub(crate) fn context(
+        &self,
+        anchor: &RefEntry,
+    ) -> Result<SemanticContextPage, SemanticContextError> {
+        let Some(identity) = &anchor.semantic_node else {
+            return Err(SemanticContextError::AnchorUnproven);
+        };
+        if !anchor.semantic || identity.frame.identity.is_none() {
+            return Err(SemanticContextError::AnchorUnproven);
+        }
+        let matching = self
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| {
+                node.ax_id == identity.ax_id
+                    && node.document_order == identity.document_order
+                    && node.frame == identity.frame
+            })
+            .map(|(idx, _)| idx)
+            .collect::<Vec<_>>();
+        let [anchor_idx] = matching.as_slice() else {
+            return Err(if matching.is_empty() {
+                SemanticContextError::AnchorUnproven
+            } else {
+                SemanticContextError::AnchorAmbiguous
+            });
+        };
+
+        let by_ax_id = unique_ax_indices(&self.nodes);
+        let ancestors = ancestor_indices(&self.nodes, &by_ax_id, *anchor_idx)
+            .ok_or(SemanticContextError::AnchorAmbiguous)?;
+        let groups = std::iter::once(*anchor_idx)
+            .chain(ancestors.iter().copied())
+            .filter(|idx| is_context_group_role(&self.nodes[*idx].role))
+            .collect::<Vec<_>>();
+        let group_idx = *groups
+            .first()
+            .ok_or(SemanticContextError::GroupUnavailable)?;
+        let parent_group = groups.get(1).map(|idx| self.nodes[*idx].clone());
+
+        let mut members = HashSet::new();
+        let mut stack = vec![group_idx];
+        let mut structure_complete = true;
+        while let Some(idx) = stack.pop() {
+            if !members.insert(idx) {
+                structure_complete = false;
+                continue;
+            }
+            for child_id in &self.nodes[idx].child_ax_ids {
+                match ax_lookup(&by_ax_id, &self.nodes[idx].frame, child_id) {
+                    AxLookup::Unique(child_idx) => stack.push(child_idx),
+                    AxLookup::Missing | AxLookup::Ambiguous | AxLookup::Unproven => {
+                        structure_complete = false;
+                    }
+                }
+            }
+        }
+
+        let mut eligible = members
+            .into_iter()
+            .filter(|idx| {
+                !matches!(
+                    self.nodes[*idx].visibility,
+                    BrowserVisibility::CssHidden | BrowserVisibility::PageOccluded
+                ) && ancestor_indices(&self.nodes, &by_ax_id, *idx).is_some()
+            })
+            .collect::<Vec<_>>();
+        eligible.sort_by_key(|idx| self.nodes[*idx].document_order);
+        let anchor_position = eligible
+            .iter()
+            .position(|idx| *idx == *anchor_idx)
+            .ok_or(SemanticContextError::AnchorUnproven)?;
+        let start = if group_idx == *anchor_idx {
+            0
+        } else {
+            anchor_position.saturating_sub(CONTEXT_BEFORE_NODES)
+        };
+        let end = (if group_idx == *anchor_idx {
+            CONTEXT_BEFORE_NODES + 1 + CONTEXT_AFTER_NODES
+        } else {
+            anchor_position + 1 + CONTEXT_AFTER_NODES
+        })
+        .min(eligible.len());
+        let selected_indices = &eligible[start..end];
+        let selected = with_ancestors(&self.nodes, selected_indices);
+        let outline = render_outline(&self.nodes, &selected);
+        let before_omitted = start;
+        let after_omitted = eligible.len().saturating_sub(end);
+        let group_complete =
+            self.complete && structure_complete && before_omitted == 0 && after_omitted == 0;
+        let mut omissions = self.omission_counts();
+        omissions.budget = before_omitted + after_omitted;
+        Ok(SemanticContextPage {
+            outline,
+            nodes: selected_indices
+                .iter()
+                .map(|idx| self.nodes[*idx].clone())
+                .collect(),
+            group: self.nodes[group_idx].clone(),
+            parent_group,
+            selected_nodes: selected_indices.len(),
+            total_nodes: eligible.len(),
+            before_omitted,
+            after_omitted,
+            group_complete,
+            document_collection_complete: self.complete,
+            omissions,
+        })
+    }
+
+    fn omission_counts(&self) -> OmissionCounts {
         let semantic_css_hidden = self
             .nodes
             .iter()
@@ -259,21 +439,7 @@ impl SemanticDocument {
                 BrowserVisibility::InViewport | BrowserVisibility::NearViewport => {}
             }
         }
-        // Cyclic parent graphs are not truthful hierarchy evidence. Omit their
-        // selected nodes and account for them through the existing unknown
-        // omission bucket without extending the public response schema.
-        omissions.unknown += malformed_hierarchy;
-        omissions.budget = candidates.len().saturating_sub(end);
-
-        SemanticPage {
-            outline,
-            selected: selected_nodes,
-            selected_nodes: page_slice.len(),
-            total_nodes: candidates.len(),
-            next_offset: (end < candidates.len()).then_some(end),
-            omissions,
-            hierarchy_complete,
-        }
+        omissions
     }
 }
 
@@ -1336,6 +1502,24 @@ fn semantic_ax_key<'a>(frame: &'a FrameRef, ax_id: &'a str) -> Option<SemanticAx
     ))
 }
 
+fn is_context_group_role(role: &str) -> bool {
+    matches!(
+        role,
+        "document"
+            | "rootwebarea"
+            | "webarea"
+            | "main"
+            | "article"
+            | "region"
+            | "feed"
+            | "list"
+            | "listitem"
+            | "table"
+            | "rowgroup"
+            | "row"
+    )
+}
+
 fn unique_ax_indices(nodes: &[SemanticNode]) -> HashMap<SemanticAxKey<'_>, Option<usize>> {
     let mut indices = HashMap::new();
     for (idx, node) in nodes.iter().enumerate() {
@@ -1357,9 +1541,8 @@ enum AxLookup {
     Unproven,
 }
 
-fn scoped_child_index(
+fn ax_lookup(
     indices: &HashMap<SemanticAxKey<'_>, Option<usize>>,
-    unproven_ax_ids: &HashSet<&str>,
     frame: &FrameRef,
     ax_id: &str,
 ) -> AxLookup {
@@ -1369,8 +1552,19 @@ fn scoped_child_index(
     match indices.get(&key) {
         Some(Some(idx)) => AxLookup::Unique(*idx),
         Some(None) => AxLookup::Ambiguous,
-        None if unproven_ax_ids.contains(ax_id) => AxLookup::Unproven,
         None => AxLookup::Missing,
+    }
+}
+
+fn scoped_child_index(
+    indices: &HashMap<SemanticAxKey<'_>, Option<usize>>,
+    unproven_ax_ids: &HashSet<&str>,
+    frame: &FrameRef,
+    ax_id: &str,
+) -> AxLookup {
+    match ax_lookup(indices, frame, ax_id) {
+        AxLookup::Missing if unproven_ax_ids.contains(ax_id) => AxLookup::Unproven,
+        lookup => lookup,
     }
 }
 
@@ -1514,6 +1708,17 @@ mod tests {
         }
     }
 
+    fn identified_main_frame() -> FrameRef {
+        FrameRef {
+            kind: FrameKind::Main,
+            oopif_target_id: None,
+            identity: Some(FrameIdentity {
+                frame_id: "main".into(),
+                loader_id: "loader".into(),
+            }),
+        }
+    }
+
     fn oopif_frame(target_id: &str, frame_id: &str, loader_id: &str) -> FrameRef {
         FrameRef {
             kind: FrameKind::Oopif,
@@ -1556,6 +1761,108 @@ mod tests {
             .iter()
             .filter_map(|n| n.name.as_deref())
             .collect()
+    }
+
+    fn context_fixture(count: usize) -> SemanticDocument {
+        let mut labels = vec![("Document", BrowserVisibility::InViewport)];
+        labels.push(("Results", BrowserVisibility::InViewport));
+        for _ in 0..count {
+            labels.push(("Row", BrowserVisibility::InViewport));
+        }
+        let mut document = query_fixture(&labels);
+        for node in &mut document.nodes {
+            node.frame = identified_main_frame();
+        }
+        document.nodes[0].role = "document".into();
+        document.nodes[0].backend_node_id = None;
+        document.nodes[0].child_ax_ids = vec!["node-1".into()];
+        document.nodes[1].role = "list".into();
+        document.nodes[1].backend_node_id = None;
+        document.nodes[1].parent_ax_id = Some("node-0".into());
+        document.nodes[1].child_ax_ids = (2..count + 2)
+            .map(|index| format!("node-{index}"))
+            .collect();
+        for (index, node) in document.nodes.iter_mut().enumerate().skip(2) {
+            node.role = "listitem".into();
+            node.name = Some(format!("Row {index}"));
+            node.parent_ax_id = Some("node-1".into());
+        }
+        document
+    }
+
+    #[test]
+    fn semantic_context_returns_bounded_source_order_and_backendless_group_path() {
+        let document = context_fixture(30);
+        let anchor = document.nodes[20].to_ref_entry().unwrap();
+
+        let page = document.context(&anchor).unwrap();
+
+        assert_eq!(page.group.role, "listitem");
+        assert_eq!(
+            page.parent_group.as_ref().map(|n| n.role.as_str()),
+            Some("list")
+        );
+        assert_eq!(
+            page.nodes.first().and_then(|n| n.name.as_deref()),
+            Some("Row 20")
+        );
+        // A group anchor starts at that group's beginning and doesn't escape it.
+        assert_eq!(page.total_nodes, 1);
+        assert!(page.group_complete);
+
+        let list_anchor = document.nodes[1].to_context_ref_entry();
+        let page = document.context(&list_anchor).unwrap();
+        assert_eq!(page.nodes.len(), 25);
+        assert_eq!(page.nodes[1].name.as_deref(), Some("Row 2"));
+        assert_eq!(page.after_omitted, 6);
+        assert!(!page.group_complete);
+        assert_eq!(
+            page.parent_group.as_ref().map(|n| n.role.as_str()),
+            Some("document")
+        );
+    }
+
+    #[test]
+    fn semantic_context_uses_snapshot_identity_not_duplicate_backend_id() {
+        let mut document = context_fixture(2);
+        document.nodes[2].backend_node_id = Some(77);
+        document.nodes[3].backend_node_id = Some(77);
+        let anchor = document.nodes[3].to_ref_entry().unwrap();
+
+        let page = document.context(&anchor).unwrap();
+
+        assert_eq!(page.group.name.as_deref(), Some("Row 3"));
+    }
+
+    #[test]
+    fn semantic_context_marks_unknown_group_structure_incomplete() {
+        let mut document = context_fixture(2);
+        document.nodes[1].child_ax_ids.push("missing-child".into());
+        let anchor = document.nodes[1].to_context_ref_entry();
+
+        let page = document.context(&anchor).unwrap();
+
+        assert!(!page.group_complete);
+        assert!(page.document_collection_complete);
+    }
+
+    #[test]
+    fn semantic_context_refuses_cyclic_or_unproven_anchor_ancestry() {
+        let mut cyclic = context_fixture(1);
+        cyclic.nodes[2].parent_ax_id = Some("node-2".into());
+        let anchor = cyclic.nodes[2].to_ref_entry().unwrap();
+        assert_eq!(
+            cyclic.context(&anchor).unwrap_err(),
+            SemanticContextError::AnchorAmbiguous
+        );
+
+        let mut unproven = context_fixture(1);
+        unproven.nodes[2].frame = FrameRef::main_unproven();
+        let anchor = unproven.nodes[2].to_ref_entry().unwrap();
+        assert_eq!(
+            unproven.context(&anchor).unwrap_err(),
+            SemanticContextError::AnchorUnproven
+        );
     }
 
     #[test]

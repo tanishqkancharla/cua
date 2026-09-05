@@ -53,8 +53,8 @@ use super::semantic::{
     SEMANTIC_COMPUTED_STYLES,
 };
 use super::store::{
-    format_ref, BrowserStore, FrameIdentity, FrameKind, FrameRef, RefEntry, SemanticContinuation,
-    SnapshotRecord, TabRecord, TargetRecord,
+    format_ref, parse_ref, BrowserStore, FrameIdentity, FrameKind, FrameRef, RefEntry,
+    SemanticContinuation, SnapshotRecord, TabRecord, TargetRecord,
 };
 use super::types::{
     BindingQuality, BrowserClassification, BrowserEngineFamily, BrowserProcessRole,
@@ -415,6 +415,31 @@ pub(crate) struct SemanticSnapshotOutcome {
     pub omissions: OmissionCounts,
     pub continuation: Option<String>,
     pub oopif: OopifStatus,
+}
+
+pub(crate) struct SemanticContextMetadata {
+    pub anchor_ref: String,
+    pub group_ref: String,
+    pub parent_group_ref: Option<String>,
+    pub order_domain: String,
+    pub before_omitted: usize,
+    pub after_omitted: usize,
+    pub group_complete: bool,
+    pub document_collection_complete: bool,
+}
+
+pub(crate) struct SemanticContextOutcome {
+    pub snapshot_id: u64,
+    pub url: String,
+    pub title: String,
+    pub outline: String,
+    pub refs: Vec<SemanticListedRef>,
+    pub content_refs: Vec<SemanticListedRef>,
+    pub selected_nodes: usize,
+    pub total_nodes: usize,
+    pub omissions: OmissionCounts,
+    pub oopif: OopifStatus,
+    pub context: SemanticContextMetadata,
 }
 
 pub(crate) struct BrowserTabScreenshot {
@@ -2114,6 +2139,8 @@ impl BrowserEngine {
                 actions: Vec::new(),
                 visibility: None,
                 semantic: false,
+                context_only: false,
+                semantic_node: None,
                 frame,
             });
         }
@@ -2168,6 +2195,8 @@ impl BrowserEngine {
                                 actions: Vec::new(),
                                 visibility: None,
                                 semantic: false,
+                                context_only: false,
+                                semantic_node: None,
                                 frame: FrameRef {
                                     kind: FrameKind::Oopif,
                                     oopif_target_id: Some(child.target_id.clone()),
@@ -2239,8 +2268,11 @@ impl BrowserEngine {
                         generation: record.generation,
                         url: url.clone(),
                         refs,
+                        next_ref_index: listed.len() as u32,
                         semantic: None,
                         semantic_root_identity: None,
+                        semantic_oopif_supported: false,
+                        semantic_oopif_frames: 0,
                         continuations: HashMap::new(),
                     },
                 );
@@ -2520,7 +2552,7 @@ impl BrowserEngine {
             }
             let (snapshot, continuation) = self
                 .store
-                .resolve_semantic_continuation(session, target_id, tab_id, token)?;
+                .take_semantic_continuation(session, target_id, tab_id, token)?;
             let record = self.store.get_target(session, target_id)?;
             let tab = record.tabs.get(tab_id).cloned().ok_or_else(|| {
                 refuse(
@@ -2564,12 +2596,13 @@ impl BrowserEngine {
                 continuation.query.as_deref(),
                 continuation.scope_backend_node_id,
             );
-            let start_index = snapshot
-                .refs
-                .keys()
-                .max()
-                .copied()
-                .map_or(0, |value| value.saturating_add(1));
+            let start_index = self.store.reserve_semantic_ref_indices(
+                session,
+                target_id,
+                tab_id,
+                snapshot.id,
+                DEFAULT_SEMANTIC_NODE_BUDGET,
+            )?;
             let oopif = if continuation.oopif_supported {
                 OopifStatus::Attached(continuation.oopif_frames)
             } else {
@@ -2587,28 +2620,27 @@ impl BrowserEngine {
                 start_index,
             );
             let next_token = outcome.continuation.clone();
-            self.store.update_target(session, target_id, |record| {
-                if let Some(stored) = record
-                    .tabs
-                    .get_mut(tab_id)
-                    .and_then(|tab| tab.snapshots.get_mut(&snapshot.id))
-                {
-                    stored.continuations.remove(token);
-                    stored.refs.extend(new_refs);
-                    if let (Some(token), Some(offset)) = (next_token, next_offset) {
-                        stored.continuations.insert(
-                            token,
-                            SemanticContinuation {
-                                offset,
-                                query: continuation.query.clone(),
-                                scope_backend_node_id: continuation.scope_backend_node_id,
-                                oopif_supported: continuation.oopif_supported,
-                                oopif_frames: continuation.oopif_frames,
-                            },
-                        );
-                    }
-                }
-            });
+            let next = match (next_token, next_offset) {
+                (Some(token), Some(offset)) => Some((
+                    token,
+                    SemanticContinuation {
+                        offset,
+                        query: continuation.query.clone(),
+                        scope_backend_node_id: continuation.scope_backend_node_id,
+                        oopif_supported: continuation.oopif_supported,
+                        oopif_frames: continuation.oopif_frames,
+                    },
+                )),
+                _ => None,
+            };
+            self.store.commit_reserved_semantic_refs(
+                session,
+                target_id,
+                tab_id,
+                snapshot.id,
+                new_refs,
+                next,
+            )?;
             return Ok(outcome);
         }
 
@@ -2775,8 +2807,19 @@ impl BrowserEngine {
                             generation: record.generation,
                             url,
                             refs,
+                            next_ref_index: outcome
+                                .refs
+                                .iter()
+                                .chain(outcome.content_refs.iter())
+                                .filter_map(|listed| {
+                                    parse_ref(&listed.external).map(|(_, idx)| idx)
+                                })
+                                .max()
+                                .map_or(0, |idx| idx.saturating_add(1)),
                             semantic: Some(semantic),
                             semantic_root_identity,
+                            semantic_oopif_supported: matches!(oopif, OopifStatus::Attached(_)),
+                            semantic_oopif_frames: oopif.frames(),
                             continuations,
                         },
                     );
@@ -2784,6 +2827,280 @@ impl BrowserEngine {
             });
         Ok(outcome)
     }
+
+    /// Resolve bounded structural context from an already-collected semantic
+    /// snapshot. This re-proves the exact target/tab/frame but performs no page
+    /// collection and preserves the existing snapshot/ref namespace.
+    pub(crate) async fn context_tab_semantic(
+        &self,
+        session: &str,
+        target_id: &str,
+        tab_id: &str,
+        context_ref: &str,
+    ) -> Result<SemanticContextOutcome, BrowserRefusal> {
+        let resolved = self
+            .store
+            .resolve_semantic_ref(session, target_id, tab_id, context_ref)?;
+        let identity = resolved.entry.semantic_node.as_ref().ok_or_else(|| {
+            refuse(
+                BrowserRefusalCode::BrowserRefStale,
+                "context_ref has no exact stored semantic identity",
+            )
+        })?;
+        let validated = self
+            .revalidate_for_mutation(session, target_id, Some(tab_id))
+            .await?;
+        self.revalidate_semantic_context_frame(
+            session,
+            target_id,
+            tab_id,
+            &validated,
+            &identity.frame,
+        )
+        .await?;
+        let document = resolved.snapshot.semantic.as_ref().ok_or_else(|| {
+            refuse(
+                BrowserRefusalCode::BrowserRefStale,
+                "context_ref no longer has stored semantic document state",
+            )
+        })?;
+        let page = document.context(&resolved.entry).map_err(|error| {
+            let message = match error {
+                super::semantic::SemanticContextError::AnchorUnproven => {
+                    "context_ref does not identify one proven node in the stored semantic document"
+                }
+                super::semantic::SemanticContextError::AnchorAmbiguous => {
+                    "context_ref semantic ancestry is ambiguous or cyclic"
+                }
+                super::semantic::SemanticContextError::GroupUnavailable => {
+                    "context_ref has no proven enclosing structural group"
+                }
+            };
+            refuse(BrowserRefusalCode::BrowserRefStale, message)
+        })?;
+
+        let prior_entry = |node: &SemanticNode| {
+            let identity = node.identity();
+            resolved
+                .snapshot
+                .refs
+                .values()
+                .find(|entry| {
+                    entry.semantic
+                        && !entry.context_only
+                        && entry.semantic_node.as_ref() == Some(&identity)
+                })
+                .cloned()
+        };
+        let group_entry = page.group.to_context_ref_entry();
+        let parent_entry = page
+            .parent_group
+            .as_ref()
+            .map(SemanticNode::to_context_ref_entry);
+        let group_identity = page.group.identity();
+        let parent_identity = page.parent_group.as_ref().map(SemanticNode::identity);
+        let mut entries = vec![group_entry.clone()];
+        entries.extend(parent_entry.iter().cloned());
+        entries.extend(page.nodes.iter().map(|node| {
+            let identity = node.identity();
+            if identity == group_identity {
+                group_entry.clone()
+            } else if parent_identity.as_ref() == Some(&identity) {
+                parent_entry.clone().expect("matching parent identity")
+            } else {
+                prior_entry(node).unwrap_or_else(|| node.to_context_ref_entry())
+            }
+        }));
+        let external = self.store.extend_semantic_snapshot_refs(
+            session,
+            target_id,
+            tab_id,
+            resolved.snapshot.id,
+            context_ref,
+            entries.clone(),
+        )?;
+        let mut cursor = 0;
+        let group_ref = external[cursor].clone();
+        cursor += 1;
+        let parent_group_ref = page.parent_group.as_ref().map(|_| {
+            let value = external[cursor].clone();
+            cursor += 1;
+            value
+        });
+        let mut refs = Vec::new();
+        let mut content_refs = Vec::new();
+        for ((node, entry), external) in page
+            .nodes
+            .iter()
+            .zip(entries[cursor..].iter())
+            .zip(external[cursor..].iter())
+        {
+            let listed = SemanticListedRef {
+                external: external.clone(),
+                node: node.clone(),
+            };
+            if entry.actions.is_empty() || entry.context_only {
+                content_refs.push(listed);
+            } else {
+                refs.push(listed);
+            }
+        }
+        // Structural traversal refs must be present even when their node lies
+        // outside the bounded visible window, but never duplicate an emitted
+        // semantic identity/ref pair when the group is inside the window.
+        let mut emitted = refs
+            .iter()
+            .chain(content_refs.iter())
+            .map(|listed| listed.external.clone())
+            .collect::<HashSet<_>>();
+        if emitted.insert(group_ref.clone()) {
+            content_refs.push(SemanticListedRef {
+                external: group_ref.clone(),
+                node: page.group.clone(),
+            });
+        }
+        if let (Some(parent), Some(external)) = (&page.parent_group, &parent_group_ref) {
+            if emitted.insert(external.clone()) {
+                content_refs.push(SemanticListedRef {
+                    external: external.clone(),
+                    node: parent.clone(),
+                });
+            }
+        }
+        let oopif = if resolved.snapshot.semantic_oopif_supported {
+            OopifStatus::Attached(resolved.snapshot.semantic_oopif_frames)
+        } else {
+            OopifStatus::Unsupported
+        };
+        let order_domain = semantic_order_domain(resolved.snapshot.id, &identity.frame);
+        Ok(SemanticContextOutcome {
+            snapshot_id: resolved.snapshot.id,
+            url: resolved.snapshot.url,
+            title: validated.tab.title,
+            outline: page.outline,
+            refs,
+            content_refs,
+            selected_nodes: page.selected_nodes,
+            total_nodes: page.total_nodes,
+            omissions: page.omissions,
+            oopif,
+            context: SemanticContextMetadata {
+                anchor_ref: context_ref.to_owned(),
+                group_ref,
+                parent_group_ref,
+                order_domain,
+                before_omitted: page.before_omitted,
+                after_omitted: page.after_omitted,
+                group_complete: page.group_complete,
+                document_collection_complete: page.document_collection_complete,
+            },
+        })
+    }
+
+    async fn revalidate_semantic_context_frame(
+        &self,
+        session: &str,
+        target_id: &str,
+        tab_id: &str,
+        validated: &ValidatedTab,
+        frame: &FrameRef,
+    ) -> Result<(), BrowserRefusal> {
+        if frame.oopif_target_id.is_none() {
+            self.frame_session_for_mutation(session, target_id, tab_id, validated, frame)
+                .await?;
+            return Ok(());
+        }
+        let Some(identity) = &frame.identity else {
+            return Err(refuse(
+                BrowserRefusalCode::BrowserRefStale,
+                "the OOPIF context ref carries no provable frame identity",
+            ));
+        };
+        let expected_target = frame.oopif_target_id.as_deref().unwrap_or_default();
+        let children = self
+            .attached_iframe_children(&validated.conn, &validated.cdp_session)
+            .await
+            .map_err(|error| match error {
+                AttachError::Unsupported => refuse(
+                    BrowserRefusalCode::BrowserRouteUnavailable,
+                    "the browser no longer supports OOPIF context revalidation",
+                ),
+                AttachError::Failed(error) => route_err(
+                    "Target.setAutoAttach failed during context revalidation",
+                    error,
+                ),
+            })?;
+        let outcome = if let Some(child) = children
+            .iter()
+            .find(|child| child.target_id == expected_target)
+        {
+            match self
+                .local_frame_tree(&validated.conn, &child.session_id)
+                .await
+            {
+                Ok(tree) if tree.proves(identity) => Ok(()),
+                Ok(_) => Err(refuse(
+                    BrowserRefusalCode::BrowserRefStale,
+                    "the context ref's cross-process frame navigated since the snapshot",
+                )),
+                Err(FrameTreeError::Unsupported) => Err(refuse(
+                    BrowserRefusalCode::BrowserRouteUnavailable,
+                    "the browser no longer reports the OOPIF context frame tree",
+                )),
+                Err(FrameTreeError::Failed(error)) => Err(route_err(
+                    "Page.getFrameTree failed during context revalidation",
+                    error,
+                )),
+            }
+        } else {
+            Err(refuse(
+                BrowserRefusalCode::BrowserRefStale,
+                "the context ref's cross-process frame is no longer attached beneath the bound tab",
+            ))
+        };
+        let _ = validated
+            .conn
+            .call(
+                Some(&validated.cdp_session),
+                "Target.setAutoAttach",
+                json!({
+                    "autoAttach": false,
+                    "waitForDebuggerOnStart": false,
+                    "flatten": true
+                }),
+            )
+            .await;
+        for child in children {
+            let _ = validated
+                .conn
+                .call(
+                    Some(&validated.cdp_session),
+                    "Target.detachFromTarget",
+                    json!({ "sessionId": child.session_id }),
+                )
+                .await;
+        }
+        outcome
+    }
+}
+
+fn semantic_order_domain(snapshot_id: u64, frame: &FrameRef) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"cua-semantic-order-domain-v1\0");
+    digest.update(snapshot_id.to_be_bytes());
+    digest.update(frame.kind.as_str().as_bytes());
+    digest.update(b"\0");
+    if let Some(target) = &frame.oopif_target_id {
+        digest.update(target.as_bytes());
+    }
+    digest.update(b"\0");
+    if let Some(identity) = &frame.identity {
+        digest.update(identity.frame_id.as_bytes());
+        digest.update(b"\0");
+        digest.update(identity.loader_id.as_bytes());
+    }
+    let encoded = format!("{:x}", digest.finalize());
+    format!("od-{}", &encoded[..24])
 }
 
 fn semantic_snapshot_complete(

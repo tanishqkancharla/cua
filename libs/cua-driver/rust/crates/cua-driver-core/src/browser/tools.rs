@@ -294,6 +294,10 @@ impl GetBrowserStateTool {
                         "type": "string",
                         "description": "Current semantic/content ref whose subtree should be observed."
                     },
+                    "context_ref": {
+                        "type": "string",
+                        "description": "Current issued semantic/content ref whose bounded same-snapshot structural context should be observed. Cannot be combined with query, scope_ref, continuation, or screenshot."
+                    },
                     "query": {
                         "type": "string",
                         "description": "Read-only semantic match over role, accessible name, and visible text."
@@ -380,6 +384,13 @@ impl Tool for GetBrowserStateTool {
                     )
                 }
             };
+            let context_ref = match args.get("context_ref") {
+                None => None,
+                Some(Value::String(value)) => Some(value.as_str()),
+                Some(_) => {
+                    return ToolResult::error("Field context_ref has wrong type: expected string")
+                }
+            };
             if snapshot_format != "dom_refs_v1" && snapshot_format != "semantic_v2" {
                 return ToolResult::error(format!(
                     "snapshot_format must be \"dom_refs_v1\" or \"semantic_v2\", got {snapshot_format:?}"
@@ -388,13 +399,95 @@ impl Tool for GetBrowserStateTool {
             if snapshot_format == "dom_refs_v1"
                 && (args.opt_str("scope_ref").is_some()
                     || args.opt_str("query").is_some()
-                    || args.opt_str("continuation").is_some())
+                    || args.opt_str("continuation").is_some()
+                    || context_ref.is_some())
             {
                 return ToolResult::error(
-                    "scope_ref, query, and continuation require snapshot_format=\"semantic_v2\"",
+                    "scope_ref, query, continuation, and context_ref require snapshot_format=\"semantic_v2\"",
                 );
             }
             if snapshot_format == "semantic_v2" {
+                if context_ref.is_some()
+                    && (args.opt_str("scope_ref").is_some()
+                        || args.opt_str("query").is_some()
+                        || args.opt_str("continuation").is_some()
+                        || include_screenshot)
+                {
+                    return ToolResult::error(
+                        "context_ref cannot be combined with scope_ref, query, continuation, or include_screenshot",
+                    );
+                }
+                if let Some(context_ref) = context_ref {
+                    let outcome = match self
+                        .engine
+                        .context_tab_semantic(&session, &target_id, &tab_id, context_ref)
+                        .await
+                    {
+                        Ok(outcome) => outcome,
+                        Err(refusal) => return refusal.to_tool_result(),
+                    };
+                    let refs = outcome
+                        .refs
+                        .iter()
+                        .map(semantic_ref_value)
+                        .collect::<Vec<_>>();
+                    let content_refs = outcome
+                        .content_refs
+                        .iter()
+                        .map(semantic_ref_value)
+                        .collect::<Vec<_>>();
+                    return ToolResult::text(format!(
+                        "semantic context p{} of {}: {} action ref(s), {} content ref(s)",
+                        outcome.snapshot_id,
+                        outcome.url,
+                        refs.len(),
+                        content_refs.len()
+                    ))
+                    .with_structured(json!({
+                        "status": "ok",
+                        "mode": "snapshot",
+                        "target_id": target_id,
+                        "tab_id": tab_id,
+                        "snapshot": {
+                            "id": format!("p{}", outcome.snapshot_id),
+                            "format": "semantic_v2",
+                            "complete": outcome.context.group_complete,
+                            "scope": "context",
+                            "selected_nodes": outcome.selected_nodes,
+                            "total_nodes": outcome.total_nodes,
+                            "node_budget": super::semantic::CONTEXT_BEFORE_NODES + 1 + super::semantic::CONTEXT_AFTER_NODES,
+                            "omitted": {
+                                "css_hidden": outcome.omissions.css_hidden,
+                                "offscreen": outcome.omissions.offscreen,
+                                "page_occluded": outcome.omissions.page_occluded,
+                                "no_layout": outcome.omissions.no_layout,
+                                "unknown": outcome.omissions.unknown,
+                                "budget": outcome.omissions.budget,
+                                "unprovable_frame": outcome.omissions.unprovable_frame,
+                            },
+                            "continuation": Value::Null,
+                        },
+                        "page": { "url": outcome.url, "title": outcome.title },
+                        "outline": outcome.outline,
+                        "refs": refs,
+                        "content_refs": content_refs,
+                        "oopif": {
+                            "status": outcome.oopif.as_str(),
+                            "frames": outcome.oopif.frames(),
+                        },
+                        "context": {
+                            "anchor_ref": outcome.context.anchor_ref,
+                            "group_ref": outcome.context.group_ref,
+                            "parent_group_ref": outcome.context.parent_group_ref,
+                            "order_domain": outcome.context.order_domain,
+                            "before_omitted": outcome.context.before_omitted,
+                            "after_omitted": outcome.context.after_omitted,
+                            "group_complete": outcome.context.group_complete,
+                            "document_collection_complete": outcome.context.document_collection_complete,
+                            "virtualized_extent": "unknown",
+                        },
+                    }));
+                }
                 let snapshot = match self
                     .engine
                     .snapshot_tab_semantic(
@@ -3318,6 +3411,10 @@ mod tests {
         assert_eq!(
             state.def().input_schema["properties"]["include_screenshot"]["default"],
             false
+        );
+        assert_eq!(
+            state.def().input_schema["properties"]["context_ref"]["type"],
+            "string"
         );
 
         let prepare = BrowserPrepareTool::new(e.clone());
