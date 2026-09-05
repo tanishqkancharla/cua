@@ -36,5 +36,14 @@ reported explicitly. No app-specific rules or permission changes are included.
 
 ## Status
 
-Implementation and validation pending. The personal fork is the workstream;
-this document does not claim upstream selection, acceptance or release.
+Implemented in the shared semantic selector with no protocol changes. Seven
+focused tests pass; five reproduced the defect before the implementation. The
+full core suite passes (608 unit tests, two contract tests, three lifecycle
+tests; one existing doc test is ignored), as does the workspace formatting
+check. These are deterministic regression results, not real-driver evidence.
+
+The draft is stacked on the existing OpenSky driver baseline
+`8f5353b30a7be22094d1f3ab20b452078a560129` so prior driver work does not appear
+as part of this fix. The personal fork is the workstream; this document does
+not claim upstream selection, acceptance or release. Real-browser verification
+and cross-platform GUI certification are still pending.
