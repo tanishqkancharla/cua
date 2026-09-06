@@ -32,6 +32,9 @@ pub(crate) const CONTEXT_AFTER_NODES: usize = 16;
 const NEAR_VIEWPORT_MARGIN: f64 = 1_000.0;
 const MAX_SEMANTIC_TEXT_CHARS: usize = 1_000;
 const MAX_LINK_DESTINATION_CHARS: usize = 2_048;
+// Raw AX node ids with no text cannot become semantic nodes, so the empty id
+// is a collision-free internal marker for an unprovable collapsed edge.
+const UNRESOLVED_AX_ID: &str = "";
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Rect {
@@ -761,24 +764,40 @@ pub(crate) fn compose_accessibility_tree(
     // unknown, duplicate, or cyclic ids remain unresolved so later hierarchy
     // checks fail closed rather than inventing ancestry.
     let mut raw_by_id: HashMap<String, Option<&Value>> = HashMap::new();
-    let mut retained_ids = HashSet::new();
     for ax in ax_nodes {
-        let Some(id) = ax.get("nodeId").and_then(Value::as_str) else {
+        let Some(id) = ax
+            .get("nodeId")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+        else {
             continue;
         };
         raw_by_id
             .entry(id.to_owned())
             .and_modify(|entry| *entry = None)
             .or_insert(Some(ax));
-        let role = ax_value_string(ax.get("role"))
-            .unwrap_or_else(|| "unknown".to_owned())
-            .to_ascii_lowercase();
-        if ax.get("ignored").and_then(Value::as_bool) != Some(true) && role != "inlinetextbox" {
-            retained_ids.insert(id.to_owned());
-        }
     }
+    let retained_ids = raw_by_id
+        .iter()
+        .filter_map(|(id, raw)| raw.filter(|raw| retained_ax_node(raw)).map(|_| id.clone()))
+        .collect::<HashSet<_>>();
+    let raw_children = raw_by_id
+        .iter()
+        .filter_map(|(id, raw)| raw.map(|raw| (id.clone(), RawAxChildren::from_node(raw))))
+        .collect::<HashMap<_, _>>();
+    let traversal_budget = raw_by_id
+        .len()
+        .saturating_add(
+            raw_children
+                .values()
+                .map(|children| children.valid.len())
+                .sum::<usize>(),
+        )
+        .saturating_add(1);
+    let unresolved_ax_id = UNRESOLVED_AX_ID;
 
     let mut nodes = Vec::new();
+    let mut parent_cache = HashMap::new();
     for (fallback_order, ax) in ax_nodes.iter().enumerate() {
         let ax_id = ax
             .get("nodeId")
@@ -791,10 +810,7 @@ pub(crate) fn compose_accessibility_tree(
         let role = ax_value_string(ax.get("role"))
             .unwrap_or_else(|| "unknown".to_owned())
             .to_ascii_lowercase();
-        if ax.get("ignored").and_then(Value::as_bool) == Some(true)
-            || role == "inlinetextbox"
-            || !retained_ids.contains(&ax_id)
-        {
+        if !retained_ids.contains(&ax_id) {
             continue;
         }
         let backend_node_id = ax.get("backendDOMNodeId").and_then(Value::as_i64);
@@ -809,10 +825,28 @@ pub(crate) fn compose_accessibility_tree(
             .then(|| dom_meta.and_then(|meta| meta.destination_url.clone()))
             .flatten();
         let document_order = dom_meta.map_or(fallback_order, |meta| meta.order);
+        let mut child_ax_ids = normalized_ax_children(
+            ax,
+            &raw_by_id,
+            &raw_children,
+            &retained_ids,
+            traversal_budget,
+        );
+        if !child_ax_ids.complete {
+            child_ax_ids.ids.push(unresolved_ax_id.to_owned());
+        }
+        let parent_ax_id = normalized_ax_parent(
+            &ax_id,
+            &raw_by_id,
+            &raw_children,
+            &retained_ids,
+            &mut parent_cache,
+        )
+        .to_ax_id(unresolved_ax_id);
         nodes.push(SemanticNode {
             ax_id,
-            parent_ax_id: normalized_ax_parent(ax, &raw_by_id, &retained_ids),
-            child_ax_ids: normalized_ax_children(ax, &raw_by_id, &retained_ids),
+            parent_ax_id,
+            child_ax_ids: child_ax_ids.ids,
             backend_node_id,
             role,
             name,
@@ -838,74 +872,201 @@ pub(crate) fn compose_accessibility_tree(
     }
 }
 
-fn normalized_ax_parent(
-    ax: &Value,
-    raw_by_id: &HashMap<String, Option<&Value>>,
-    retained_ids: &HashSet<String>,
-) -> Option<String> {
-    let mut current = ax.get("parentId").and_then(Value::as_str)?.to_owned();
-    let mut visited = HashSet::new();
-    while visited.insert(current.clone()) {
-        if retained_ids.contains(&current) {
-            return Some(current);
-        }
-        let Some(Some(raw)) = raw_by_id.get(&current) else {
-            return Some(current);
-        };
-        let Some(parent) = raw.get("parentId").and_then(Value::as_str) else {
-            return None;
-        };
-        current = parent.to_owned();
+fn retained_ax_node(ax: &Value) -> bool {
+    if ax.get("ignored").and_then(Value::as_bool) == Some(true) {
+        return false;
     }
-    Some(current)
+    ax_value_string(ax.get("role")).is_none_or(|role| !role.eq_ignore_ascii_case("inlinetextbox"))
+}
+
+#[derive(Debug)]
+struct RawAxChildren {
+    valid: Vec<String>,
+    valid_set: HashSet<String>,
+    complete: bool,
+}
+
+impl RawAxChildren {
+    fn from_node(ax: &Value) -> Self {
+        let Some(value) = ax.get("childIds") else {
+            return Self {
+                valid: Vec::new(),
+                valid_set: HashSet::new(),
+                complete: true,
+            };
+        };
+        let Some(children) = value.as_array() else {
+            return Self {
+                valid: Vec::new(),
+                valid_set: HashSet::new(),
+                complete: false,
+            };
+        };
+        let mut counts = HashMap::new();
+        let mut complete = true;
+        for child in children {
+            if let Some(id) = child.as_str().filter(|id| !id.is_empty()) {
+                *counts.entry(id).or_insert(0_usize) += 1;
+            } else {
+                complete = false;
+            }
+        }
+        let valid = children
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|id| counts.get(id) == Some(&1))
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        if valid.len() != children.len() {
+            complete = false;
+        }
+        let valid_set = valid.iter().cloned().collect();
+        Self {
+            valid,
+            valid_set,
+            complete,
+        }
+    }
+}
+
+fn is_unresolved_ax_id(ax_id: &str) -> bool {
+    ax_id == UNRESOLVED_AX_ID
+}
+
+#[derive(Debug, Clone)]
+enum NormalizedAxParent {
+    Root,
+    Retained(String),
+    Unresolved,
+}
+
+impl NormalizedAxParent {
+    fn to_ax_id(&self, unresolved_ax_id: &str) -> Option<String> {
+        match self {
+            Self::Root => None,
+            Self::Retained(id) => Some(id.clone()),
+            Self::Unresolved => Some(unresolved_ax_id.to_owned()),
+        }
+    }
+}
+
+fn normalized_ax_parent(
+    ax_id: &str,
+    raw_by_id: &HashMap<String, Option<&Value>>,
+    raw_children: &HashMap<String, RawAxChildren>,
+    retained_ids: &HashSet<String>,
+    cache: &mut HashMap<String, NormalizedAxParent>,
+) -> NormalizedAxParent {
+    if let Some(resolution) = cache.get(ax_id) {
+        return resolution.clone();
+    }
+    let mut child = ax_id.to_owned();
+    let mut visited = HashSet::new();
+    let mut path = Vec::new();
+    let resolution = loop {
+        if let Some(resolution) = cache.get(&child) {
+            break resolution.clone();
+        }
+        if !visited.insert(child.clone()) {
+            break NormalizedAxParent::Unresolved;
+        }
+        path.push(child.clone());
+        let Some(Some(raw)) = raw_by_id.get(&child) else {
+            break NormalizedAxParent::Unresolved;
+        };
+        let Some(parent_value) = raw.get("parentId") else {
+            break NormalizedAxParent::Root;
+        };
+        let Some(parent) = parent_value.as_str().filter(|parent| !parent.is_empty()) else {
+            break NormalizedAxParent::Unresolved;
+        };
+        let Some(Some(parent_raw)) = raw_by_id.get(parent) else {
+            break NormalizedAxParent::Unresolved;
+        };
+        if raw_children
+            .get(parent)
+            .is_none_or(|children| !children.valid_set.contains(&child))
+            || parent_raw.get("nodeId").and_then(Value::as_str) != Some(parent)
+        {
+            break NormalizedAxParent::Unresolved;
+        }
+        if retained_ids.contains(parent) {
+            break NormalizedAxParent::Retained(parent.to_owned());
+        }
+        child = parent.to_owned();
+    };
+    for id in path {
+        cache.insert(id, resolution.clone());
+    }
+    resolution
 }
 
 fn normalized_ax_children(
     ax: &Value,
     raw_by_id: &HashMap<String, Option<&Value>>,
+    raw_children: &HashMap<String, RawAxChildren>,
     retained_ids: &HashSet<String>,
-) -> Vec<String> {
-    fn expand(
-        id: &str,
-        raw_by_id: &HashMap<String, Option<&Value>>,
-        retained_ids: &HashSet<String>,
-        path: &mut HashSet<String>,
-        out: &mut Vec<String>,
-    ) {
-        if retained_ids.contains(id) {
-            out.push(id.to_owned());
-            return;
-        }
-        if !path.insert(id.to_owned()) {
-            out.push(id.to_owned());
-            return;
-        }
-        match raw_by_id.get(id) {
-            Some(Some(raw)) => {
-                if let Some(children) = raw.get("childIds").and_then(Value::as_array) {
-                    for child in children.iter().filter_map(Value::as_str) {
-                        expand(child, raw_by_id, retained_ids, path, out);
-                    }
-                }
-            }
-            Some(None) | None => out.push(id.to_owned()),
-        }
-        path.remove(id);
-    }
-
+    traversal_budget: usize,
+) -> NormalizedAxChildren {
+    let Some(root_id) = ax.get("nodeId").and_then(Value::as_str) else {
+        return NormalizedAxChildren {
+            ids: Vec::new(),
+            complete: false,
+        };
+    };
+    let Some(root_children) = raw_children.get(root_id) else {
+        return NormalizedAxChildren {
+            ids: Vec::new(),
+            complete: false,
+        };
+    };
+    let mut complete = root_children.complete;
     let mut out = Vec::new();
-    if let Some(children) = ax.get("childIds").and_then(Value::as_array) {
-        for child in children.iter().filter_map(Value::as_str) {
-            expand(
-                child,
-                raw_by_id,
-                retained_ids,
-                &mut HashSet::new(),
-                &mut out,
-            );
+    let mut stack = root_children
+        .valid
+        .iter()
+        .rev()
+        .map(|child| (root_id.to_owned(), child.clone()))
+        .collect::<Vec<_>>();
+    let mut visited = HashSet::from([root_id.to_owned()]);
+    let mut steps = 0_usize;
+    while let Some((parent_id, child_id)) = stack.pop() {
+        steps += 1;
+        if steps > traversal_budget {
+            complete = false;
+            break;
+        }
+        if !visited.insert(child_id.clone()) {
+            complete = false;
+            continue;
+        }
+        let Some(Some(child)) = raw_by_id.get(&child_id) else {
+            complete = false;
+            continue;
+        };
+        if child.get("parentId").and_then(Value::as_str) != Some(parent_id.as_str()) {
+            complete = false;
+            continue;
+        }
+        if retained_ids.contains(&child_id) {
+            out.push(child_id);
+            continue;
+        }
+        let Some(children) = raw_children.get(&child_id) else {
+            complete = false;
+            continue;
+        };
+        complete &= children.complete;
+        for grandchild in children.valid.iter().rev() {
+            stack.push((child_id.clone(), grandchild.clone()));
         }
     }
-    out
+    NormalizedAxChildren { ids: out, complete }
+}
+
+struct NormalizedAxChildren {
+    ids: Vec<String>,
+    complete: bool,
 }
 
 fn label_document_scroll_roots(nodes: &mut [SemanticNode], dom: &DomIndex) {
@@ -1677,6 +1838,9 @@ fn scoped_child_index(
     frame: &FrameRef,
     ax_id: &str,
 ) -> AxLookup {
+    if is_unresolved_ax_id(ax_id) {
+        return AxLookup::Unproven;
+    }
     match ax_lookup(indices, frame, ax_id) {
         AxLookup::Missing if unproven_ax_ids.contains(ax_id) => AxLookup::Unproven,
         lookup => lookup,
@@ -1699,6 +1863,9 @@ fn ancestor_indices(
     let mut visited = HashSet::from([start_idx]);
     let mut current_idx = start_idx;
     while let Some(parent_id) = nodes[current_idx].parent_ax_id.as_deref() {
+        if is_unresolved_ax_id(parent_id) {
+            return None;
+        }
         let parent_key = semantic_ax_key(&nodes[current_idx].frame, parent_id)?;
         let parent_idx = match by_ax_id.get(&parent_key) {
             None => break,
@@ -1926,6 +2093,233 @@ mod tests {
         let inspect = table_page.outline.find("Inspect").unwrap();
         assert!(earlier < inspect);
         assert!(table_page.group_complete);
+    }
+
+    #[test]
+    fn ignored_ax_normalization_is_iterative_and_document_bounded() {
+        const IGNORED_DEPTH: usize = 10_000;
+        const RETAINED_LEAVES: usize = 10_000;
+        let mut nodes = Vec::with_capacity(IGNORED_DEPTH + RETAINED_LEAVES + 1);
+        nodes.push(json!({
+            "nodeId":"group",
+            "ignored":false,
+            "role":{"value":"table"},
+            "childIds":["ignored-0"]
+        }));
+        for index in 0..IGNORED_DEPTH {
+            let parent = if index == 0 {
+                "group".to_owned()
+            } else {
+                format!("ignored-{}", index - 1)
+            };
+            let children = if index + 1 == IGNORED_DEPTH {
+                (0..RETAINED_LEAVES)
+                    .map(|leaf| Value::String(format!("row-{leaf}")))
+                    .collect::<Vec<_>>()
+            } else {
+                vec![Value::String(format!("ignored-{}", index + 1))]
+            };
+            nodes.push(json!({
+                "nodeId":format!("ignored-{index}"),
+                "parentId":parent,
+                "ignored":true,
+                "childIds":children
+            }));
+        }
+        for leaf in 0..RETAINED_LEAVES {
+            nodes.push(json!({
+                "nodeId":format!("row-{leaf}"),
+                "parentId":format!("ignored-{}", IGNORED_DEPTH - 1),
+                "ignored":false,
+                "role":{"value":"row"},
+                "childIds":[]
+            }));
+        }
+
+        let document = compose_accessibility_tree(
+            &json!({"nodes":nodes}),
+            &DomIndex::default(),
+            &LayoutIndex::default(),
+            &Viewport::default(),
+            identified_main_frame(),
+        );
+        let group = document
+            .nodes
+            .iter()
+            .find(|node| node.ax_id == "group")
+            .unwrap();
+        let last_row = document
+            .nodes
+            .iter()
+            .find(|node| node.ax_id == format!("row-{}", RETAINED_LEAVES - 1))
+            .unwrap();
+
+        assert_eq!(group.child_ax_ids.len(), RETAINED_LEAVES);
+        assert_eq!(
+            group.child_ax_ids.first().map(String::as_str),
+            Some("row-0")
+        );
+        assert_eq!(
+            group.child_ax_ids.last().map(String::as_str),
+            Some(format!("row-{}", RETAINED_LEAVES - 1).as_str())
+        );
+        assert_eq!(last_row.parent_ax_id.as_deref(), Some("group"));
+    }
+
+    #[test]
+    fn ignored_ax_normalization_preserves_dag_and_edge_contradictions_as_incomplete() {
+        let ax = json!({"nodes":[
+            {"nodeId":"group","ignored":false,"role":{"value":"table"},"childIds":["i1","i2"]},
+            {"nodeId":"i1","parentId":"group","ignored":true,"childIds":["shared"]},
+            {"nodeId":"i2","parentId":"group","ignored":true,"childIds":["shared"]},
+            {"nodeId":"shared","parentId":"i1","ignored":true,"childIds":["row"]},
+            {"nodeId":"row","parentId":"shared","ignored":false,"role":{"value":"row"},"childIds":[]}
+        ]});
+        let document = compose_accessibility_tree(
+            &ax,
+            &DomIndex::default(),
+            &LayoutIndex::default(),
+            &Viewport::default(),
+            identified_main_frame(),
+        );
+        let group = document
+            .nodes
+            .iter()
+            .find(|node| node.ax_id == "group")
+            .unwrap();
+
+        assert_eq!(group.child_ax_ids.first().map(String::as_str), Some("row"));
+        assert_eq!(group.child_ax_ids.len(), 2);
+        assert!(
+            !document
+                .context(&group.to_context_ref_entry())
+                .unwrap()
+                .group_complete
+        );
+
+        let contradictory = json!({"nodes":[
+            {"nodeId":"group","ignored":false,"role":{"value":"table"},"childIds":["i1"]},
+            {"nodeId":"i1","parentId":"group","ignored":true,"childIds":["row"]},
+            {"nodeId":"i2","parentId":"group","ignored":true,"childIds":[]},
+            {"nodeId":"row","parentId":"i2","ignored":false,"role":{"value":"row"},"childIds":[]}
+        ]});
+        let document = compose_accessibility_tree(
+            &contradictory,
+            &DomIndex::default(),
+            &LayoutIndex::default(),
+            &Viewport::default(),
+            identified_main_frame(),
+        );
+        let group = document
+            .nodes
+            .iter()
+            .find(|node| node.ax_id == "group")
+            .unwrap();
+        let row = document
+            .nodes
+            .iter()
+            .find(|node| node.ax_id == "row")
+            .unwrap();
+
+        assert_ne!(group.child_ax_ids, ["row"]);
+        assert_ne!(row.parent_ax_id.as_deref(), Some("group"));
+        assert!(!document.page(0, 20, Some("row"), None).hierarchy_complete);
+    }
+
+    #[test]
+    fn ignored_ax_normalization_keeps_malformed_and_duplicate_ids_unproven() {
+        let malformed = json!({"nodes":[
+            {"nodeId":"group","ignored":false,"role":{"value":"table"},"childIds":["row",42]},
+            {"nodeId":"row","parentId":"group","ignored":false,"role":{"value":"row"},"childIds":[]}
+        ]});
+        let document = compose_accessibility_tree(
+            &malformed,
+            &DomIndex::default(),
+            &LayoutIndex::default(),
+            &Viewport::default(),
+            identified_main_frame(),
+        );
+        let group = document
+            .nodes
+            .iter()
+            .find(|node| node.ax_id == "group")
+            .unwrap();
+        assert_eq!(group.child_ax_ids.first().map(String::as_str), Some("row"));
+        assert_eq!(group.child_ax_ids.len(), 2);
+        assert!(
+            !document
+                .context(&group.to_context_ref_entry())
+                .unwrap()
+                .group_complete
+        );
+
+        for invalid_parent in [
+            json!([
+                {"nodeId":"outer","ignored":true,"childIds":[]},
+                {"nodeId":"group","parentId":"outer","ignored":false,"role":{"value":"table"},"childIds":["row"]},
+                {"nodeId":"row","parentId":"group","ignored":false,"role":{"value":"row"},"childIds":[]}
+            ]),
+            json!([
+                {"nodeId":"group","parentId":42,"ignored":false,"role":{"value":"table"},"childIds":["row"]},
+                {"nodeId":"row","parentId":"group","ignored":false,"role":{"value":"row"},"childIds":[]}
+            ]),
+        ] {
+            let document = compose_accessibility_tree(
+                &json!({"nodes":invalid_parent}),
+                &DomIndex::default(),
+                &LayoutIndex::default(),
+                &Viewport::default(),
+                identified_main_frame(),
+            );
+            let group = document
+                .nodes
+                .iter()
+                .find(|node| node.ax_id == "group")
+                .unwrap();
+            assert!(matches!(
+                document.context(&group.to_context_ref_entry()),
+                Err(SemanticContextError::AnchorAmbiguous)
+            ));
+        }
+
+        for duplicate_nodes in [
+            json!([
+                {"nodeId":"dup","parentId":"group","ignored":false,"role":{"value":"row"},"childIds":[]},
+                {"nodeId":"dup","parentId":"group","ignored":true,"childIds":[]}
+            ]),
+            json!([
+                {"nodeId":"dup","parentId":"group","ignored":true,"childIds":[]},
+                {"nodeId":"dup","parentId":"group","ignored":true,"childIds":[]}
+            ]),
+        ] {
+            let mut nodes = vec![json!({
+                "nodeId":"group",
+                "ignored":false,
+                "role":{"value":"table"},
+                "childIds":["dup"]
+            })];
+            nodes.extend(duplicate_nodes.as_array().unwrap().iter().cloned());
+            let document = compose_accessibility_tree(
+                &json!({"nodes":nodes}),
+                &DomIndex::default(),
+                &LayoutIndex::default(),
+                &Viewport::default(),
+                identified_main_frame(),
+            );
+            let group = document
+                .nodes
+                .iter()
+                .find(|node| node.ax_id == "group")
+                .unwrap();
+            assert!(!document.nodes.iter().any(|node| node.ax_id == "dup"));
+            assert_ne!(group.child_ax_ids, ["dup"]);
+            assert!(
+                !document
+                    .context(&group.to_context_ref_entry())
+                    .unwrap()
+                    .group_complete
+            );
+        }
     }
 
     fn context_fixture(count: usize) -> SemanticDocument {
