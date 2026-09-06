@@ -33,6 +33,7 @@ pub(crate) const CONTEXT_OUTLINE_MAX_BYTES: usize = 12_000;
 pub(crate) const QUERY_CONTEXT_MAX_BLOCKS: usize = 6;
 pub(crate) const QUERY_CONTEXT_MAX_NODES: usize = 96;
 pub(crate) const QUERY_CONTEXT_OUTLINE_MAX_BYTES: usize = 24_000;
+pub(crate) const SEMANTIC_EVIDENCE_MEMBER_PROJECTION: &str = "semantic_evidence_v1";
 const NEAR_VIEWPORT_MARGIN: f64 = 1_000.0;
 const MAX_SEMANTIC_TEXT_CHARS: usize = 1_000;
 const MAX_LINK_DESTINATION_CHARS: usize = 2_048;
@@ -224,6 +225,9 @@ pub(crate) struct SemanticContextPage {
     pub(crate) after_omitted: usize,
     pub(crate) group_complete: bool,
     pub(crate) document_collection_complete: bool,
+    pub(crate) member_projection: &'static str,
+    pub(crate) source_member_nodes: usize,
+    pub(crate) projected_out_nodes: usize,
     pub(crate) omissions: OmissionCounts,
     pub(crate) range_start: usize,
     pub(crate) range_end: usize,
@@ -487,27 +491,48 @@ impl SemanticDocument {
                 eligible.push(idx);
             }
         }
-        let anchor_position = eligible
+        let source_member_nodes = eligible.len();
+        // Projection is a property of the proven group, not of the caller's
+        // anchor. Keep the exact anchor as response metadata/authority, but do
+        // not let an otherwise transparent anchor shift this group's cursor
+        // offsets or totals.
+        let is_evidence_member =
+            |idx: usize| idx == group_idx || !is_transparent_generic(&self.nodes[idx]);
+        let evidence = eligible
+            .iter()
+            .copied()
+            .filter(|idx| is_evidence_member(*idx))
+            .collect::<Vec<_>>();
+        let projected_out_nodes = source_member_nodes.saturating_sub(evidence.len());
+        let anchor_source_position = eligible
             .iter()
             .position(|idx| *idx == *anchor_idx)
             .ok_or(SemanticContextError::AnchorUnproven)?;
+        let projected_before_anchor = eligible[..anchor_source_position]
+            .iter()
+            .filter(|idx| is_evidence_member(**idx))
+            .count();
+        let anchor_is_member = is_evidence_member(*anchor_idx);
+        // This is the boundary immediately after a retained anchor, or the
+        // insertion boundary at an omitted transparent anchor.
+        let anchor_boundary = projected_before_anchor + usize::from(anchor_is_member);
         let (mut start, mut end) = match window {
             SemanticContextWindow::Around => {
                 let start = if group_idx == *anchor_idx {
                     0
                 } else {
-                    anchor_position.saturating_sub(CONTEXT_BEFORE_NODES)
+                    projected_before_anchor.saturating_sub(CONTEXT_BEFORE_NODES)
                 };
                 let end = (if group_idx == *anchor_idx {
                     CONTEXT_BEFORE_NODES + 1 + CONTEXT_AFTER_NODES
                 } else {
-                    anchor_position + 1 + CONTEXT_AFTER_NODES
+                    anchor_boundary + CONTEXT_AFTER_NODES
                 })
-                .min(eligible.len());
+                .min(evidence.len());
                 let mut start = start;
                 let mut end = end;
                 while end.saturating_sub(start) > node_budget.max(1) {
-                    if end > anchor_position + 1 {
+                    if end > anchor_boundary {
                         end -= 1
                     } else {
                         start += 1
@@ -516,16 +541,16 @@ impl SemanticDocument {
                 (start, end)
             }
             SemanticContextWindow::Forward { start } => {
-                let start = start.min(eligible.len());
-                (start, (start + node_budget.max(1)).min(eligible.len()))
+                let start = start.min(evidence.len());
+                (start, (start + node_budget.max(1)).min(evidence.len()))
             }
             SemanticContextWindow::Backward { end } => {
-                let end = end.min(eligible.len());
+                let end = end.min(evidence.len());
                 (end.saturating_sub(node_budget.max(1)), end)
             }
         };
         let render_range = |start: usize, end: usize| {
-            let slice = &eligible[start..end];
+            let slice = &evidence[start..end];
             let selected = with_ancestors(&self.nodes, slice);
             let mut context_order =
                 ancestor_indices(&self.nodes, &by_ax_id, group_idx).unwrap_or_default();
@@ -537,7 +562,7 @@ impl SemanticDocument {
         while outline.len() > outline_max_bytes && end.saturating_sub(start) > 1 {
             match window {
                 SemanticContextWindow::Backward { .. } => start += 1,
-                SemanticContextWindow::Around if end > anchor_position + 1 => end -= 1,
+                SemanticContextWindow::Around if end > anchor_boundary => end -= 1,
                 SemanticContextWindow::Around => start += 1,
                 SemanticContextWindow::Forward { .. } => end -= 1,
             }
@@ -546,9 +571,9 @@ impl SemanticDocument {
         if outline.len() > outline_max_bytes {
             return Err(SemanticContextError::GroupUnavailable);
         }
-        let selected_indices = &eligible[start..end];
+        let selected_indices = &evidence[start..end];
         let before_omitted = start;
-        let after_omitted = eligible.len().saturating_sub(end);
+        let after_omitted = evidence.len().saturating_sub(end);
         let group_complete =
             self.complete && structure_complete && before_omitted == 0 && after_omitted == 0;
         let mut omissions = self.omission_counts();
@@ -563,11 +588,14 @@ impl SemanticDocument {
             anchor: self.nodes[*anchor_idx].clone(),
             parent_group,
             selected_nodes: selected_indices.len(),
-            total_nodes: eligible.len(),
+            total_nodes: evidence.len(),
             before_omitted,
             after_omitted,
             group_complete,
             document_collection_complete: self.complete,
+            member_projection: SEMANTIC_EVIDENCE_MEMBER_PROJECTION,
+            source_member_nodes,
+            projected_out_nodes,
             omissions,
             range_start: start,
             range_end: end,
@@ -1966,6 +1994,15 @@ fn is_context_group_role(role: &str) -> bool {
     )
 }
 
+fn is_transparent_generic(node: &SemanticNode) -> bool {
+    node.role == "generic"
+        && node.name.as_deref().is_none_or(str::is_empty)
+        && node.value.as_deref().is_none_or(str::is_empty)
+        && node.destination_url.as_deref().is_none_or(str::is_empty)
+        && node.states.is_empty()
+        && node.actions.is_empty()
+}
+
 fn cached_context_groups(
     nodes: &[SemanticNode],
     by_ax_id: &HashMap<SemanticAxKey<'_>, Option<usize>>,
@@ -2353,10 +2390,19 @@ mod tests {
     #[test]
     fn semantic_context_pages_are_contiguous_and_character_bounded() {
         let mut nodes = Vec::new();
+        let child_ids = (0..60)
+            .flat_map(|i| {
+                let mut ids = vec![format!("item-{i}")];
+                if i % 6 == 5 {
+                    ids.push(format!("wrapper-{i}"));
+                }
+                ids
+            })
+            .collect();
         nodes.push(SemanticNode {
             ax_id: "list".into(),
             parent_ax_id: None,
-            child_ax_ids: (0..60).map(|i| format!("item-{i}")).collect(),
+            child_ax_ids: child_ids,
             backend_node_id: None,
             role: "list".into(),
             name: Some("Results".into()),
@@ -2389,6 +2435,23 @@ mod tests {
                 document_order: i as usize + 1,
             });
         }
+        for i in (5..60).step_by(6) {
+            nodes.push(SemanticNode {
+                ax_id: format!("wrapper-{i}"),
+                parent_ax_id: Some("list".into()),
+                child_ax_ids: Vec::new(),
+                backend_node_id: None,
+                role: "generic".into(),
+                name: None,
+                value: None,
+                destination_url: None,
+                states: BTreeMap::new(),
+                frame: identified_main_frame(),
+                visibility: BrowserVisibility::InViewport,
+                actions: Vec::new(),
+                document_order: 100 + i,
+            });
+        }
         let document = SemanticDocument {
             nodes,
             complete: true,
@@ -2396,6 +2459,15 @@ mod tests {
         };
         let page = document.page(0, DEFAULT_SEMANTIC_NODE_BUDGET, Some("needle"), None);
         let first = document.query_contexts(&page).remove(0);
+        assert_eq!(
+            first.before_omitted
+                + first.selected_nodes
+                + first.after_omitted
+                + first.projected_out_nodes,
+            first.source_member_nodes
+        );
+        assert_eq!(first.member_projection, "semantic_evidence_v1");
+        assert_eq!(first.projected_out_nodes, 10);
         assert!(first.before_omitted > 0 && first.after_omitted > 0);
         assert!(first.outline.len() <= QUERY_CONTEXT_OUTLINE_MAX_BYTES);
         assert!(
@@ -2429,6 +2501,13 @@ mod tests {
                     CONTEXT_OUTLINE_MAX_BYTES,
                 )
                 .unwrap();
+            assert_eq!(
+                page.before_omitted
+                    + page.selected_nodes
+                    + page.after_omitted
+                    + page.projected_out_nodes,
+                page.source_member_nodes
+            );
             assert_eq!(page.range_start, cursor);
             assert!(page.range_end > cursor);
             for idx in page.range_start..page.range_end {
@@ -2450,6 +2529,13 @@ mod tests {
                     CONTEXT_OUTLINE_MAX_BYTES,
                 )
                 .unwrap();
+            assert_eq!(
+                page.before_omitted
+                    + page.selected_nodes
+                    + page.after_omitted
+                    + page.projected_out_nodes,
+                page.source_member_nodes
+            );
             assert_eq!(page.range_end, cursor);
             assert!(page.range_start < cursor);
             for idx in page.range_start..page.range_end {
@@ -2463,6 +2549,289 @@ mod tests {
         assert_eq!(covered.len(), first.total_nodes);
         assert_eq!(covered.iter().copied().min(), Some(0));
         assert_eq!(covered.iter().copied().max(), Some(first.total_nodes - 1));
+    }
+
+    #[test]
+    fn semantic_context_projects_only_disclosed_transparent_generic_members() {
+        let mut document = context_fixture(0);
+        document.nodes[1].child_ax_ids = [
+            "transparent-parent",
+            "transparent-leaf",
+            "named",
+            "valued",
+            "destination",
+            "stateful",
+            "actionable",
+            "hidden",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        let generic = |ax_id: &str, order: usize| SemanticNode {
+            ax_id: ax_id.to_owned(),
+            parent_ax_id: Some("node-1".into()),
+            child_ax_ids: Vec::new(),
+            backend_node_id: Some(100 + order as i64),
+            role: "generic".into(),
+            name: None,
+            value: None,
+            destination_url: None,
+            states: BTreeMap::new(),
+            frame: identified_main_frame(),
+            visibility: BrowserVisibility::InViewport,
+            actions: Vec::new(),
+            document_order: order,
+        };
+        let mut transparent_parent = generic("transparent-parent", 2);
+        transparent_parent.child_ax_ids = vec!["meaningful-text".into()];
+        let transparent_leaf = generic("transparent-leaf", 3);
+        let mut named = generic("named", 5);
+        named.name = Some("qualifier".into());
+        let mut valued = generic("valued", 6);
+        valued.value = Some("42".into());
+        let mut destination = generic("destination", 7);
+        destination.destination_url = Some("https://example.test/destination".into());
+        let mut stateful = generic("stateful", 8);
+        stateful.states.insert("expanded".into(), json!(false));
+        stateful.states.insert("level".into(), json!(0));
+        let mut actionable = generic("actionable", 9);
+        actionable.actions.push(BrowserActionKind::Click);
+        let mut hidden = generic("hidden", 10);
+        hidden.visibility = BrowserVisibility::CssHidden;
+        document.nodes.extend([
+            transparent_parent,
+            transparent_leaf,
+            SemanticNode {
+                ax_id: "meaningful-text".into(),
+                parent_ax_id: Some("transparent-parent".into()),
+                child_ax_ids: Vec::new(),
+                backend_node_id: None,
+                role: "statictext".into(),
+                name: Some("detail".into()),
+                value: None,
+                destination_url: None,
+                states: BTreeMap::new(),
+                frame: identified_main_frame(),
+                visibility: BrowserVisibility::InViewport,
+                actions: Vec::new(),
+                document_order: 4,
+            },
+            named,
+            valued,
+            destination,
+            stateful,
+            actionable,
+            hidden,
+        ]);
+
+        let group_page = document
+            .context(&document.nodes[1].to_context_ref_entry())
+            .unwrap();
+        let transparent_anchor = document
+            .nodes
+            .iter()
+            .find(|node| node.ax_id == "transparent-parent")
+            .unwrap();
+        let anchor_page = document
+            .context(&transparent_anchor.to_context_ref_entry())
+            .unwrap();
+        let member_ids = group_page
+            .nodes
+            .iter()
+            .map(|node| node.ax_id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(group_page.member_projection, "semantic_evidence_v1");
+        assert_eq!(group_page.source_member_nodes, 9);
+        assert_eq!(group_page.projected_out_nodes, 2);
+        assert_eq!(group_page.total_nodes, 7);
+        assert!(group_page.group_complete);
+        assert_eq!(
+            group_page.before_omitted
+                + group_page.selected_nodes
+                + group_page.after_omitted
+                + group_page.projected_out_nodes,
+            group_page.source_member_nodes
+        );
+        assert!(!member_ids.contains(&"transparent-parent"));
+        assert!(!member_ids.contains(&"transparent-leaf"));
+        assert!(!member_ids.contains(&"hidden"));
+        for retained in [
+            "node-1",
+            "meaningful-text",
+            "named",
+            "valued",
+            "destination",
+            "stateful",
+            "actionable",
+        ] {
+            assert!(member_ids.contains(&retained), "missing {retained}");
+        }
+        assert!(group_page.outline.contains("detail"));
+        assert!(group_page.outline.contains("- generic\n"));
+        assert!(!group_page.outline.contains("transparent-leaf"));
+
+        assert_eq!(anchor_page.anchor.ax_id, "transparent-parent");
+        assert_eq!(anchor_page.total_nodes, group_page.total_nodes);
+        assert_eq!(
+            anchor_page.source_member_nodes,
+            group_page.source_member_nodes
+        );
+        assert_eq!(
+            anchor_page.projected_out_nodes,
+            group_page.projected_out_nodes
+        );
+        assert_eq!(
+            anchor_page
+                .nodes
+                .iter()
+                .map(|node| node.ax_id.as_str())
+                .collect::<Vec<_>>(),
+            member_ids,
+            "projection must stay stable when an omitted generic is the exact anchor"
+        );
+
+        document.nodes[1].child_ax_ids.push("missing".into());
+        let malformed = document
+            .context(&document.nodes[1].to_context_ref_entry())
+            .unwrap();
+        assert!(!malformed.group_complete);
+        assert_eq!(malformed.projected_out_nodes, 2);
+    }
+
+    #[test]
+    fn semantic_projection_offsets_are_stable_for_omitted_middle_and_tail_anchors() {
+        let mut document = context_fixture(0);
+        let mut children = Vec::new();
+        let mut added = Vec::new();
+        for index in 0..30 {
+            let ax_id = format!("evidence-{index}");
+            children.push(ax_id.clone());
+            added.push(SemanticNode {
+                ax_id,
+                parent_ax_id: Some("node-1".into()),
+                child_ax_ids: Vec::new(),
+                backend_node_id: Some(200 + index),
+                role: "generic".into(),
+                name: Some(format!("evidence {index}")),
+                value: None,
+                destination_url: None,
+                states: BTreeMap::new(),
+                frame: identified_main_frame(),
+                visibility: BrowserVisibility::InViewport,
+                actions: Vec::new(),
+                document_order: index as usize + 2,
+            });
+            if index == 14 {
+                children.push("transparent-middle".into());
+                added.push(SemanticNode {
+                    ax_id: "transparent-middle".into(),
+                    parent_ax_id: Some("node-1".into()),
+                    child_ax_ids: Vec::new(),
+                    backend_node_id: None,
+                    role: "generic".into(),
+                    name: None,
+                    value: None,
+                    destination_url: None,
+                    states: BTreeMap::new(),
+                    frame: identified_main_frame(),
+                    visibility: BrowserVisibility::InViewport,
+                    actions: Vec::new(),
+                    document_order: 100,
+                });
+            }
+        }
+        children.push("transparent-tail".into());
+        added.push(SemanticNode {
+            ax_id: "transparent-tail".into(),
+            parent_ax_id: Some("node-1".into()),
+            child_ax_ids: Vec::new(),
+            backend_node_id: None,
+            role: "generic".into(),
+            name: None,
+            value: None,
+            destination_url: None,
+            states: BTreeMap::new(),
+            frame: identified_main_frame(),
+            visibility: BrowserVisibility::InViewport,
+            actions: Vec::new(),
+            document_order: 101,
+        });
+        document.nodes[1].child_ax_ids = children;
+        document.nodes.extend(added);
+
+        let group = document.nodes[1].to_context_ref_entry();
+        let group_identity = document.nodes[1].identity();
+        let middle = document
+            .nodes
+            .iter()
+            .find(|node| node.ax_id == "transparent-middle")
+            .unwrap()
+            .to_context_ref_entry();
+        let tail = document
+            .nodes
+            .iter()
+            .find(|node| node.ax_id == "transparent-tail")
+            .unwrap()
+            .to_context_ref_entry();
+        let collect = |anchor: &RefEntry| {
+            let mut ids = Vec::new();
+            let mut cursor = 0;
+            let mut expected_total = None;
+            loop {
+                let page = document
+                    .context_window(
+                        anchor,
+                        Some(&group_identity),
+                        SemanticContextWindow::Forward { start: cursor },
+                        1,
+                        CONTEXT_OUTLINE_MAX_BYTES,
+                    )
+                    .unwrap();
+                assert_eq!(page.range_start, cursor);
+                assert_eq!(page.member_projection, "semantic_evidence_v1");
+                assert_eq!(page.source_member_nodes, 33);
+                assert_eq!(page.projected_out_nodes, 2);
+                assert_eq!(page.total_nodes, 31);
+                assert_eq!(
+                    page.before_omitted
+                        + page.selected_nodes
+                        + page.after_omitted
+                        + page.projected_out_nodes,
+                    page.source_member_nodes
+                );
+                expected_total.get_or_insert(page.total_nodes);
+                ids.extend(page.nodes.iter().map(|node| node.ax_id.clone()));
+                assert!(page.range_end > cursor);
+                cursor = page.range_end;
+                if cursor == page.total_nodes {
+                    break;
+                }
+            }
+            assert_eq!(ids.len(), expected_total.unwrap());
+            ids
+        };
+
+        let group_ids = collect(&group);
+        assert_eq!(collect(&middle), group_ids);
+        assert_eq!(collect(&tail), group_ids);
+        assert!(!group_ids.iter().any(|id| id.starts_with("transparent-")));
+
+        for anchor in [&middle, &tail] {
+            let around = document
+                .context_window(
+                    anchor,
+                    Some(&group_identity),
+                    SemanticContextWindow::Around,
+                    1,
+                    CONTEXT_OUTLINE_MAX_BYTES,
+                )
+                .unwrap();
+            assert_eq!(around.selected_nodes, 1);
+            assert_eq!(around.source_member_nodes, 33);
+            assert_eq!(around.projected_out_nodes, 2);
+            assert_eq!(around.total_nodes, 31);
+        }
     }
 
     #[test]

@@ -1826,6 +1826,17 @@ async fn semantic_context_reuses_exact_snapshot_without_recollection_or_action_i
     assert!(context["context"]["before_omitted"].as_u64().unwrap() > 0);
     assert_eq!(context["context"]["group_complete"], false);
     assert_eq!(context["context"]["document_collection_complete"], true);
+    assert_eq!(
+        context["context"]["member_projection"],
+        "semantic_evidence_v1"
+    );
+    assert_eq!(
+        context["context"]["before_omitted"].as_u64().unwrap()
+            + context["context"]["member_refs"].as_array().unwrap().len() as u64
+            + context["context"]["after_omitted"].as_u64().unwrap()
+            + context["context"]["projected_out_nodes"].as_u64().unwrap(),
+        context["context"]["source_member_nodes"].as_u64().unwrap()
+    );
     let parent_group_ref = context["context"]["parent_group_ref"]
         .as_str()
         .expect("nested list must expose its enclosing document group")
@@ -1986,6 +1997,16 @@ async fn semantic_query_emits_read_only_context_and_pages_it_without_recollectio
             <= super::semantic::QUERY_CONTEXT_MAX_BLOCKS * 2
     );
     let block = &contexts[0];
+    for context in contexts {
+        assert_eq!(context["member_projection"], "semantic_evidence_v1");
+        assert_eq!(
+            context["before_omitted"].as_u64().unwrap()
+                + context["member_refs"].as_array().unwrap().len() as u64
+                + context["after_omitted"].as_u64().unwrap()
+                + context["projected_out_nodes"].as_u64().unwrap(),
+            context["source_member_nodes"].as_u64().unwrap()
+        );
+    }
     let union = queried["refs"]
         .as_array()
         .unwrap()

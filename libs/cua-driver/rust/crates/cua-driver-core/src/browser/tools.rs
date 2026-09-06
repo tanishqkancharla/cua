@@ -245,6 +245,9 @@ fn semantic_context_value(
         "after_continuation": context.after_continuation,
         "group_complete": context.group_complete,
         "document_collection_complete": context.document_collection_complete,
+        "member_projection": context.member_projection,
+        "source_member_nodes": context.source_member_nodes,
+        "projected_out_nodes": context.projected_out_nodes,
         "virtualized_extent": "unknown",
     })
 }
@@ -513,6 +516,9 @@ impl Tool for GetBrowserStateTool {
                             "after_continuation": outcome.context.after_continuation,
                             "group_complete": outcome.context.group_complete,
                             "document_collection_complete": outcome.context.document_collection_complete,
+                            "member_projection": outcome.context.member_projection,
+                            "source_member_nodes": outcome.context.source_member_nodes,
+                            "projected_out_nodes": outcome.context.projected_out_nodes,
                             "virtualized_extent": "unknown",
                         },
                     }));
