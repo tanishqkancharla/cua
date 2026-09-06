@@ -1502,22 +1502,58 @@ fn clean_semantic_text(value: String) -> Option<String> {
 }
 
 fn remove_redundant_static_text(nodes: &mut Vec<SemanticNode>) {
-    let names: HashMap<String, String> = nodes
-        .iter()
-        .filter_map(|node| node.name.clone().map(|name| (node.ax_id.clone(), name)))
-        .collect();
-    nodes.retain(|node| {
-        if node.role != "statictext" && node.role != "text" {
-            return true;
+    let mut by_ax_id: HashMap<&str, Vec<usize>> = HashMap::new();
+    let mut inbound: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (idx, node) in nodes.iter().enumerate() {
+        by_ax_id.entry(&node.ax_id).or_default().push(idx);
+        for child in &node.child_ax_ids {
+            inbound.entry(child).or_default().push(idx);
         }
-        let Some(name) = node.name.as_deref() else {
-            return false;
-        };
-        node.parent_ax_id
-            .as_ref()
-            .and_then(|parent| names.get(parent))
-            .is_none_or(|parent_name| parent_name != name)
-    });
+    }
+
+    let removable = nodes
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, node)| {
+            if !matches!(node.role.as_str(), "statictext" | "text")
+                || !node.child_ax_ids.is_empty()
+                || by_ax_id.get(node.ax_id.as_str()).map(Vec::as_slice) != Some(&[idx])
+            {
+                return None;
+            }
+
+            let parent_idx = match node.parent_ax_id.as_deref() {
+                None if inbound.get(node.ax_id.as_str()).is_none() => None,
+                Some(parent_id) if !is_unresolved_ax_id(parent_id) => {
+                    let [parent_idx] = by_ax_id.get(parent_id)?.as_slice() else {
+                        return None;
+                    };
+                    let [inbound_idx] = inbound.get(node.ax_id.as_str())?.as_slice() else {
+                        return None;
+                    };
+                    if parent_idx != inbound_idx {
+                        return None;
+                    }
+                    Some(*parent_idx)
+                }
+                None | Some(_) => return None,
+            };
+
+            let redundant = node.name.is_none()
+                || parent_idx.is_some_and(|parent_idx| {
+                    nodes[parent_idx].name.as_deref() == node.name.as_deref()
+                });
+            redundant.then_some(node.ax_id.clone())
+        })
+        .collect::<HashSet<_>>();
+
+    if removable.is_empty() {
+        return;
+    }
+    for node in nodes.iter_mut() {
+        node.child_ax_ids.retain(|child| !removable.contains(child));
+    }
+    nodes.retain(|node| !removable.contains(&node.ax_id));
 }
 
 fn rank(node: &SemanticNode) -> u8 {
@@ -2093,6 +2129,82 @@ mod tests {
         let inspect = table_page.outline.find("Inspect").unwrap();
         assert!(earlier < inspect);
         assert!(table_page.group_complete);
+    }
+
+    #[test]
+    fn redundant_static_text_pruning_repairs_only_proven_leaf_edges() {
+        let ax = json!({"nodes":[
+            {"nodeId":"main","ignored":false,"role":{"value":"main"},"childIds":["article"]},
+            {"nodeId":"article","parentId":"main","ignored":false,"role":{"value":"article"},"name":{"value":"Reference"},"childIds":["heading","paragraph","button"]},
+            {"nodeId":"heading","parentId":"article","ignored":false,"role":{"value":"heading"},"name":{"value":"Methods"},"childIds":["heading-text"]},
+            {"nodeId":"heading-text","parentId":"heading","ignored":false,"role":{"value":"StaticText"},"name":{"value":"Methods"},"childIds":["heading-inline"]},
+            {"nodeId":"heading-inline","parentId":"heading-text","ignored":false,"role":{"value":"InlineTextBox"},"name":{"value":"Methods"},"childIds":[]},
+            {"nodeId":"paragraph","parentId":"article","ignored":false,"role":{"value":"paragraph"},"childIds":["qualifier"]},
+            {"nodeId":"qualifier","parentId":"paragraph","ignored":false,"role":{"value":"StaticText"},"name":{"value":"Context qualifier: preliminary."},"childIds":[]},
+            {"nodeId":"button","parentId":"article","ignored":false,"backendDOMNodeId":42,"role":{"value":"button"},"name":{"value":"Inspect methods"},"childIds":["button-text"]},
+            {"nodeId":"button-text","parentId":"button","ignored":false,"role":{"value":"StaticText"},"name":{"value":"Inspect methods"},"childIds":[]}
+        ]});
+        let document = compose_accessibility_tree(
+            &ax,
+            &DomIndex::default(),
+            &LayoutIndex::default(),
+            &Viewport::default(),
+            identified_main_frame(),
+        );
+        let article = document
+            .nodes
+            .iter()
+            .find(|node| node.ax_id == "article")
+            .unwrap();
+        let heading = document
+            .nodes
+            .iter()
+            .find(|node| node.ax_id == "heading")
+            .unwrap();
+        let button = document
+            .nodes
+            .iter()
+            .find(|node| node.ax_id == "button")
+            .unwrap();
+
+        assert!(heading.child_ax_ids.is_empty());
+        assert!(button.child_ax_ids.is_empty());
+        assert!(document.nodes.iter().any(|node| node.ax_id == "qualifier"));
+        assert!(!document
+            .nodes
+            .iter()
+            .any(|node| matches!(node.ax_id.as_str(), "heading-text" | "button-text")));
+        let context = document.context(&article.to_context_ref_entry()).unwrap();
+        assert!(context.outline.contains("Context qualifier: preliminary."));
+        assert!(context.group_complete);
+
+        let unknown_child = json!({"nodes":[
+            {"nodeId":"article","ignored":false,"role":{"value":"article"},"childIds":["heading"]},
+            {"nodeId":"heading","parentId":"article","ignored":false,"role":{"value":"heading"},"name":{"value":"Methods"},"childIds":["heading-text"]},
+            {"nodeId":"heading-text","parentId":"heading","ignored":false,"role":{"value":"StaticText"},"name":{"value":"Methods"},"childIds":["unknown"]}
+        ]});
+        let document = compose_accessibility_tree(
+            &unknown_child,
+            &DomIndex::default(),
+            &LayoutIndex::default(),
+            &Viewport::default(),
+            identified_main_frame(),
+        );
+        let article = document
+            .nodes
+            .iter()
+            .find(|node| node.ax_id == "article")
+            .unwrap();
+        assert!(document
+            .nodes
+            .iter()
+            .any(|node| node.ax_id == "heading-text"));
+        assert!(
+            !document
+                .context(&article.to_context_ref_entry())
+                .unwrap()
+                .group_complete
+        );
     }
 
     #[test]
