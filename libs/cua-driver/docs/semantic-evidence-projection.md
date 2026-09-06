@@ -66,3 +66,28 @@ CDP AX node array. “No states” means no state retained by the current semant
 state allowlist; it is not a claim that the raw AX node had no other property.
 Names, values, and destinations also retain the existing per-field length
 limits, so this projection is not a full-text or lossless DOM representation.
+
+## Automatic query context coverage
+
+Query matching, ranking, and coalescing are unchanged. Automatic context
+blocks are considered in the query result's existing source order. A later
+selected match in the same exact group receives another bounded context block
+unless that exact semantic node identity was actually returned as a projected
+member of an earlier block for that group. Coverage is recorded only after
+node and outline-byte clipping, so a match outside the emitted window is not
+silently treated as observed.
+
+Multiple blocks for one group may overlap. Every repeated member and outline
+byte is charged normally against the shared six-block, 96-member, and
+24,000-byte automatic-query limits. This deliberately favors truthful local
+evidence over pretending that one prefix represents an entire group; the
+standalone context-page limit remains 25 projected members. An exact duplicate
+projected range for the same group is emitted only once; this matters when two
+metadata-only transparent anchors share one projected insertion boundary.
+
+Exact anchor membership proves only that the selected semantic node appeared
+in that block. It does not prove that the block contains an entire conceptual
+item or every nearby qualifier. Callers must continue to honor omission counts,
+`group_complete`, and context cursors. Malformed or unproven ancestry remains
+ineligible for automatic context, and transparent generic anchors remain
+metadata-only rather than being counted as covered projected members.

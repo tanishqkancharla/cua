@@ -348,8 +348,9 @@ impl SemanticDocument {
         let mut selected = page.selected_indices.clone();
         selected.sort_by_key(|idx| self.nodes[*idx].document_order);
         let mut group_cache = HashMap::new();
-        let mut seen_groups = Vec::new();
-        let mut contexts = Vec::new();
+        let mut covered_members_by_group: Vec<(SemanticNodeIdentity, Vec<SemanticNodeIdentity>)> =
+            Vec::new();
+        let mut contexts: Vec<SemanticContextPage> = Vec::new();
         let mut remaining_nodes = QUERY_CONTEXT_MAX_NODES;
         let mut remaining_bytes = QUERY_CONTEXT_OUTLINE_MAX_BYTES;
         for anchor_idx in selected {
@@ -368,15 +369,19 @@ impl SemanticDocument {
                 continue;
             };
             let enclosing = groups.get(1).copied().unwrap_or(nearest);
-            let identity = self.nodes[enclosing].identity();
-            if seen_groups.contains(&identity) {
+            let group_identity = self.nodes[enclosing].identity();
+            let anchor_identity = self.nodes[anchor_idx].identity();
+            if covered_members_by_group
+                .iter()
+                .find(|(group, _)| group == &group_identity)
+                .is_some_and(|(_, covered)| covered.contains(&anchor_identity))
+            {
                 continue;
             }
-            seen_groups.push(identity.clone());
             let anchor = self.nodes[anchor_idx].to_context_ref_entry();
             let Ok(context) = self.context_window(
                 &anchor,
-                Some(&identity),
+                Some(&group_identity),
                 SemanticContextWindow::Around,
                 remaining_nodes.min(CONTEXT_BEFORE_NODES + 1 + CONTEXT_AFTER_NODES),
                 remaining_bytes,
@@ -386,8 +391,45 @@ impl SemanticDocument {
             if context.outline.len() > remaining_bytes {
                 continue;
             }
+            let returned_identities = context
+                .nodes
+                .iter()
+                .map(SemanticNode::identity)
+                .collect::<Vec<_>>();
+            // A retained query match must really be present after node and
+            // byte clipping before it can suppress a later automatic block.
+            // Transparent generic anchors are metadata-only under the member
+            // projection and therefore do not enter coverage here.
+            if !is_transparent_generic(&self.nodes[anchor_idx])
+                && !returned_identities.contains(&anchor_identity)
+            {
+                continue;
+            }
+            // Metadata-only transparent anchors can share the same projected
+            // insertion boundary. Do not spend the bounded response on an
+            // identical window that adds no member evidence.
+            if contexts.iter().any(|emitted| {
+                emitted.group.identity() == group_identity
+                    && emitted.range_start == context.range_start
+                    && emitted.range_end == context.range_end
+            }) {
+                continue;
+            }
             remaining_nodes -= context.nodes.len();
             remaining_bytes -= context.outline.len();
+            let group_position = covered_members_by_group
+                .iter()
+                .position(|(group, _)| group == &group_identity)
+                .unwrap_or_else(|| {
+                    covered_members_by_group.push((group_identity, Vec::new()));
+                    covered_members_by_group.len() - 1
+                });
+            let covered = &mut covered_members_by_group[group_position].1;
+            for identity in returned_identities {
+                if !covered.contains(&identity) {
+                    covered.push(identity);
+                }
+            }
             contexts.push(context);
         }
         contexts
@@ -2353,6 +2395,304 @@ mod tests {
             .nodes
             .iter()
             .any(|node| node.name.as_deref() == Some("Sponsored")));
+    }
+
+    #[test]
+    fn semantic_query_context_covers_late_repeated_matches_in_one_peer_list() {
+        let mut document = context_fixture(0);
+        document.nodes[1].child_ax_ids = (0..40).map(|index| format!("item-{index}")).collect();
+        for index in 0..40 {
+            let item_id = format!("item-{index}");
+            let link_id = format!("link-{index}");
+            let qualifier_id = format!("qualifier-{index}");
+            let matched = matches!(index, 2 | 30);
+            document.nodes.push(SemanticNode {
+                ax_id: item_id.clone(),
+                parent_ax_id: Some("node-1".into()),
+                child_ax_ids: if matched {
+                    vec![qualifier_id.clone(), link_id.clone()]
+                } else {
+                    vec![link_id.clone()]
+                },
+                backend_node_id: None,
+                role: "listitem".into(),
+                name: None,
+                value: None,
+                destination_url: None,
+                states: BTreeMap::new(),
+                frame: identified_main_frame(),
+                visibility: BrowserVisibility::InViewport,
+                actions: Vec::new(),
+                document_order: index * 3 + 2,
+            });
+            if matched {
+                document.nodes.push(SemanticNode {
+                    ax_id: qualifier_id,
+                    parent_ax_id: Some(item_id.clone()),
+                    child_ax_ids: Vec::new(),
+                    backend_node_id: None,
+                    role: "generic".into(),
+                    name: Some(format!("qualifier {index}")),
+                    value: None,
+                    destination_url: None,
+                    states: BTreeMap::new(),
+                    frame: identified_main_frame(),
+                    visibility: BrowserVisibility::InViewport,
+                    actions: Vec::new(),
+                    document_order: index * 3 + 3,
+                });
+            }
+            document.nodes.push(SemanticNode {
+                ax_id: link_id,
+                parent_ax_id: Some(item_id),
+                child_ax_ids: Vec::new(),
+                backend_node_id: Some(1_000 + index as i64),
+                role: "link".into(),
+                name: Some(if matched {
+                    "Repeated match".into()
+                } else {
+                    format!("ordinary peer {index}")
+                }),
+                value: None,
+                destination_url: None,
+                states: BTreeMap::new(),
+                frame: identified_main_frame(),
+                visibility: BrowserVisibility::InViewport,
+                actions: vec![BrowserActionKind::Click],
+                document_order: index * 3 + 4,
+            });
+        }
+
+        let page = document.page(
+            0,
+            DEFAULT_SEMANTIC_NODE_BUDGET,
+            Some("Repeated match"),
+            None,
+        );
+        let contexts = document.query_contexts(&page);
+
+        assert_eq!(contexts.len(), 2);
+        assert_eq!(contexts[0].group.ax_id, "node-1");
+        assert_eq!(contexts[1].group.ax_id, "node-1");
+        assert_eq!(contexts[0].anchor.ax_id, "link-2");
+        assert_eq!(contexts[1].anchor.ax_id, "link-30");
+        assert!(contexts[0].range_start < contexts[1].range_start);
+        assert!(contexts[0].outline.contains("qualifier 2"));
+        assert!(contexts[1].outline.contains("qualifier 30"));
+        for context in &contexts {
+            assert!(context
+                .nodes
+                .iter()
+                .any(|node| node.identity() == context.anchor.identity()));
+        }
+        assert!(
+            contexts
+                .iter()
+                .map(|context| context.nodes.len())
+                .sum::<usize>()
+                <= QUERY_CONTEXT_MAX_NODES
+        );
+        assert!(
+            contexts
+                .iter()
+                .map(|context| context.outline.len())
+                .sum::<usize>()
+                <= QUERY_CONTEXT_OUTLINE_MAX_BYTES
+        );
+    }
+
+    #[test]
+    fn semantic_query_context_reaches_late_match_in_a_second_article() {
+        let mut document = context_fixture(0);
+        document.nodes[1].role = "main".into();
+        document.nodes[1].child_ax_ids = std::iter::once("article-early".into())
+            .chain((0..35).map(|index| format!("filler-{index}")))
+            .chain(std::iter::once("article-late".into()))
+            .collect();
+        for (article, order) in [("early", 2), ("late", 100)] {
+            document.nodes.push(SemanticNode {
+                ax_id: format!("article-{article}"),
+                parent_ax_id: Some("node-1".into()),
+                child_ax_ids: vec![format!("heading-{article}")],
+                backend_node_id: None,
+                role: "article".into(),
+                name: Some(format!("{article} article")),
+                value: None,
+                destination_url: None,
+                states: BTreeMap::new(),
+                frame: identified_main_frame(),
+                visibility: BrowserVisibility::InViewport,
+                actions: Vec::new(),
+                document_order: order,
+            });
+            document.nodes.push(SemanticNode {
+                ax_id: format!("heading-{article}"),
+                parent_ax_id: Some(format!("article-{article}")),
+                child_ax_ids: Vec::new(),
+                backend_node_id: Some(2_000 + order as i64),
+                role: "heading".into(),
+                name: Some(format!("release marker {article}")),
+                value: None,
+                destination_url: None,
+                states: BTreeMap::new(),
+                frame: identified_main_frame(),
+                visibility: BrowserVisibility::InViewport,
+                actions: Vec::new(),
+                document_order: order + 1,
+            });
+        }
+        for index in 0..35 {
+            document.nodes.push(SemanticNode {
+                ax_id: format!("filler-{index}"),
+                parent_ax_id: Some("node-1".into()),
+                child_ax_ids: Vec::new(),
+                backend_node_id: None,
+                role: "paragraph".into(),
+                name: Some(format!("unmatched filler {index}")),
+                value: None,
+                destination_url: None,
+                states: BTreeMap::new(),
+                frame: identified_main_frame(),
+                visibility: BrowserVisibility::InViewport,
+                actions: Vec::new(),
+                document_order: index + 4,
+            });
+        }
+
+        let page = document.page(
+            0,
+            DEFAULT_SEMANTIC_NODE_BUDGET,
+            Some("release marker"),
+            None,
+        );
+        let contexts = document.query_contexts(&page);
+
+        assert_eq!(contexts.len(), 2);
+        assert_eq!(contexts[0].anchor.ax_id, "heading-early");
+        assert_eq!(contexts[1].anchor.ax_id, "heading-late");
+        assert!(contexts[0].range_end <= contexts[1].range_start);
+        assert!(contexts[0].outline.contains("early article"));
+        assert!(contexts[1].outline.contains("late article"));
+    }
+
+    #[test]
+    fn semantic_query_context_marks_coverage_only_after_tight_byte_clipping() {
+        let mut document = context_fixture(0);
+        document.nodes[1].child_ax_ids = (0..30).map(|index| format!("link-{index}")).collect();
+        for index in 0..30 {
+            document.nodes.push(SemanticNode {
+                ax_id: format!("link-{index}"),
+                parent_ax_id: Some("node-1".into()),
+                child_ax_ids: Vec::new(),
+                backend_node_id: Some(3_000 + index as i64),
+                role: "link".into(),
+                name: Some(if matches!(index, 2 | 27) {
+                    format!("byte-clipped match {index}")
+                } else {
+                    format!("peer {index} {}", "界".repeat(1_000))
+                }),
+                value: None,
+                destination_url: None,
+                states: BTreeMap::new(),
+                frame: identified_main_frame(),
+                visibility: BrowserVisibility::InViewport,
+                actions: vec![BrowserActionKind::Click],
+                document_order: index + 2,
+            });
+        }
+
+        let page = document.page(
+            0,
+            DEFAULT_SEMANTIC_NODE_BUDGET,
+            Some("byte-clipped match"),
+            None,
+        );
+        let contexts = document.query_contexts(&page);
+
+        assert_eq!(contexts.len(), 2);
+        assert_eq!(contexts[0].anchor.ax_id, "link-2");
+        assert_eq!(contexts[1].anchor.ax_id, "link-27");
+        assert!(contexts.iter().all(|context| context
+            .nodes
+            .iter()
+            .any(|node| node.identity() == context.anchor.identity())));
+        assert!(
+            contexts
+                .iter()
+                .map(|context| context.outline.len())
+                .sum::<usize>()
+                <= QUERY_CONTEXT_OUTLINE_MAX_BYTES
+        );
+        assert!(contexts
+            .iter()
+            .any(|context| context.nodes.len() < CONTEXT_BEFORE_NODES + 1 + CONTEXT_AFTER_NODES));
+    }
+
+    #[test]
+    fn semantic_query_context_does_not_cover_malformed_selected_ancestry() {
+        let mut document = context_fixture(0);
+        document.nodes[1].child_ax_ids = vec!["bad".into()];
+        document.nodes.push(SemanticNode {
+            ax_id: "bad".into(),
+            parent_ax_id: Some("bad".into()),
+            child_ax_ids: Vec::new(),
+            backend_node_id: Some(9_999),
+            role: "link".into(),
+            name: Some("malformed match".into()),
+            value: None,
+            destination_url: None,
+            states: BTreeMap::new(),
+            frame: identified_main_frame(),
+            visibility: BrowserVisibility::InViewport,
+            actions: vec![BrowserActionKind::Click],
+            document_order: 2,
+        });
+
+        let page = document.page(
+            0,
+            DEFAULT_SEMANTIC_NODE_BUDGET,
+            Some("malformed match"),
+            None,
+        );
+
+        assert!(page.selected.is_empty());
+        assert!(!page.hierarchy_complete);
+        assert!(document.query_contexts(&page).is_empty());
+    }
+
+    #[test]
+    fn semantic_query_context_deduplicates_identical_transparent_anchor_windows() {
+        let mut document = context_fixture(3);
+        document.nodes[2].child_ax_ids = vec!["transparent-a".into(), "transparent-b".into()];
+        for (offset, ax_id) in ["transparent-a", "transparent-b"].into_iter().enumerate() {
+            document.nodes.push(SemanticNode {
+                ax_id: ax_id.into(),
+                parent_ax_id: Some("node-2".into()),
+                child_ax_ids: Vec::new(),
+                backend_node_id: None,
+                role: "generic".into(),
+                name: None,
+                value: None,
+                destination_url: None,
+                states: BTreeMap::new(),
+                frame: identified_main_frame(),
+                visibility: BrowserVisibility::InViewport,
+                actions: Vec::new(),
+                document_order: 3 + offset,
+            });
+        }
+
+        let page = document.page(0, DEFAULT_SEMANTIC_NODE_BUDGET, Some("generic"), None);
+        assert_eq!(page.selected.len(), 2);
+
+        let contexts = document.query_contexts(&page);
+
+        assert_eq!(contexts.len(), 1);
+        assert_eq!(contexts[0].anchor.ax_id, "transparent-a");
+        assert!(!contexts[0]
+            .nodes
+            .iter()
+            .any(|node| is_transparent_generic(node)));
     }
 
     #[test]
