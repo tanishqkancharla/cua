@@ -29,6 +29,10 @@ pub(crate) const SEMANTIC_COMPUTED_STYLES: &[&str] = &[
 pub(crate) const DEFAULT_SEMANTIC_NODE_BUDGET: usize = 300;
 pub(crate) const CONTEXT_BEFORE_NODES: usize = 8;
 pub(crate) const CONTEXT_AFTER_NODES: usize = 16;
+pub(crate) const CONTEXT_OUTLINE_MAX_BYTES: usize = 12_000;
+pub(crate) const QUERY_CONTEXT_MAX_BLOCKS: usize = 6;
+pub(crate) const QUERY_CONTEXT_MAX_NODES: usize = 96;
+pub(crate) const QUERY_CONTEXT_OUTLINE_MAX_BYTES: usize = 24_000;
 const NEAR_VIEWPORT_MARGIN: f64 = 1_000.0;
 const MAX_SEMANTIC_TEXT_CHARS: usize = 1_000;
 const MAX_LINK_DESTINATION_CHARS: usize = 2_048;
@@ -197,6 +201,7 @@ pub(crate) struct SemanticPage {
     pub(crate) next_offset: Option<usize>,
     pub(crate) omissions: OmissionCounts,
     pub(crate) hierarchy_complete: bool,
+    selected_indices: Vec<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -211,6 +216,7 @@ pub(crate) struct SemanticContextPage {
     pub(crate) outline: String,
     pub(crate) nodes: Vec<SemanticNode>,
     pub(crate) group: SemanticNode,
+    pub(crate) anchor: SemanticNode,
     pub(crate) parent_group: Option<SemanticNode>,
     pub(crate) selected_nodes: usize,
     pub(crate) total_nodes: usize,
@@ -219,6 +225,15 @@ pub(crate) struct SemanticContextPage {
     pub(crate) group_complete: bool,
     pub(crate) document_collection_complete: bool,
     pub(crate) omissions: OmissionCounts,
+    pub(crate) range_start: usize,
+    pub(crate) range_end: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SemanticContextWindow {
+    Around,
+    Forward { start: usize },
+    Backward { end: usize },
 }
 
 #[derive(Debug, Clone, Default)]
@@ -307,12 +322,80 @@ impl SemanticDocument {
             next_offset: (end < candidates.len()).then_some(end),
             omissions,
             hierarchy_complete,
+            selected_indices: page_slice,
         }
     }
 
     pub(crate) fn context(
         &self,
         anchor: &RefEntry,
+    ) -> Result<SemanticContextPage, SemanticContextError> {
+        self.context_window(
+            anchor,
+            None,
+            SemanticContextWindow::Around,
+            CONTEXT_BEFORE_NODES + 1 + CONTEXT_AFTER_NODES,
+            CONTEXT_OUTLINE_MAX_BYTES,
+        )
+    }
+
+    pub(crate) fn query_contexts(&self, page: &SemanticPage) -> Vec<SemanticContextPage> {
+        let by_ax_id = unique_ax_indices(&self.nodes);
+        let mut selected = page.selected_indices.clone();
+        selected.sort_by_key(|idx| self.nodes[*idx].document_order);
+        let mut group_cache = HashMap::new();
+        let mut seen_groups = Vec::new();
+        let mut contexts = Vec::new();
+        let mut remaining_nodes = QUERY_CONTEXT_MAX_NODES;
+        let mut remaining_bytes = QUERY_CONTEXT_OUTLINE_MAX_BYTES;
+        for anchor_idx in selected {
+            if contexts.len() >= QUERY_CONTEXT_MAX_BLOCKS
+                || remaining_nodes == 0
+                || remaining_bytes == 0
+            {
+                break;
+            }
+            let Some(groups) =
+                cached_context_groups(&self.nodes, &by_ax_id, anchor_idx, &mut group_cache)
+            else {
+                continue;
+            };
+            let Some(nearest) = groups.first().copied() else {
+                continue;
+            };
+            let enclosing = groups.get(1).copied().unwrap_or(nearest);
+            let identity = self.nodes[enclosing].identity();
+            if seen_groups.contains(&identity) {
+                continue;
+            }
+            seen_groups.push(identity.clone());
+            let anchor = self.nodes[anchor_idx].to_context_ref_entry();
+            let Ok(context) = self.context_window(
+                &anchor,
+                Some(&identity),
+                SemanticContextWindow::Around,
+                remaining_nodes.min(CONTEXT_BEFORE_NODES + 1 + CONTEXT_AFTER_NODES),
+                remaining_bytes,
+            ) else {
+                continue;
+            };
+            if context.outline.len() > remaining_bytes {
+                continue;
+            }
+            remaining_nodes -= context.nodes.len();
+            remaining_bytes -= context.outline.len();
+            contexts.push(context);
+        }
+        contexts
+    }
+
+    pub(crate) fn context_window(
+        &self,
+        anchor: &RefEntry,
+        requested_group: Option<&SemanticNodeIdentity>,
+        window: SemanticContextWindow,
+        node_budget: usize,
+        outline_max_bytes: usize,
     ) -> Result<SemanticContextPage, SemanticContextError> {
         let Some(identity) = &anchor.semantic_node else {
             return Err(SemanticContextError::AnchorUnproven);
@@ -346,10 +429,20 @@ impl SemanticDocument {
             .chain(ancestors.iter().copied())
             .filter(|idx| is_context_group_role(&self.nodes[*idx].role))
             .collect::<Vec<_>>();
-        let group_idx = *groups
-            .first()
-            .ok_or(SemanticContextError::GroupUnavailable)?;
-        let parent_group = groups.get(1).map(|idx| self.nodes[*idx].clone());
+        let group_idx = match requested_group {
+            Some(requested) => groups
+                .iter()
+                .copied()
+                .find(|idx| self.nodes[*idx].identity() == *requested)
+                .ok_or(SemanticContextError::GroupUnavailable)?,
+            None => *groups
+                .first()
+                .ok_or(SemanticContextError::GroupUnavailable)?,
+        };
+        let group_position = groups.iter().position(|idx| *idx == group_idx).unwrap();
+        let parent_group = groups
+            .get(group_position + 1)
+            .map(|idx| self.nodes[*idx].clone());
 
         let mut members = HashSet::new();
         let mut member_order = Vec::new();
@@ -398,24 +491,62 @@ impl SemanticDocument {
             .iter()
             .position(|idx| *idx == *anchor_idx)
             .ok_or(SemanticContextError::AnchorUnproven)?;
-        let start = if group_idx == *anchor_idx {
-            0
-        } else {
-            anchor_position.saturating_sub(CONTEXT_BEFORE_NODES)
+        let (mut start, mut end) = match window {
+            SemanticContextWindow::Around => {
+                let start = if group_idx == *anchor_idx {
+                    0
+                } else {
+                    anchor_position.saturating_sub(CONTEXT_BEFORE_NODES)
+                };
+                let end = (if group_idx == *anchor_idx {
+                    CONTEXT_BEFORE_NODES + 1 + CONTEXT_AFTER_NODES
+                } else {
+                    anchor_position + 1 + CONTEXT_AFTER_NODES
+                })
+                .min(eligible.len());
+                let mut start = start;
+                let mut end = end;
+                while end.saturating_sub(start) > node_budget.max(1) {
+                    if end > anchor_position + 1 {
+                        end -= 1
+                    } else {
+                        start += 1
+                    }
+                }
+                (start, end)
+            }
+            SemanticContextWindow::Forward { start } => {
+                let start = start.min(eligible.len());
+                (start, (start + node_budget.max(1)).min(eligible.len()))
+            }
+            SemanticContextWindow::Backward { end } => {
+                let end = end.min(eligible.len());
+                (end.saturating_sub(node_budget.max(1)), end)
+            }
         };
-        let end = (if group_idx == *anchor_idx {
-            CONTEXT_BEFORE_NODES + 1 + CONTEXT_AFTER_NODES
-        } else {
-            anchor_position + 1 + CONTEXT_AFTER_NODES
-        })
-        .min(eligible.len());
+        let render_range = |start: usize, end: usize| {
+            let slice = &eligible[start..end];
+            let selected = with_ancestors(&self.nodes, slice);
+            let mut context_order =
+                ancestor_indices(&self.nodes, &by_ax_id, group_idx).unwrap_or_default();
+            context_order.reverse();
+            context_order.extend(member_order.iter().copied());
+            render_outline_ordered(&self.nodes, &selected, context_order)
+        };
+        let mut outline = render_range(start, end);
+        while outline.len() > outline_max_bytes && end.saturating_sub(start) > 1 {
+            match window {
+                SemanticContextWindow::Backward { .. } => start += 1,
+                SemanticContextWindow::Around if end > anchor_position + 1 => end -= 1,
+                SemanticContextWindow::Around => start += 1,
+                SemanticContextWindow::Forward { .. } => end -= 1,
+            }
+            outline = render_range(start, end);
+        }
+        if outline.len() > outline_max_bytes {
+            return Err(SemanticContextError::GroupUnavailable);
+        }
         let selected_indices = &eligible[start..end];
-        let selected = with_ancestors(&self.nodes, selected_indices);
-        let mut context_order =
-            ancestor_indices(&self.nodes, &by_ax_id, group_idx).unwrap_or_default();
-        context_order.reverse();
-        context_order.extend(member_order);
-        let outline = render_outline_ordered(&self.nodes, &selected, context_order);
         let before_omitted = start;
         let after_omitted = eligible.len().saturating_sub(end);
         let group_complete =
@@ -429,6 +560,7 @@ impl SemanticDocument {
                 .map(|idx| self.nodes[*idx].clone())
                 .collect(),
             group: self.nodes[group_idx].clone(),
+            anchor: self.nodes[*anchor_idx].clone(),
             parent_group,
             selected_nodes: selected_indices.len(),
             total_nodes: eligible.len(),
@@ -437,6 +569,8 @@ impl SemanticDocument {
             group_complete,
             document_collection_complete: self.complete,
             omissions,
+            range_start: start,
+            range_end: end,
         })
     }
 
@@ -1832,6 +1966,51 @@ fn is_context_group_role(role: &str) -> bool {
     )
 }
 
+fn cached_context_groups(
+    nodes: &[SemanticNode],
+    by_ax_id: &HashMap<SemanticAxKey<'_>, Option<usize>>,
+    start: usize,
+    cache: &mut HashMap<usize, Option<Vec<usize>>>,
+) -> Option<Vec<usize>> {
+    if let Some(cached) = cache.get(&start) {
+        return cached.clone();
+    }
+    let mut path = Vec::new();
+    let mut seen = HashSet::new();
+    let mut cursor = start;
+    let mut suffix = loop {
+        if let Some(cached) = cache.get(&cursor) {
+            break cached.clone();
+        }
+        if !seen.insert(cursor) {
+            break None;
+        }
+        path.push(cursor);
+        let Some(parent_id) = nodes[cursor].parent_ax_id.as_deref() else {
+            break Some(Vec::new());
+        };
+        match ax_lookup(by_ax_id, &nodes[cursor].frame, parent_id) {
+            AxLookup::Unique(parent) => cursor = parent,
+            AxLookup::Missing => break Some(Vec::new()),
+            AxLookup::Ambiguous | AxLookup::Unproven => break None,
+        }
+    };
+    while let Some(idx) = path.pop() {
+        suffix = suffix.map(|mut groups| {
+            if is_context_group_role(&nodes[idx].role) {
+                groups.insert(0, idx);
+                // Automatic query context needs only the nearest group and
+                // its enclosing group. Bounding every cached suffix avoids
+                // quadratic cloning on deeply nested structural documents.
+                groups.truncate(2);
+            }
+            groups
+        });
+        cache.insert(idx, suffix.clone());
+    }
+    cache.get(&start).cloned().flatten()
+}
+
 fn unique_ax_indices(nodes: &[SemanticNode]) -> HashMap<SemanticAxKey<'_>, Option<usize>> {
     let mut indices = HashMap::new();
     for (idx, node) in nodes.iter().enumerate() {
@@ -2079,6 +2258,211 @@ mod tests {
             .iter()
             .filter_map(|n| n.name.as_deref())
             .collect()
+    }
+
+    #[test]
+    fn semantic_query_context_includes_unmatched_sibling_qualifiers_in_group_order() {
+        let ax = json!({"nodes": [
+            {"nodeId":"root","ignored":false,"role":{"value":"RootWebArea"},"childIds":["main"]},
+            {"nodeId":"main","parentId":"root","ignored":false,"role":{"value":"main"},"childIds":["list"]},
+            {"nodeId":"list","parentId":"main","ignored":false,"role":{"value":"list"},"childIds":["one","two","three"]},
+            {"nodeId":"one","parentId":"list","ignored":false,"role":{"value":"listitem"},"childIds":["s1","p1"]},
+            {"nodeId":"s1","parentId":"one","ignored":false,"role":{"value":"generic"},"name":{"value":"Sponsored"},"childIds":[]},
+            {"nodeId":"p1","parentId":"one","ignored":false,"backendDOMNodeId":11,"role":{"value":"link"},"name":{"value":"Alpha vertical mouse"},"childIds":[]},
+            {"nodeId":"two","parentId":"list","ignored":false,"role":{"value":"listitem"},"childIds":["s2","p2"]},
+            {"nodeId":"s2","parentId":"two","ignored":false,"role":{"value":"generic"},"name":{"value":"Sponsored"},"childIds":[]},
+            {"nodeId":"p2","parentId":"two","ignored":false,"backendDOMNodeId":12,"role":{"value":"link"},"name":{"value":"Beta vertical mouse"},"childIds":[]},
+            {"nodeId":"three","parentId":"list","ignored":false,"role":{"value":"listitem"},"childIds":["p3"]},
+            {"nodeId":"p3","parentId":"three","ignored":false,"backendDOMNodeId":13,"role":{"value":"link"},"name":{"value":"Gamma vertical mouse"},"childIds":[]}
+        ]});
+        let document = compose_accessibility_tree(
+            &ax,
+            &DomIndex::default(),
+            &LayoutIndex::default(),
+            &Viewport::default(),
+            identified_main_frame(),
+        );
+        let page = document.page(
+            0,
+            DEFAULT_SEMANTIC_NODE_BUDGET,
+            Some("vertical mouse"),
+            None,
+        );
+        assert!(page
+            .selected
+            .iter()
+            .all(|node| node.name.as_deref() != Some("Sponsored")));
+        let contexts = document.query_contexts(&page);
+        assert_eq!(contexts.len(), 1);
+        let context = &contexts[0];
+        assert_eq!(context.group.role, "list");
+        assert!(context.group_complete);
+        assert_eq!(context.before_omitted, 0);
+        assert_eq!(context.after_omitted, 0);
+        let outline = &context.outline;
+        assert!(
+            outline.find("Sponsored") < outline.find("Alpha vertical mouse"),
+            "{outline}"
+        );
+        assert!(
+            outline.find("Alpha vertical mouse") < outline.find("Beta vertical mouse"),
+            "{outline}"
+        );
+        assert!(
+            outline.find("Beta vertical mouse") < outline.find("Gamma vertical mouse"),
+            "{outline}"
+        );
+        assert!(context
+            .nodes
+            .iter()
+            .any(|node| node.name.as_deref() == Some("Sponsored")));
+    }
+
+    #[test]
+    fn query_group_cache_is_bounded_on_deep_structural_ancestry() {
+        let depth = 12_000;
+        let nodes = (0..depth)
+            .map(|idx| SemanticNode {
+                ax_id: format!("group-{idx}"),
+                parent_ax_id: (idx > 0).then(|| format!("group-{}", idx - 1)),
+                child_ax_ids: (idx + 1 < depth)
+                    .then(|| vec![format!("group-{}", idx + 1)])
+                    .unwrap_or_default(),
+                backend_node_id: None,
+                role: "region".into(),
+                name: None,
+                value: None,
+                destination_url: None,
+                states: BTreeMap::new(),
+                frame: identified_main_frame(),
+                visibility: BrowserVisibility::InViewport,
+                actions: Vec::new(),
+                document_order: idx,
+            })
+            .collect::<Vec<_>>();
+        let by_ax_id = unique_ax_indices(&nodes);
+        let mut cache = HashMap::new();
+        let groups = cached_context_groups(&nodes, &by_ax_id, depth - 1, &mut cache).unwrap();
+        assert_eq!(groups, vec![depth - 1, depth - 2]);
+        assert_eq!(cache.len(), depth);
+        assert!(cache
+            .values()
+            .all(|groups| groups.as_ref().is_none_or(|groups| groups.len() <= 2)));
+    }
+
+    #[test]
+    fn semantic_context_pages_are_contiguous_and_character_bounded() {
+        let mut nodes = Vec::new();
+        nodes.push(SemanticNode {
+            ax_id: "list".into(),
+            parent_ax_id: None,
+            child_ax_ids: (0..60).map(|i| format!("item-{i}")).collect(),
+            backend_node_id: None,
+            role: "list".into(),
+            name: Some("Results".into()),
+            value: None,
+            destination_url: None,
+            states: BTreeMap::new(),
+            frame: identified_main_frame(),
+            visibility: BrowserVisibility::InViewport,
+            actions: Vec::new(),
+            document_order: 0,
+        });
+        for i in 0..60 {
+            nodes.push(SemanticNode {
+                ax_id: format!("item-{i}"),
+                parent_ax_id: Some("list".into()),
+                child_ax_ids: Vec::new(),
+                backend_node_id: Some(i + 1),
+                role: "listitem".into(),
+                name: Some(if i == 30 {
+                    "needle".into()
+                } else {
+                    format!("row-{i}-{}", "界".repeat(1_000))
+                }),
+                value: None,
+                destination_url: None,
+                states: BTreeMap::new(),
+                frame: identified_main_frame(),
+                visibility: BrowserVisibility::InViewport,
+                actions: Vec::new(),
+                document_order: i as usize + 1,
+            });
+        }
+        let document = SemanticDocument {
+            nodes,
+            complete: true,
+            ..Default::default()
+        };
+        let page = document.page(0, DEFAULT_SEMANTIC_NODE_BUDGET, Some("needle"), None);
+        let first = document.query_contexts(&page).remove(0);
+        assert!(first.before_omitted > 0 && first.after_omitted > 0);
+        assert!(first.outline.len() <= QUERY_CONTEXT_OUTLINE_MAX_BYTES);
+        assert!(
+            first.range_end - first.range_start < CONTEXT_BEFORE_NODES + 1 + CONTEXT_AFTER_NODES,
+            "multibyte labels must exercise character-budget shrinking"
+        );
+        let next = document
+            .context_window(
+                &first.anchor.to_context_ref_entry(),
+                Some(&first.group.identity()),
+                SemanticContextWindow::Forward {
+                    start: first.range_end,
+                },
+                CONTEXT_BEFORE_NODES + 1 + CONTEXT_AFTER_NODES,
+                CONTEXT_OUTLINE_MAX_BYTES,
+            )
+            .unwrap();
+        assert_eq!(next.range_start, first.range_end);
+        assert!(next.outline.len() <= CONTEXT_OUTLINE_MAX_BYTES);
+        assert_eq!(next.before_omitted, first.range_end);
+
+        let mut covered = (first.range_start..first.range_end).collect::<HashSet<_>>();
+        let mut cursor = first.range_end;
+        while cursor < first.total_nodes {
+            let page = document
+                .context_window(
+                    &first.anchor.to_context_ref_entry(),
+                    Some(&first.group.identity()),
+                    SemanticContextWindow::Forward { start: cursor },
+                    CONTEXT_BEFORE_NODES + 1 + CONTEXT_AFTER_NODES,
+                    CONTEXT_OUTLINE_MAX_BYTES,
+                )
+                .unwrap();
+            assert_eq!(page.range_start, cursor);
+            assert!(page.range_end > cursor);
+            for idx in page.range_start..page.range_end {
+                assert!(
+                    covered.insert(idx),
+                    "forward context pages must not overlap"
+                );
+            }
+            cursor = page.range_end;
+        }
+        let mut cursor = first.range_start;
+        while cursor > 0 {
+            let page = document
+                .context_window(
+                    &first.anchor.to_context_ref_entry(),
+                    Some(&first.group.identity()),
+                    SemanticContextWindow::Backward { end: cursor },
+                    CONTEXT_BEFORE_NODES + 1 + CONTEXT_AFTER_NODES,
+                    CONTEXT_OUTLINE_MAX_BYTES,
+                )
+                .unwrap();
+            assert_eq!(page.range_end, cursor);
+            assert!(page.range_start < cursor);
+            for idx in page.range_start..page.range_end {
+                assert!(
+                    covered.insert(idx),
+                    "backward context pages must not overlap"
+                );
+            }
+            cursor = page.range_start;
+        }
+        assert_eq!(covered.len(), first.total_nodes);
+        assert_eq!(covered.iter().copied().min(), Some(0));
+        assert_eq!(covered.iter().copied().max(), Some(first.total_nodes - 1));
     }
 
     #[test]

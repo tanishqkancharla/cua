@@ -1683,17 +1683,30 @@ async fn semantic_continuation_is_opaque_single_use_and_reaches_offscreen_conten
 async fn newer_semantic_snapshot_invalidates_prior_continuations() {
     let f = fixture_with(|st| st.semantic_large_page = true).await;
     let (target, tab) = bind(&f).await;
-    let first = semantic_snapshot(&f, &target, &tab).await;
+    let first = semantic_snapshot_with(&f, &target, &tab, json!({"query": ""})).await;
     let token = first["snapshot"]["continuation"]
         .as_str()
         .expect("large fixture continuation")
         .to_owned();
+    let context_token = first["query_contexts"]
+        .as_array()
+        .and_then(|contexts| {
+            contexts.iter().find_map(|context| {
+                context["after_continuation"]
+                    .as_str()
+                    .or_else(|| context["before_continuation"].as_str())
+            })
+        })
+        .expect("bounded query context continuation")
+        .to_owned();
     let newer = semantic_snapshot(&f, &target, &tab).await;
     assert_eq!(newer["status"], "ok", "{newer}");
 
-    let stale = semantic_snapshot_with(&f, &target, &tab, json!({"continuation": token})).await;
-    assert_eq!(stale["status"], "refused", "{stale}");
-    assert_eq!(stale["refusal"]["code"], "browser_ref_stale");
+    for token in [token, context_token] {
+        let stale = semantic_snapshot_with(&f, &target, &tab, json!({"continuation": token})).await;
+        assert_eq!(stale["status"], "refused", "{stale}");
+        assert_eq!(stale["refusal"]["code"], "browser_ref_stale");
+    }
 }
 
 #[tokio::test]
@@ -1929,6 +1942,145 @@ async fn semantic_context_reuses_exact_snapshot_without_recollection_or_action_i
 }
 
 #[tokio::test]
+async fn semantic_query_emits_read_only_context_and_pages_it_without_recollection() {
+    let f = fixture_with(|st| st.semantic_large_page = true).await;
+    let (target, tab) = bind(&f).await;
+    let queried = semantic_snapshot_with(
+        &f,
+        &target,
+        &tab,
+        json!({"query": "reply body archive 304"}),
+    )
+    .await;
+    let collections_after_query = recorded_calls(&f, "Accessibility.getFullAXTree").len();
+    assert_eq!(queried["status"], "ok", "{queried}");
+    assert_eq!(queried["snapshot"]["scope"], "query");
+    let contexts = queried["query_contexts"]
+        .as_array()
+        .expect("automatic query contexts");
+    assert!(!contexts.is_empty(), "{queried}");
+    assert!(contexts.len() <= super::semantic::QUERY_CONTEXT_MAX_BLOCKS);
+    assert!(
+        contexts
+            .iter()
+            .map(|context| context["member_refs"].as_array().unwrap().len())
+            .sum::<usize>()
+            <= super::semantic::QUERY_CONTEXT_MAX_NODES
+    );
+    assert!(
+        contexts
+            .iter()
+            .map(|context| context["outline"].as_str().unwrap().len())
+            .sum::<usize>()
+            <= super::semantic::QUERY_CONTEXT_OUTLINE_MAX_BYTES
+    );
+    assert!(
+        contexts
+            .iter()
+            .flat_map(|context| {
+                ["before_continuation", "after_continuation"]
+                    .into_iter()
+                    .filter_map(|field| context[field].as_str())
+            })
+            .count()
+            <= super::semantic::QUERY_CONTEXT_MAX_BLOCKS * 2
+    );
+    let block = &contexts[0];
+    let union = queried["refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(queried["content_refs"].as_array().unwrap())
+        .collect::<Vec<_>>();
+    for field in ["anchor_ref", "group_ref", "parent_group_ref"] {
+        if let Some(reference) = block[field].as_str() {
+            assert!(
+                union.iter().any(|entry| entry["ref"] == reference),
+                "missing {field}: {queried}"
+            );
+        }
+    }
+    for reference in block["member_refs"].as_array().unwrap() {
+        assert!(
+            union.iter().any(|entry| entry["ref"] == *reference),
+            "{queried}"
+        );
+    }
+    assert!(
+        queried["content_refs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry["actions"] == json!([])),
+        "context additions must stay read-only: {queried}"
+    );
+    let token = block["after_continuation"]
+        .as_str()
+        .or_else(|| block["before_continuation"].as_str())
+        .expect("large group must provide a bounded context continuation")
+        .to_owned();
+    let continued = semantic_snapshot_with(&f, &target, &tab, json!({"continuation": token})).await;
+    assert_eq!(continued["status"], "ok", "{continued}");
+    assert_eq!(continued["snapshot"]["id"], queried["snapshot"]["id"]);
+    assert_eq!(continued["snapshot"]["scope"], "context");
+    assert!(continued["context"]["member_refs"]
+        .as_array()
+        .is_some_and(|refs| !refs.is_empty()));
+    assert_eq!(
+        recorded_calls(&f, "Accessibility.getFullAXTree").len(),
+        collections_after_query,
+        "context continuation must not recollect"
+    );
+    let reused = semantic_snapshot_with(&f, &target, &tab, json!({"continuation": token})).await;
+    assert_eq!(
+        reused["status"], "refused",
+        "context continuation is single use: {reused}"
+    );
+}
+
+#[tokio::test]
+async fn query_match_continuation_reemits_every_context_ref_exactly_once() {
+    let f = fixture_with(|st| st.semantic_large_page = true).await;
+    let (target, tab) = bind(&f).await;
+    let first = semantic_snapshot_with(&f, &target, &tab, json!({"query": ""})).await;
+    let token = first["snapshot"]["continuation"]
+        .as_str()
+        .expect("large queried fixture continuation")
+        .to_owned();
+    let continued = semantic_snapshot_with(&f, &target, &tab, json!({"continuation": token})).await;
+    assert_eq!(continued["status"], "ok", "{continued}");
+    assert_eq!(continued["snapshot"]["scope"], "continuation");
+
+    let union = continued["refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(continued["content_refs"].as_array().unwrap())
+        .filter_map(|entry| entry["ref"].as_str())
+        .collect::<Vec<_>>();
+    let unique = union
+        .iter()
+        .copied()
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(union.len(), unique.len(), "duplicate refs: {continued}");
+    for context in continued["query_contexts"].as_array().unwrap() {
+        for field in ["anchor_ref", "group_ref", "parent_group_ref"] {
+            if let Some(reference) = context[field].as_str() {
+                assert!(unique.contains(reference), "missing {field}: {continued}");
+            }
+        }
+        for reference in context["member_refs"].as_array().unwrap() {
+            assert!(
+                reference
+                    .as_str()
+                    .is_some_and(|value| unique.contains(value)),
+                "missing context member: {continued}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn semantic_context_rejects_mixed_or_unissued_requests_without_collection() {
     let f = fixture_with(|st| st.semantic_large_page = true).await;
     let (target, tab) = bind(&f).await;
@@ -1936,6 +2088,7 @@ async fn semantic_context_rejects_mixed_or_unissued_requests_without_collection(
     for extra in [
         json!({"context_ref": "p999999:0", "query": "Reply"}),
         json!({"context_ref": "p999999:0", "include_screenshot": true}),
+        json!({"continuation": "bcc-unissued", "include_screenshot": true}),
     ] {
         let mut args = json!({
             "target_id": target,

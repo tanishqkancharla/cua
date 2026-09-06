@@ -228,6 +228,27 @@ fn semantic_ref_value(listed: &super::engine::SemanticListedRef) -> Value {
     value
 }
 
+fn semantic_context_value(
+    context: &super::engine::SemanticContextMetadata,
+    outline: &str,
+) -> Value {
+    json!({
+        "anchor_ref": context.anchor_ref,
+        "group_ref": context.group_ref,
+        "parent_group_ref": context.parent_group_ref,
+        "order_domain": context.order_domain,
+        "outline": outline,
+        "member_refs": context.member_refs,
+        "before_omitted": context.before_omitted,
+        "after_omitted": context.after_omitted,
+        "before_continuation": context.before_continuation,
+        "after_continuation": context.after_continuation,
+        "group_complete": context.group_complete,
+        "document_collection_complete": context.document_collection_complete,
+        "virtualized_extent": "unknown",
+    })
+}
+
 fn with_tab_screenshot(mut result: ToolResult, screenshot: BrowserTabScreenshot) -> ToolResult {
     if let Some(structured) = result.structured_content.as_mut() {
         structured["screenshot"] = json!({
@@ -300,11 +321,11 @@ impl GetBrowserStateTool {
                     },
                     "query": {
                         "type": "string",
-                        "description": "Read-only semantic match over role, accessible name, and visible text."
+                        "description": "Read-only semantic match over role, accessible name, and visible text. semantic_v2 query responses also include bounded same-snapshot query_contexts with unmatched nearby structural labels as read-only refs."
                     },
                     "continuation": {
                         "type": "string",
-                        "description": "Opaque continuation minted by an earlier semantic_v2 response."
+                        "description": "Opaque single-use continuation minted by an earlier semantic_v2 response. It advances either filtered matches or a bounded context window within that exact stored snapshot and never recollects the page."
                     },
                     "include_screenshot": {
                         "type": "boolean",
@@ -417,6 +438,11 @@ impl Tool for GetBrowserStateTool {
                         "context_ref cannot be combined with scope_ref, query, continuation, or include_screenshot",
                     );
                 }
+                if args.opt_str("continuation").is_some() && include_screenshot {
+                    return ToolResult::error(
+                        "continuation cannot be combined with include_screenshot",
+                    );
+                }
                 if let Some(context_ref) = context_ref {
                     let outcome = match self
                         .engine
@@ -480,8 +506,11 @@ impl Tool for GetBrowserStateTool {
                             "group_ref": outcome.context.group_ref,
                             "parent_group_ref": outcome.context.parent_group_ref,
                             "order_domain": outcome.context.order_domain,
+                            "member_refs": outcome.context.member_refs,
                             "before_omitted": outcome.context.before_omitted,
                             "after_omitted": outcome.context.after_omitted,
+                            "before_continuation": outcome.context.before_continuation,
+                            "after_continuation": outcome.context.after_continuation,
                             "group_complete": outcome.context.group_complete,
                             "document_collection_complete": outcome.context.document_collection_complete,
                             "virtualized_extent": "unknown",
@@ -511,14 +540,16 @@ impl Tool for GetBrowserStateTool {
                             .iter()
                             .map(semantic_ref_value)
                             .collect::<Vec<_>>();
-                        ToolResult::text(format!(
-                            "semantic snapshot p{} of {}: {} action ref(s), {} content ref(s)",
-                            outcome.snapshot_id,
-                            outcome.url,
-                            refs.len(),
-                            content_refs.len()
-                        ))
-                        .with_structured(json!({
+                        let query_contexts = outcome
+                            .query_contexts
+                            .iter()
+                            .map(|block| semantic_context_value(&block.metadata, &block.outline))
+                            .collect::<Vec<_>>();
+                        let context = outcome
+                            .context
+                            .as_ref()
+                            .map(|context| semantic_context_value(context, &outcome.outline));
+                        let mut structured = json!({
                             "status": "ok",
                             "mode": "snapshot",
                             "target_id": target_id,
@@ -530,7 +561,11 @@ impl Tool for GetBrowserStateTool {
                                 "scope": outcome.scope,
                                 "selected_nodes": outcome.selected_nodes,
                                 "total_nodes": outcome.total_nodes,
-                                "node_budget": super::semantic::DEFAULT_SEMANTIC_NODE_BUDGET,
+                                "node_budget": if outcome.scope == "context" {
+                                    super::semantic::CONTEXT_BEFORE_NODES + 1 + super::semantic::CONTEXT_AFTER_NODES
+                                } else {
+                                    super::semantic::DEFAULT_SEMANTIC_NODE_BUDGET
+                                },
                                 "omitted": {
                                     "css_hidden": outcome.omissions.css_hidden,
                                     "offscreen": outcome.omissions.offscreen,
@@ -542,18 +577,26 @@ impl Tool for GetBrowserStateTool {
                                 },
                                 "continuation": outcome.continuation,
                             },
-                            "page": {
-                                "url": outcome.url,
-                                "title": outcome.title,
-                            },
+                            "page": { "url": outcome.url, "title": outcome.title },
                             "outline": outcome.outline,
                             "refs": refs,
                             "content_refs": content_refs,
-                            "oopif": {
-                                "status": outcome.oopif.as_str(),
-                                "frames": outcome.oopif.frames(),
-                            },
-                        }))
+                            "oopif": { "status": outcome.oopif.as_str(), "frames": outcome.oopif.frames() },
+                        });
+                        if !query_contexts.is_empty() {
+                            structured["query_contexts"] = Value::Array(query_contexts);
+                        }
+                        if let Some(context) = context {
+                            structured["context"] = context;
+                        }
+                        ToolResult::text(format!(
+                            "semantic snapshot p{} of {}: {} action ref(s), {} content ref(s)",
+                            outcome.snapshot_id,
+                            outcome.url,
+                            refs.len(),
+                            content_refs.len()
+                        ))
+                        .with_structured(structured)
                     }
                     Err(refusal) => return refusal.to_tool_result(),
                 };
