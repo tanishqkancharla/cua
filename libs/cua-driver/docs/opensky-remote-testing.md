@@ -127,7 +127,7 @@ object still existed, not that a consumer could still interact with it. The
 shared DOM click path now checks `isConnected` and dispatches in one JavaScript
 turn, reports detached nodes as stale without input, and distinguishes a receipt
 from unknown delivery. The existing SDK scenario is the real regression test;
-this fix is pending an exact-build rerun. It applies to the shared Chromium path;
+the exact-build rerun is recorded below. It applies to the shared Chromium path;
 Linux SDK evidence does not certify macOS/Windows GUI behavior.
 
 SCROLL-B01 also failed before dispatch. Linux explicitly refuses standalone
@@ -136,3 +136,13 @@ background-delivery contract. This is not fixed by switching to synthetic wheel
 events or silently activating a window. A foreground-authorized route or a
 proven background input implementation remains required. This first lane keeps
 the positive scroll expectation failing until that capability is implemented.
+
+The corrected driver SHA `59bdc18e03a276fa98c556f6110ba7791e97d101` passed the
+[three-platform build/unit matrix](https://github.com/tanishqkancharla/cua/actions/runs/34160289413).
+[SDK run 34160341420](https://github.com/tanishqkancharla/opensky/actions/runs/34160341420),
+at SDK `a6f9fa042a0f03c5bbd9abee8672e77e2d027431`, passed STALE-B01 on hosted
+Linux. Fresh public AX showed `Discarded: 0; replacement: 0; sibling: 0; retire: 1`;
+exact owned-tab cleanup completed and a 5.4-second recording was retained.
+SCROLL-B01 still failed with `route_unavailable`, leaving the SDK workflow red.
+The other platforms' build/unit checks are not GUI acceptance. Later docs-only
+commits do not modify this tested implementation.
