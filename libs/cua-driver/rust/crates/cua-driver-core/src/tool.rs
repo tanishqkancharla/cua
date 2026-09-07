@@ -2775,6 +2775,18 @@ mod runtime_isolation_tests {
     };
     use std::time::Duration;
 
+    // Manifest validation requires host-native absolute executable identities.
+    const SYNTHETIC_EXECUTABLE: &str = if cfg!(target_os = "windows") {
+        r"C:\synthetic\fixture"
+    } else {
+        "/synthetic/fixture"
+    };
+    const OTHER_EXECUTABLE: &str = if cfg!(target_os = "windows") {
+        r"C:\another\application"
+    } else {
+        "/another/application"
+    };
+
     fn standard_context() -> Arc<crate::session_authorization::EffectiveAuthorizationContext> {
         let ceiling = SessionModeCeiling::for_trusted_sessions(
             [PermissionMode::Standard],
@@ -3020,7 +3032,7 @@ mod runtime_isolation_tests {
                 "fingerprint": {
                     "pid": 424242,
                     "start_time": 7,
-                    "executable": "/synthetic/fixture"
+                    "executable": SYNTHETIC_EXECUTABLE
                 }
             }),
             "get_window_state" => serde_json::json!({
@@ -3030,7 +3042,7 @@ mod runtime_isolation_tests {
                 "fingerprint": {
                     "pid": 424242,
                     "start_time": 7,
-                    "executable": "/synthetic/fixture"
+                    "executable": SYNTHETIC_EXECUTABLE
                 }
             }),
             _ => serde_json::json!({
@@ -3247,7 +3259,7 @@ mod runtime_isolation_tests {
     async fn bounded_observation_uses_only_the_manifest_without_a_protected_host() {
         let hits = Arc::new(AtomicUsize::new(0));
         let registry = attested_registry("get_window_state", None, hits.clone(), false);
-        let context = bounded_context(
+        let context = bounded_context(&format!(
             r#"
 version: 2
 mode: bounded
@@ -3257,12 +3269,12 @@ allow:
   tools: [get_window_state]
 resources:
   apps:
-    - executable: /synthetic/fixture
+    - executable: {SYNTHETIC_EXECUTABLE}
       launch: false
       windows: all
       terminate: deny
-"#,
-        );
+"#
+        ));
         let result = registry
             .invoke_with_context(
                 "get_window_state",
@@ -3282,15 +3294,17 @@ resources:
             let registry = attested_registry("get_window_state", None, allowed_hits.clone(), false);
             let allowed = manifest_context(
                 mode,
-                r#"
+                &format!(
+                    r#"
 version: 3
 allow:
   tools: [get_window_state]
 resources:
   apps:
-    - executable: /synthetic/fixture
+    - executable: {SYNTHETIC_EXECUTABLE}
       windows: all
-"#,
+"#
+                ),
             );
             let result = registry
                 .invoke_with_context(
@@ -3306,15 +3320,17 @@ resources:
             let registry = attested_registry("get_window_state", None, denied_hits.clone(), false);
             let denied = manifest_context(
                 mode,
-                r#"
+                &format!(
+                    r#"
 version: 3
 allow:
   tools: [get_window_state]
 resources:
   apps:
-    - executable: /another/application
+    - executable: {OTHER_EXECUTABLE}
       windows: all
-"#,
+"#
+                ),
             );
             let result = registry
                 .invoke_with_context(
@@ -3930,7 +3946,7 @@ resources:
                 crate::browser::ProcessFingerprint {
                     pid: 424242,
                     start_time: Some(7),
-                    executable: Some("/synthetic/fixture".to_owned()),
+                    executable: Some(SYNTHETIC_EXECUTABLE.to_owned()),
                 },
             );
 
@@ -3958,7 +3974,7 @@ resources:
                 crate::browser::ProcessFingerprint {
                     pid: 424242,
                     start_time: Some(7),
-                    executable: Some("/synthetic/fixture".to_owned()),
+                    executable: Some(SYNTHETIC_EXECUTABLE.to_owned()),
                 },
             );
 
@@ -3988,7 +4004,7 @@ resources:
                 crate::browser::ProcessFingerprint {
                     pid: 424242,
                     start_time: Some(7),
-                    executable: Some("/synthetic/fixture".to_owned()),
+                    executable: Some(SYNTHETIC_EXECUTABLE.to_owned()),
                 },
             );
 
@@ -4091,7 +4107,7 @@ resources:
                 crate::browser::ProcessFingerprint {
                     pid: 424242,
                     start_time: Some(7),
-                    executable: Some("/synthetic/fixture".to_owned()),
+                    executable: Some(SYNTHETIC_EXECUTABLE.to_owned()),
                 },
             );
 
