@@ -685,14 +685,47 @@ pub unsafe fn ax_get_window_id(element: AXUIElementRef) -> Option<u32> {
     }
 }
 
-/// Read the `AXWindows` attribute of an application element.
-/// Unlike `AXChildren`, this returns the window list regardless of whether
-/// the app is frontmost. Returns a Vec of retained AXUIElementRefs.
+/// Read fresh AX window candidates from an application's window list and its
+/// focused/main window attributes. AppKit can expose an empty AXWindows list
+/// while AXFocusedWindow still maps to a real window (observed in TextEdit).
+/// These are candidates, not a complete inventory or input authority: callers
+/// must still prove the requested CGWindowID and WindowServer ownership.
+/// Returns a Vec of retained, deduplicated AXUIElementRefs.
 ///
 /// # Safety
 ///
 /// `element` must be valid, and the caller must release every returned element.
 pub unsafe fn copy_ax_windows(element: AXUIElementRef) -> Vec<AXUIElementRef> {
+    let mut windows = copy_ax_windows_attribute(element);
+    let mut application_pid = 0;
+    if AXUIElementGetPid(element, &mut application_pid) != kAXErrorSuccess {
+        return windows;
+    }
+    for attribute in ["AXFocusedWindow", "AXMainWindow"] {
+        let Some(window) = copy_element_attr(element, attribute) else {
+            continue;
+        };
+        let mut window_pid = 0;
+        let id = ax_get_window_id(window);
+        let valid = AXUIElementGetPid(window, &mut window_pid) == kAXErrorSuccess
+            && window_pid == application_pid
+            && copy_string_attr(window, "AXRole").as_deref() == Some("AXWindow")
+            && id.is_some();
+        if valid
+            && !windows.iter().any(|&existing| {
+                CFEqual(existing as CFTypeRef, window as CFTypeRef) != 0
+                    || ax_get_window_id(existing) == id
+            })
+        {
+            windows.push(window);
+        } else {
+            CFRelease(window as CFTypeRef);
+        }
+    }
+    windows
+}
+
+unsafe fn copy_ax_windows_attribute(element: AXUIElementRef) -> Vec<AXUIElementRef> {
     let attr = CFStr::new("AXWindows");
     let mut value: CFTypeRef = std::ptr::null();
     let err = AXUIElementCopyAttributeValue(element, attr.as_concrete_TypeRef(), &mut value);
