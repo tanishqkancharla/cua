@@ -30,11 +30,21 @@ use super::types::BindingQuality;
 /// crates call this from their `register_all` after constructing the
 /// engine with their adapter.
 pub fn register_browser_tools(engine: &Arc<BrowserEngine>, registry: &mut ToolRegistry) {
+    register_browser_tools_with_clipboard(engine, registry, None);
+}
+
+pub fn register_browser_tools_with_clipboard(
+    engine: &Arc<BrowserEngine>,
+    registry: &mut ToolRegistry,
+    clipboard: Option<Arc<dyn crate::clipboard::ClipboardBackend>>,
+) {
     registry.register(Box::new(GetBrowserStateTool::new(engine.clone())));
     registry.register(Box::new(BrowserPrepareTool::new(engine.clone())));
     registry.register(Box::new(BrowserNavigateTool::new(engine.clone())));
     registry.register(Box::new(BrowserClickTool::new(engine.clone())));
-    registry.register(Box::new(BrowserTypeTool::new(engine.clone())));
+    let mut typing = BrowserTypeTool::new(engine.clone());
+    typing.clipboard = clipboard;
+    registry.register(Box::new(typing));
     registry.register(Box::new(BrowserKeyTool::new(engine.clone())));
     registry.register(Box::new(BrowserDialogTool::new(engine.clone())));
     registry.register(Box::new(BrowserSetInputFilesTool::new(engine.clone())));
@@ -1810,6 +1820,7 @@ async fn enter_focus_emulation(
 pub struct BrowserTypeTool {
     def: ToolDef,
     engine: Arc<BrowserEngine>,
+    clipboard: Option<Arc<dyn crate::clipboard::ClipboardBackend>>,
 }
 
 impl BrowserTypeTool {
@@ -1818,7 +1829,9 @@ impl BrowserTypeTool {
             name: "browser_type".into(),
             description: "Type text into an exactly-bound tab via the Input domain. \
                 mode=\"insert_text\" (default) uses Input.insertText; \
-                mode=\"keystrokes\" dispatches per-character key events. Both insert \
+                mode=\"keystrokes\" dispatches per-character key events. \
+                mode=\"paste\" writes text/HTML to the clipboard and invokes a real \
+                browser paste; it leaves the supplied content on the clipboard. Both insert \
                 at the caret, so typing into a field that already holds text appends \
                 to it; pass replace=true to set the field instead, or to clear it by \
                 typing an empty string. Pass a ref to an editable element from the \
@@ -1834,10 +1847,11 @@ impl BrowserTypeTool {
                     "ref": schema_ref(),
                     "mode": {
                         "type": "string",
-                        "enum": ["insert_text", "keystrokes"],
+                        "enum": ["insert_text", "keystrokes", "paste"],
                         "description": "insert_text (default): bulk Input.insertText. \
                             keystrokes: per-character Input.dispatchKeyEvent."
                     },
+                    "format": {"type": "string", "enum": ["text", "md", "html"], "description": "Paste format; Markdown is literal source."},
                     "replace": {
                         "type": "boolean",
                         "description": "false (default): insert at the caret, appending \
@@ -1856,7 +1870,11 @@ impl BrowserTypeTool {
             idempotent: false,
             open_world: true,
         };
-        Self { def, engine }
+        Self {
+            def,
+            engine,
+            clipboard: None,
+        }
     }
 }
 
@@ -1904,12 +1922,23 @@ impl Tool for BrowserTypeTool {
             Err(e) => return e,
         };
         let mode = args.opt_str("mode").unwrap_or_else(|| "insert_text".into());
-        if mode != "insert_text" && mode != "keystrokes" {
+        if mode != "insert_text" && mode != "keystrokes" && mode != "paste" {
             return ToolResult::error(format!(
-                "mode must be \"insert_text\" or \"keystrokes\", got {mode:?}"
+                "mode must be insert_text, keystrokes, or paste, got {mode:?}"
             ));
         }
         let replace = args.opt_bool("replace").unwrap_or(false);
+        let format = args.opt_str("format").unwrap_or_else(|| "text".into());
+        if mode == "paste" && (!matches!(format.as_str(), "text" | "md" | "html") || replace) {
+            return ToolResult::error(
+                "paste accepts format=text|md|html and does not accept replace=true",
+            );
+        }
+        if mode == "paste" && self.clipboard.is_none() {
+            return ToolResult::error(
+                "browser paste is unavailable without a platform clipboard backend",
+            );
+        }
 
         let _mutation = match self
             .engine
@@ -2053,6 +2082,42 @@ impl Tool for BrowserTypeTool {
                     )
                     .await;
             }
+        }
+
+        if mode == "paste" {
+            if let Err(error) =
+                enter_focus_emulation(conn, cdp, entry.backend_node_id, &object_id).await
+            {
+                return BrowserRefusal::new(
+                    BrowserRefusalCode::BrowserInputTrustUnavailable,
+                    error,
+                )
+                .to_tool_result();
+            }
+            let delivered = super::paste::deliver(
+                conn,
+                cdp,
+                &object_id,
+                self.clipboard.as_ref().expect("checked above").clone(),
+                &text,
+                &format,
+            )
+            .await;
+            let cleanup = conn
+                .call(
+                    Some(cdp),
+                    "Emulation.setFocusEmulationEnabled",
+                    json!({"enabled": false}),
+                )
+                .await;
+            return match (delivered, cleanup) {
+                (Ok(()), Ok(_)) => ToolResult::text("Dispatched one real browser paste. Inspect the editor to verify its result; clipboard content was not restored.")
+                    .with_structured(json!({"status":"ok", "effect":"unverifiable", "path":"cdp_input",
+                        "target_id":target_id,"tab_id":tab_id,"ref":ext_ref,"mode":"paste","format":format,
+                        "clipboard_restored":false})),
+                (Err(error), _) => ToolResult::error(error),
+                (Ok(()), Err(error)) => ToolResult::error(format!("Paste was dispatched but focus cleanup failed: {error}. Do not replay automatically.")),
+            };
         }
 
         let requested_chars = text.chars().count();

@@ -146,3 +146,23 @@ exact owned-tab cleanup completed and a 5.4-second recording was retained.
 SCROLL-B01 still failed with `route_unavailable`, leaving the SDK workflow red.
 The other platforms' build/unit checks are not GUI acceptance. Later docs-only
 commits do not modify this tested implementation.
+
+## Context integration and browser paste (2026-09-07)
+
+The `tanishq/query-context` history had not been integrated into OpenSky Driver.
+Merge `d3100981785e8407a7589fbd1aff989d0e72594d` preserves those eleven commits
+and the detached-node fix. [SDK run 34162512013](https://github.com/tanishqkancharla/opensky/actions/runs/34162512013)
+passed all three list/article/table context cases, plus stale-reference isolation,
+Unicode fidelity and delayed-result freshness. The same SHA passed the
+[driver build/unit matrix](https://github.com/tanishqkancharla/cua/actions/runs/34162474847).
+
+Browser paste is now implemented as `browser_type` with `mode=paste`, supporting
+text, literal Markdown and HTML. It shares the exact tab/ref validation and focus
+emulation route, writes native clipboard formats, and invokes Chromium's real
+[editing command](https://chromedevtools.github.io/devtools-protocol/tot/Input/#method-dispatchKeyEvent).
+Driver clipboard writers serialize with paste. Connected/editor-focus checks and
+a readback detect changes before dispatch; they do not make external OS clipboard
+changes atomic with Chromium input. Browser clipboard contents are intentionally
+left in place; no restoration can overwrite a later copy. Bounded authorization
+also requires clipboard access. Native paste still needs its separate restoration
+contract. Status: implementation candidate, real SDK paste validation pending.

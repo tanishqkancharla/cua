@@ -439,6 +439,14 @@ pub fn default_capabilities_for(tool_name: &str) -> Vec<String> {
 /// richer live schema.
 pub fn advertised_capabilities_for(tool_name: &str, input_schema: &Value) -> Vec<String> {
     let mut capabilities = default_capabilities_for(tool_name);
+    if tool_name == "browser_type"
+        && input_schema
+            .pointer("/properties/mode/enum")
+            .and_then(Value::as_array)
+            .is_some_and(|modes| modes.iter().any(|mode| mode == "paste"))
+    {
+        capabilities.push("clipboard.write".into());
+    }
     let accepts_delivery_mode = schema_accepts_delivery_mode(input_schema);
     if accepts_delivery_mode
         && !capabilities

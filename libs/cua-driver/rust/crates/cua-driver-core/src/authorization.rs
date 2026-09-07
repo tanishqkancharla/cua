@@ -766,7 +766,9 @@ pub fn enforcement_adapters_for_call(
         add("desktop_input");
     }
 
-    if matches!(tool, "clipboard_read" | "clipboard_write") {
+    if matches!(tool, "clipboard_read" | "clipboard_write")
+        || (tool == "browser_type" && args.get("mode").and_then(Value::as_str) == Some("paste"))
+    {
         add("clipboard");
     }
 

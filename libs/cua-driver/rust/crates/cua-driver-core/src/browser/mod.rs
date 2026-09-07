@@ -43,6 +43,7 @@ mod grant;
 #[cfg(test)]
 pub(crate) mod mock_cdp;
 mod mutation;
+mod paste;
 pub mod platform;
 pub mod pointer;
 mod prepare;

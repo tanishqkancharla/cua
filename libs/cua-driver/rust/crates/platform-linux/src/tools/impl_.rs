@@ -8340,10 +8340,9 @@ pub fn build_registry_with_provider(
         },
         &pid_window_candidates,
     ));
-    cua_driver_core::clipboard::register_clipboard_tools(
-        &mut r,
-        Arc::new(crate::clipboard::LinuxClipboard::new()),
-    );
+    let clipboard: Arc<dyn cua_driver_core::clipboard::ClipboardBackend> =
+        Arc::new(crate::clipboard::LinuxClipboard::new());
+    cua_driver_core::clipboard::register_clipboard_tools(&mut r, clipboard.clone());
     // `screenshot` removed - see the matching comment in
     // platform-windows/src/tools/impl_.rs::build_registry. Canonical
     // screenshot path is `get_window_state` (it always returns a screenshot now).
@@ -8394,7 +8393,11 @@ pub fn build_registry_with_provider(
         r.approval_broker(),
         r.protected_resource_ownership(),
     );
-    cua_driver_core::browser::register_browser_tools(&browser_engine, &mut r);
+    cua_driver_core::browser::tools::register_browser_tools_with_clipboard(
+        &browser_engine,
+        &mut r,
+        Some(clipboard),
+    );
     r.register_recording_tools();
     r.register_session_tools();
     r
