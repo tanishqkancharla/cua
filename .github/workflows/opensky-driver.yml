@@ -19,7 +19,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: opensky-driver-${{ github.ref }}
+  # A routine build must not cancel an explicitly requested desktop run.
+  group: opensky-driver-${{ github.ref }}-${{ (inputs.desktop && inputs.desktop != 'none') || contains(github.event.head_commit.message, '[desktop-e2e:') }}
   cancel-in-progress: true
 
 env:
@@ -56,14 +57,22 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             clang pkg-config libdbus-1-dev libpipewire-0.3-dev libspa-0.2-dev \
             libei-dev libxkbcommon-dev libx11-dev libxi-dev libxtst-dev libxext-dev
-      - name: Build and run unit tests (no GUI acceptance)
+      - name: Build development executable
+        id: compile
         working-directory: libs/cua-driver/rust
         run: |
           mkdir -p ../../../artifacts/opensky-build
           cargo build --locked -p cua-driver 2>&1 | tee ../../../artifacts/opensky-build/build.log
-          cargo test --locked -p cua-driver --bin cua-driver -- --test-threads=1 2>&1 | tee ../../../artifacts/opensky-build/driver-unit.log
-          cargo test --locked -p cua-driver-contract -p cua-driver-core --lib -- --test-threads=1 2>&1 | tee ../../../artifacts/opensky-build/contract-core-unit.log
+      - name: Driver unit tests
+        if: always() && steps.compile.outcome == 'success'
+        working-directory: libs/cua-driver/rust
+        run: cargo test --locked -p cua-driver --bin cua-driver -- --test-threads=1 2>&1 | tee ../../../artifacts/opensky-build/driver-unit.log
+      - name: Shared contract and core unit tests
+        if: always() && steps.compile.outcome == 'success'
+        working-directory: libs/cua-driver/rust
+        run: cargo test --locked --no-fail-fast -p cua-driver-contract -p cua-driver-core --lib -- --test-threads=1 2>&1 | tee ../../../artifacts/opensky-build/contract-core-unit.log
       - name: Verify fork identity and retain executable
+        if: always() && steps.compile.outcome == 'success'
         run: python3 scripts/ci/opensky/collect-build.py
       - name: Upload build evidence
         if: always()

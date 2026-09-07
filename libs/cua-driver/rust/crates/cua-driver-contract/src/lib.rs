@@ -299,7 +299,7 @@ mod tests {
         let mut sorted = names.clone();
         sorted.sort_unstable();
         assert_eq!(names, sorted);
-        assert_eq!(manifest.contract_version, "0.7.0");
+        assert_eq!(manifest.contract_version, "0.7.0-opensky.1");
         assert!(manifest.experimental);
     }
 

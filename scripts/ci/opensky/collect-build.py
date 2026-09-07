@@ -15,6 +15,7 @@ identity = json.loads(subprocess.check_output(
     [str(binary), '--opensky-driver-identity'], text=True, timeout=30))
 assert identity['product'] == 'opensky-driver', identity
 assert identity['protocolVersion'] == 1, identity
+assert identity['source'] == os.environ['GITHUB_SHA'], identity
 (evidence / 'provenance.json').write_text(json.dumps({
     'sourceSha': os.environ['GITHUB_SHA'],
     'runnerOS': os.environ['RUNNER_OS'],
