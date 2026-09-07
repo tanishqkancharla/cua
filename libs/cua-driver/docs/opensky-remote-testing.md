@@ -188,5 +188,29 @@ are refused; screenshot viewport coordinates and main-frame refs are supported.
 See Chromium's [input handler](https://chromium.googlesource.com/chromium/src/+/refs/heads/main/content/browser/devtools/protocol/input_handler.cc)
 and [wheel gesture implementation](https://chromium.googlesource.com/chromium/src/+/HEAD/content/common/input/synthetic_smooth_move_gesture.cc).
 The real SDK test now observes both visible canvas movement and an independent
-foreground application's X11 focus history. Validation is pending; build success
+foreground application's X11 focus history. The Linux SDK validation below passed; build success
 alone does not establish desktop focus isolation or macOS GUI parity.
+
+## Completed browser regression and macOS window candidate
+
+[SDK run 34164047110](https://github.com/tanishqkancharla/opensky/actions/runs/34164047110)
+passed all ten browser cases at SDK `65819a3` / driver
+`f089f489a021c19ef84f5c75530ca589c82bc5ac`, including the X11 foreground-history
+assertion during trusted wheel scrolling. The macOS CLI from that driver was
+also exercised through the real SDK against the existing daemon and retained the
+original partial-activation diagnostic, code and payload.
+
+A local read-only AX diagnostic found TextEdit returning an empty AXWindows list
+while AXFocusedWindow and AXMainWindow both mapped to the exact owned window
+and exposed its children. `38c05be79d0bfc7ae03d57ccb82ca6319998c736` incorporates
+those fresh, same-process window candidates, deduplicating them before existing
+CGWindowID/WindowServer and element-ancestry checks. Candidates are not claimed
+to be a complete inventory. Its [build/unit matrix](https://github.com/tanishqkancharla/cua/actions/runs/34164488643)
+passed on all three operating systems. An earlier candidate failed compilation
+because the AX PID FFI and CFEqual import were missing; those are corrected.
+
+The development macOS app was updated with that exact artifact. Its ad-hoc
+signature changed, so macOS requested permission again. Native SDK selection
+and cooperative cleanup remain pending that reauthorization; neither the native
+diagnostic nor the build matrix counts as native GUI acceptance. Stable local
+code signing is a follow-up to avoid repeated permission grants across rebuilds.
