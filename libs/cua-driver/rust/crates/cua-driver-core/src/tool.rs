@@ -2775,14 +2775,15 @@ mod runtime_isolation_tests {
     };
     use std::time::Duration;
 
-    // Manifest validation requires host-native absolute executable identities.
+    // Attestations must use the same canonical spelling as manifest paths.
+    // Windows canonicalization includes the verbatim path prefix.
     const SYNTHETIC_EXECUTABLE: &str = if cfg!(target_os = "windows") {
-        r"C:\synthetic\fixture"
+        r"\\?\C:\synthetic\fixture"
     } else {
         "/synthetic/fixture"
     };
     const OTHER_EXECUTABLE: &str = if cfg!(target_os = "windows") {
-        r"C:\another\application"
+        r"\\?\C:\another\application"
     } else {
         "/another/application"
     };
@@ -3313,7 +3314,11 @@ resources:
                     allowed,
                 )
                 .await;
-            assert_ne!(result.is_error, Some(true), "{mode:?} in-scope call");
+            assert_ne!(
+                result.is_error,
+                Some(true),
+                "{mode:?} in-scope call: {result:?}"
+            );
             assert_eq!(allowed_hits.load(Ordering::SeqCst), 1);
 
             let denied_hits = Arc::new(AtomicUsize::new(0));
