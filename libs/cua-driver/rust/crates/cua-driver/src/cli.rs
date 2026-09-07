@@ -2340,6 +2340,18 @@ pub fn run_call(
             Ok(resp) => {
                 if resp.ok {
                     if let Some(result) = resp.result {
+                        // Transport success is not tool success. Keep the full
+                        // error envelope: flattening structuredContent loses
+                        // isError and the platform's delivery diagnostics.
+                        if result.get("isError").and_then(serde_json::Value::as_bool) == Some(true)
+                        {
+                            println!(
+                                "{}",
+                                serde_json::to_string_pretty(&result)
+                                    .unwrap_or_else(|_| result.to_string())
+                            );
+                            process::exit(1);
+                        }
                         // Walk the content array once: pick up any Image
                         // payloads (either to write to --screenshot-out-file
                         // or to merge into structuredContent below).

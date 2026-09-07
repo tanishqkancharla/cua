@@ -166,3 +166,27 @@ changes atomic with Chromium input. Browser clipboard contents are intentionally
 left in place; no restoration can overwrite a later copy. Bounded authorization
 also requires clipboard access. Native paste still needs its separate restoration
 contract. Status: implementation candidate, real SDK paste validation pending.
+
+## Verified browser paste and follow-on input diagnostics (2026-09-07)
+
+SDK run [34163189757](https://github.com/tanishqkancharla/opensky/actions/runs/34163189757)
+at SDK `8f955ca` and driver `a92fac8a44d3574570b69f70dd8cbe432256acbe`
+passed all three real paste cases and the six previous browser successes (9/10).
+The native clipboard paste transaction remains unimplemented.
+Driver build/unit run [34163145256](https://github.com/tanishqkancharla/cua/actions/runs/34163145256)
+passed on Linux, Windows and macOS.
+
+A macOS SDK probe found the CLI treating `bring_to_front` tool errors as success:
+it flattened `structuredContent` and discarded `isError` and the text diagnostic.
+The CLI now preserves the full error envelope and exits nonzero for tool errors.
+This does not replay or reverse an action that may have partially completed.
+
+The next scroll candidate uses `Input.synthesizeScrollGesture` with mouse input,
+instead of the focus-activating `Input.dispatchMouseEvent` wheel route. Chromium
+queues this gesture on its root widget, so subframe refs without a root transform
+are refused; screenshot viewport coordinates and main-frame refs are supported.
+See Chromium's [input handler](https://chromium.googlesource.com/chromium/src/+/refs/heads/main/content/browser/devtools/protocol/input_handler.cc)
+and [wheel gesture implementation](https://chromium.googlesource.com/chromium/src/+/HEAD/content/common/input/synthetic_smooth_move_gesture.cc).
+The real SDK test now observes both visible canvas movement and an independent
+foreground application's X11 focus history. Validation is pending; build success
+alone does not establish desktop focus isolation or macOS GUI parity.

@@ -55,6 +55,7 @@ const EXISTING_PROFILE_METHODS: &[&str] = &[
     "Input.dispatchKeyEvent",
     "Input.dispatchMouseEvent",
     "Input.insertText",
+    "Input.synthesizeScrollGesture",
     "Page.bringToFront",
     "Page.captureScreenshot",
     "Page.enable",

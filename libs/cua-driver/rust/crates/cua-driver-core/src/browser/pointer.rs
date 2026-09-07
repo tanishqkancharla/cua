@@ -567,6 +567,16 @@ impl BrowserPointerTool {
         let cdp_session = origin_ref
             .map(|reference| reference.cdp_session.as_str())
             .unwrap_or(validated.cdp_session.as_str());
+        // The gesture API queues input on the root widget. A subframe-local
+        // point cannot be used without an independently proven root transform.
+        if request.action == PointerAction::Scroll
+            && origin_ref.is_some_and(|reference| reference.frame.kind != FrameKind::Main)
+        {
+            return BrowserRefusal::new(
+                BrowserRefusalCode::BrowserInputTrustUnavailable,
+                "trusted scroll gestures require main-frame coordinates; take an exact-tab screenshot for a viewport point",
+            ).to_tool_result();
+        }
         let origin = match (&request.origin, origin_ref) {
             (Location::Coordinates(x, y), None) => (*x, *y),
             (Location::Ref(_), Some(reference)) => {
@@ -599,6 +609,37 @@ impl BrowserPointerTool {
                 visual_kind(request.action),
             )
             .await;
+
+        // Unlike dispatchMouseEvent, Chromium's smooth wheel gesture queues
+        // trusted wheel events without calling RenderWidgetHost::Focus.
+        // No DOM WheelEvent or scrollTop mutation substitutes for delivery.
+        if request.action == PointerAction::Scroll {
+            let delivery = conn
+                .call(
+                    Some(cdp_session),
+                    "Input.synthesizeScrollGesture",
+                    json!({
+                        "x": origin.0, "y": origin.1,
+                        "xDistance": -request.delta_x, "yDistance": -request.delta_y,
+                        "gestureSourceType": "mouse", "preventFling": true,
+                        "speed": 800,
+                    }),
+                )
+                .await;
+            return match delivery {
+                Ok(_) => ToolResult::text("Dispatched trusted wheel scroll in the exact tab.")
+                    .with_structured(json!({
+                        "status": "ok", "action": "scroll", "route": "trusted",
+                        "target_id": validated.record.target_id, "tab_id": validated.tab.tab_id,
+                        "x": origin.0, "y": origin.1,
+                        "delta_x": request.delta_x, "delta_y": request.delta_y,
+                    })),
+                Err(error) => BrowserRefusal::new(
+                    BrowserRefusalCode::BrowserInputTrustUnavailable,
+                    format!("trusted wheel scroll failed ({error}); delivery may be partial and must not be retried automatically"),
+                ).with_detail(json!({"delivery": "unknown", "retryable": false})).to_tool_result(),
+            };
+        }
 
         if let Err(error) = conn
             .call(
@@ -789,7 +830,7 @@ impl Tool for BrowserPointerTool {
             Ok(value) => value,
             Err(refusal) => return refusal.to_tool_result(),
         };
-        if request.route == InputRoute::Trusted {
+        if request.route == InputRoute::Trusted && request.action != PointerAction::Scroll {
             if let Some(refusal) = self.trusted_background_refusal(&validated) {
                 return refusal;
             }

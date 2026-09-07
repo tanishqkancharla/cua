@@ -1831,7 +1831,7 @@ impl BrowserTypeTool {
                 mode=\"insert_text\" (default) uses Input.insertText; \
                 mode=\"keystrokes\" dispatches per-character key events. \
                 mode=\"paste\" writes text/HTML to the clipboard and invokes a real \
-                browser paste; it leaves the supplied content on the clipboard. Both insert \
+                browser paste; it leaves the supplied content on the clipboard. All modes insert \
                 at the caret, so typing into a field that already holds text appends \
                 to it; pass replace=true to set the field instead, or to clear it by \
                 typing an empty string. Pass a ref to an editable element from the \
@@ -1849,7 +1849,7 @@ impl BrowserTypeTool {
                         "type": "string",
                         "enum": ["insert_text", "keystrokes", "paste"],
                         "description": "insert_text (default): bulk Input.insertText. \
-                            keystrokes: per-character Input.dispatchKeyEvent."
+                            keystrokes: per-character Input.dispatchKeyEvent. paste: real clipboard paste (no replace)."
                     },
                     "format": {"type": "string", "enum": ["text", "md", "html"], "description": "Paste format; Markdown is literal source."},
                     "replace": {
