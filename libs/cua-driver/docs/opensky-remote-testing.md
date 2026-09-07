@@ -228,5 +228,17 @@ This metadata is macOS-only; it does not change Windows/Linux window contracts.
 
 The local macOS driver build and focused window-record tests pass. Public SDK
 OPEN-N01 was added to verify same-named document identity and exact close with a
-surviving sibling. Its live run is pending renewed grants for the rebuilt ad-hoc
-development app. No native selection or clipboard acceptance is inferred.
+surviving sibling. Its live run passed after the grants were refreshed: SDK `5f42f0c`, driver
+runtime code `aa31c70ee`, macOS 15.7.9, 17.66 seconds. Exact close preserved a
+readable same-named sibling and fixture teardown completed. The local runtime
+was built before formatting/test/doc-only changes; executable behavior matches
+the committed candidate. All three OS build/unit jobs passed in
+[34167061105](https://github.com/tanishqkancharla/cua/actions/runs/34167061105).
+All ten hosted browser SDK workflows passed in
+[34167084511](https://github.com/tanishqkancharla/opensky/actions/runs/34167084511).
+No native selection or clipboard acceptance is inferred.
+
+The repeated TCC grants were caused by ad-hoc development signing: the observed
+designated requirement was a binary-specific cdhash. A consistent certificate
+and designated requirement should be established before routine local updates.
+No certificate/Keychain entry was created; this distribution issue remains open.
