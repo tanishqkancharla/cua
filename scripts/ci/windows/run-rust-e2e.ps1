@@ -210,7 +210,7 @@ function Invoke-ComputerHistoryGate {
     $historyHome = Join-Path $artifactDir "history-product-home"
     $historyBinDir = Join-Path $artifactDir "history-product-bin"
     $historyLocalAppData = Join-Path $artifactDir "history-local-app-data"
-    $historyPipeName = "cua-driver-local-history-$PID"
+    $historyPipeName = "opensky-driver-history-$PID"
     $historyPipe = "\\.\pipe\$historyPipeName"
     $env:CUA_DRIVER_LOCAL_HOME = $historyHome
     $env:CUA_DRIVER_LOCAL_INSTALL_DIR = $historyBinDir
@@ -240,7 +240,7 @@ function Invoke-ComputerHistoryGate {
         return
     }
 
-    $installed = Join-Path $historyHome "packages\current\cua-driver-local.exe"
+    $installed = Join-Path $historyHome "packages\current\opensky-driver.exe"
     $env:CUA_E2E_INSTALLED_DRIVER_BIN = $installed
     if (-not (Test-Path -LiteralPath $installed)) {
         Write-Host "[HISTORY FAIL] Installed driver is missing: $installed" -ForegroundColor Red

@@ -1,0 +1,161 @@
+name: OpenSky Driver
+
+on:
+  push:
+    branches: [opensky-driver]
+    paths:
+      - 'libs/cua-driver/**'
+      - 'scripts/ci/**'
+      - '.github/workflows/opensky-driver.yml'
+  workflow_dispatch:
+    inputs:
+      desktop:
+        description: 'Remote desktop lane (all for candidate certification)'
+        type: choice
+        default: none
+        options: [none, native, shared, capture, all]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: opensky-driver-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_INCREMENTAL: '0'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+  CUA_DRIVER_SOURCE_SHA: ${{ github.sha }}
+  CUA_E2E_SOURCE_SHA: ${{ github.sha }}
+  RUST_BACKTRACE: '1'
+
+jobs:
+  build:
+    name: Build and unit tests / ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025, macos-26]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2
+        with:
+          workspaces: 'libs/cua-driver/rust -> target'
+          key: opensky-build
+      - name: Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang pkg-config libdbus-1-dev libpipewire-0.3-dev libspa-0.2-dev \
+            libei-dev libxkbcommon-dev libx11-dev libxi-dev libxtst-dev libxext-dev
+      - name: Build and run unit tests (no GUI acceptance)
+        working-directory: libs/cua-driver/rust
+        run: |
+          mkdir -p ../../../artifacts/opensky-build
+          cargo build --locked -p cua-driver 2>&1 | tee ../../../artifacts/opensky-build/build.log
+          cargo test --locked -p cua-driver --bin cua-driver -- --test-threads=1 2>&1 | tee ../../../artifacts/opensky-build/driver-unit.log
+          cargo test --locked -p cua-driver-contract -p cua-driver-core --lib -- --test-threads=1 2>&1 | tee ../../../artifacts/opensky-build/contract-core-unit.log
+      - name: Verify fork identity and retain executable
+        run: python3 scripts/ci/opensky/collect-build.py
+      - name: Upload build evidence
+        if: always()
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4
+        with:
+          name: opensky-build-${{ matrix.os }}
+          path: artifacts/opensky-build
+          if-no-files-found: warn
+          retention-days: 14
+
+  desktop-plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      enabled: ${{ steps.plan.outputs.enabled }}
+    steps:
+      - id: plan
+        name: Select explicitly requested desktop lanes
+        env:
+          REQUESTED_LANE: ${{ inputs.desktop }}
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          lane = os.environ.get('REQUESTED_LANE') or 'none'
+          # A push marker bootstraps forks whose workflow is not on the default branch.
+          message = os.environ.get('COMMIT_MESSAGE', '')
+          for candidate in ('all', 'native', 'shared', 'capture'):
+              if f'[desktop-e2e:{candidate}]' in message:
+                  lane = candidate
+                  break
+          lanes = ['shared', 'native', 'capture'] if lane == 'all' else [lane]
+          enabled = lane != 'none'
+          matrix = {'os': ['ubuntu-24.04', 'windows-2025'], 'lane': lanes}
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f'enabled={str(enabled).lower()}\n')
+              f.write(f'matrix={json.dumps(matrix)}\n')
+          PY
+
+  desktop:
+    name: Desktop / ${{ matrix.os }} / ${{ matrix.lane }}
+    needs: desktop-plan
+    if: needs.desktop-plan.outputs.enabled == 'true'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.desktop-plan.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    env:
+      CUA_E2E_INTERNAL_LANE: ${{ matrix.lane }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2
+        with:
+          workspaces: 'libs/cua-driver/rust -> target'
+          key: opensky-desktop-${{ matrix.lane }}
+      - name: Linux desktop dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            xvfb xauth dbus-x11 at-spi2-core openbox picom python3-gi \
+            gir1.2-gtk-3.0 gir1.2-gtk-4.0 libgtk-3-dev clang pkg-config \
+            libdbus-1-dev libpipewire-0.3-dev libspa-0.2-dev libei-dev \
+            libxkbcommon-dev libx11-dev libxi-dev libxtst-dev libxext-dev \
+            libwebkit2gtk-4.1-dev libssl-dev libxdo-dev \
+            libayatana-appindicator3-dev librsvg2-dev ffmpeg gnome-keyring jq
+      - name: Canonical Linux desktop harness
+        if: runner.os == 'Linux'
+        run: |
+          xvfb-run -a --server-args="-screen 0 1920x1080x24" \
+            dbus-run-session -- bash -lc \
+            "eval \"\$(printf test-password | gnome-keyring-daemon --unlock --components=secrets)\"; openbox >/tmp/opensky-openbox.log 2>&1 & picom --backend xrender --config /dev/null >/tmp/opensky-picom.log 2>&1 & sleep 2; scripts/ci/linux/run-rust-e2e.sh"
+      - name: Windows recording dependencies
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .\scripts\ci\windows\setup-ffmpeg.ps1
+      - name: Canonical Windows desktop harness
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .\scripts\ci\windows\run-rust-e2e.ps1 -RequireGui
+      - name: Collect Windows logs
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        run: .\scripts\ci\windows\collect-artifacts.ps1
+      - name: Upload desktop evidence
+        if: always()
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4
+        with:
+          name: opensky-desktop-${{ matrix.os }}-${{ matrix.lane }}
+          path: artifacts/cua-driver
+          if-no-files-found: warn
+          compression-level: 0
+          retention-days: 14

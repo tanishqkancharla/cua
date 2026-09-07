@@ -42,3 +42,7 @@ Fork release artifacts are not assumed. OpenSky CI must set `OPENSKY_DRIVER_REF`
 See [driver follow-ups](libs/cua-driver/docs/opensky-followups.md) and [validation](libs/cua-driver/docs/opensky-validation.md). Renaming and isolating the backend does not resolve the deferred desktop parity gaps.
 
 Private `_upstream-*` scripts and `_install-rust.sh` retain upstream release tooling for merges and regression tests. OpenSky’s public entry points and runtime updater never call them.
+
+## Remote validation
+
+[Remote testing](libs/cua-driver/docs/opensky-remote-testing.md) builds and tests the fork on GitHub-hosted Linux, Windows, and macOS runners. Linux and Windows GUI harnesses are opt-in; macOS GUI acceptance still requires a separate provisioned Mac. Your active desktop is not used.
