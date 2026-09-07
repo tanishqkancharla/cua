@@ -12,7 +12,7 @@
 
 use core_foundation::{
     array::CFArrayRef,
-    base::{CFRelease, CFRetain, CFTypeID, CFTypeRef},
+    base::{CFEqual, CFRelease, CFRetain, CFTypeID, CFTypeRef},
     string::CFStringRef,
 };
 use std::os::raw::{c_int, c_void};
@@ -82,6 +82,7 @@ extern "C" {
         timeout_in_seconds: f32,
     ) -> AXError;
     pub fn AXUIElementGetTypeID() -> CFTypeID;
+    pub fn AXUIElementGetPid(element: AXUIElementRef, pid: *mut i32) -> AXError;
     pub fn AXIsProcessTrusted() -> bool;
     /// `AXIsProcessTrustedWithOptions(options)` — when called with
     /// `{kAXTrustedCheckOptionPrompt: true}` raises the system Accessibility
