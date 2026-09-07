@@ -214,3 +214,19 @@ signature changed, so macOS requested permission again. Native SDK selection
 and cooperative cleanup remain pending that reauthorization; neither the native
 diagnostic nor the build matrix counts as native GUI acceptance. Stable local
 code signing is a follow-up to avoid repeated permission grants across rebuilds.
+
+### Restored native document identity candidate (2026-09-07)
+
+After granting the previous development binary both permissions, the real SDK
+open failed because TextEdit restored two same-named documents beside the
+requested file. A read-only AX diagnostic confirmed distinct AXDocument URLs.
+`list_windows` now accepts `include_document_urls: true` with an explicit positive
+PID and reports each exact AXWindow's document URL, joined by PID and CGWindowID.
+The field is opt-in and null when unavailable; ordinary inventory does not start
+AX reads. The SDK uses canonical paths and rejects ambiguous document matches.
+This metadata is macOS-only; it does not change Windows/Linux window contracts.
+
+The local macOS driver build and focused window-record tests pass. Public SDK
+OPEN-N01 was added to verify same-named document identity and exact close with a
+surviving sibling. Its live run is pending renewed grants for the rebuilt ad-hoc
+development app. No native selection or clipboard acceptance is inferred.

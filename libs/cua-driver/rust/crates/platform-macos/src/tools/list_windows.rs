@@ -34,6 +34,10 @@ fn def() -> &'static ToolDef {
                 "on_screen_only": {
                     "type": "boolean",
                     "description": "When true, drop windows not on the current Space. Default false."
+                },
+                "include_document_urls": {
+                    "type": "boolean",
+                    "description": "With an explicit pid, include each exact AXWindow's AXDocument as document_url (null when unavailable). Read-only; never matches a document by its title. Default false."
                 }
             },
             "additionalProperties": false
@@ -55,6 +59,10 @@ impl Tool for ListWindowsTool {
         use cua_driver_core::tool_args::ArgsExt;
         let pid_filter: Option<i32> = args.opt_i64("pid").map(|v| v as i32);
         let on_screen_only = args.bool_or("on_screen_only", false);
+        let include_documents = args.bool_or("include_document_urls", false);
+        if include_documents && !pid_filter.is_some_and(|pid| pid > 0) {
+            return ToolResult::error("include_document_urls requires an explicit positive pid");
+        }
 
         let enumeration = if on_screen_only {
             crate::windows::visible_windows_with_space_snapshot()
@@ -68,7 +76,13 @@ impl Tool for ListWindowsTool {
             windows.retain(|w| w.pid == pid);
         }
 
-        let windows_json: Vec<Value> = windows.iter().map(window_record_json).collect();
+        let mut windows_json: Vec<Value> = windows.iter().map(window_record_json).collect();
+        if include_documents {
+            let documents = document_urls(pid_filter.unwrap(), &windows);
+            for (record, window) in windows_json.iter_mut().zip(&windows) {
+                record["document_url"] = serde_json::json!(documents.get(&window.window_id));
+            }
+        }
 
         ToolResult::text(format!("Found {} window(s).", windows_json.len())).with_structured(
             serde_json::json!({
@@ -77,6 +91,47 @@ impl Tool for ListWindowsTool {
             }),
         )
     }
+}
+
+/// AXDocument is evidence about a specific window, not a process-wide active
+/// document. Join AX and WindowServer only by exact CGWindowID and owner PID.
+fn document_urls(
+    pid: i32,
+    windows: &[crate::windows::WindowInfo],
+) -> std::collections::HashMap<u32, String> {
+    use crate::ax::bindings::*;
+    use core_foundation::base::{CFRelease, CFTypeRef};
+    let mut documents = std::collections::HashMap::new();
+    unsafe {
+        let app = AXUIElementCreateApplication(pid);
+        if app.is_null() {
+            return documents;
+        }
+        AXUIElementSetMessagingTimeout(app, 0.5);
+        for window in copy_ax_windows(app) {
+            let mut owner = 0;
+            if AXUIElementGetPid(window, &mut owner) == kAXErrorSuccess
+                && owner == pid
+                && copy_string_attr(window, "AXRole").as_deref() == Some("AXWindow")
+            {
+                if let Some(id) = ax_get_window_id(window) {
+                    if windows
+                        .iter()
+                        .any(|row| row.pid == pid && row.window_id == id)
+                    {
+                        if let Some(url) = copy_string_attr(window, "AXDocument") {
+                            if !url.is_empty() {
+                                documents.insert(id, url);
+                            }
+                        }
+                    }
+                }
+            }
+            CFRelease(window as CFTypeRef);
+        }
+        CFRelease(app as CFTypeRef);
+    }
+    documents
 }
 
 pub(super) fn window_record_json(w: &crate::windows::WindowInfo) -> Value {
@@ -103,6 +158,14 @@ pub(super) fn window_record_json(w: &crate::windows::WindowInfo) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn document_lookup_requires_an_explicit_process() {
+        let result = ListWindowsTool
+            .invoke(serde_json::json!({"include_document_urls": true}))
+            .await;
+        assert_eq!(result.is_error, Some(true));
+    }
 
     #[test]
     fn window_record_includes_observed_z_index() {
