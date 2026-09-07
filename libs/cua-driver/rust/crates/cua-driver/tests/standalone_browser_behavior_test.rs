@@ -740,7 +740,7 @@ fn driver_profile_root() -> PathBuf {
                     .join(".local")
                     .join("state")
             });
-        state.join("cua-driver").join("browser-profiles")
+        state.join("opensky-driver").join("browser-profiles")
     }
 }
 

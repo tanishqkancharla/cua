@@ -1,14 +1,14 @@
-# Remove only the source-built cua-driver-local product on Windows.
+# Remove only the source-built opensky-driver product on Windows.
 [CmdletBinding()]
 param([switch]$Force, [switch]$ValidateOnly)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$TaskName = "cua-driver-local-serve"
-$HomeDir = if ($env:CUA_DRIVER_LOCAL_HOME) { $env:CUA_DRIVER_LOCAL_HOME } else { Join-Path $env:USERPROFILE ".cua-driver-local" }
-$VisibleBinDir = if ($env:CUA_DRIVER_LOCAL_INSTALL_DIR) { $env:CUA_DRIVER_LOCAL_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA "Programs\Cua\cua-driver-local\bin" }
-$RuntimeDir = Join-Path $env:LOCALAPPDATA "cua-driver-local"
+$TaskName = "opensky-driver-serve"
+$HomeDir = if ($env:CUA_DRIVER_LOCAL_HOME) { $env:CUA_DRIVER_LOCAL_HOME } else { Join-Path $env:USERPROFILE ".opensky-driver" }
+$VisibleBinDir = if ($env:CUA_DRIVER_LOCAL_INSTALL_DIR) { $env:CUA_DRIVER_LOCAL_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA "Programs\Cua\opensky-driver\bin" }
+$RuntimeDir = Join-Path $env:LOCALAPPDATA "opensky-driver"
 $ReleaseHome = Join-Path $env:USERPROFILE ".cua-driver"
 $ReleaseBinDir = Join-Path $env:LOCALAPPDATA "Programs\Cua\cua-driver\bin"
 if (-not [IO.Path]::IsPathRooted($HomeDir) -or $HomeDir -eq $env:USERPROFILE -or $HomeDir -eq $ReleaseHome) {
@@ -38,11 +38,11 @@ function Test-LocalLinkTarget([string]$Path) {
 }
 
 if ($ValidateOnly) {
-    Write-Output "cli=$(Join-Path $VisibleBinDir 'cua-driver-local.exe')"
+    Write-Output "cli=$(Join-Path $VisibleBinDir 'opensky-driver.exe')"
     Write-Output "home=$HomeDir"
     Write-Output "runtime=$RuntimeDir"
     Write-Output "task=$TaskName"
-    Write-Output "processes=cua-driver-local,cua-driver-uia-local"
+    Write-Output "processes=opensky-driver,opensky-driver-uia"
     exit 0
 }
 
@@ -74,7 +74,7 @@ if ($taskExists) {
     Write-Step "removed scheduled task $TaskName"
 }
 
-Get-Process -Name "cua-driver-local","cua-driver-uia-local" -ErrorAction SilentlyContinue |
+Get-Process -Name "opensky-driver","opensky-driver-uia" -ErrorAction SilentlyContinue |
     Stop-Process -Force -ErrorAction SilentlyContinue
 
 # The visible bin path is local-only, but still require the junction shape the
@@ -92,12 +92,12 @@ if (Test-Path -LiteralPath $VisibleBinDir) {
 # Shared skill names are removed only when the reparse target belongs to the
 # local package home. Release and hand-managed links are preserved.
 $SkillLinks = @(
-    (Join-Path $env:USERPROFILE ".claude\skills\cua-driver"),
-    (Join-Path $env:USERPROFILE ".agents\skills\cua-driver"),
-    (Join-Path $env:USERPROFILE ".openclaw\skills\cua-driver"),
-    (Join-Path $env:APPDATA "opencode\skills\cua-driver"),
-    (Join-Path $env:USERPROFILE ".gemini\skills\cua-driver"),
-    (Join-Path $env:USERPROFILE ".hermes\skills\cua-driver")
+    (Join-Path $env:USERPROFILE ".claude\skills\opensky-driver"),
+    (Join-Path $env:USERPROFILE ".agents\skills\opensky-driver"),
+    (Join-Path $env:USERPROFILE ".openclaw\skills\opensky-driver"),
+    (Join-Path $env:APPDATA "opencode\skills\opensky-driver"),
+    (Join-Path $env:USERPROFILE ".gemini\skills\opensky-driver"),
+    (Join-Path $env:USERPROFILE ".hermes\skills\opensky-driver")
 )
 foreach ($link in $SkillLinks) {
     if (Test-LocalLinkTarget $link) {
@@ -122,7 +122,7 @@ if (Test-Path -LiteralPath $ClaudeJson) {
             if ($commandProperty) { $parts += @($commandProperty.Value) }
             if ($argsProperty) { $parts += @($argsProperty.Value) }
             $joined = ($parts | Where-Object { $_ -is [string] }) -join ' '
-            if ($joined.Contains("cua-driver-local") -or $joined.Contains($HomeDir)) {
+            if ($joined.Contains("opensky-driver") -or $joined.Contains($HomeDir)) {
                 $servers.PSObject.Properties.Remove($property.Name)
                 $script:changed = $true
             }
@@ -138,7 +138,7 @@ if (Test-Path -LiteralPath $ClaudeJson) {
         }
     }
     if ($changed) {
-        $backup = "$ClaudeJson.bak-cua-driver-local-uninstall-$(Get-Date -Format yyyyMMddHHmmss)"
+        $backup = "$ClaudeJson.bak-opensky-driver-uninstall-$(Get-Date -Format yyyyMMddHHmmss)"
         Copy-Item -LiteralPath $ClaudeJson -Destination $backup
         $data | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $ClaudeJson -Encoding UTF8
         Write-Step "removed local Claude MCP registrations (backup: $backup)"
@@ -148,7 +148,7 @@ if (Test-Path -LiteralPath $ClaudeJson) {
 # CUA_DRIVER_LOCAL_HOME is caller-controlled. Require the installer-created
 # executable marker and remove only known runtime-owned children; never
 # recursively delete the arbitrary override root or unrelated files within it.
-$LocalHomeMarker = Join-Path $HomeDir "packages\current\cua-driver-local.exe"
+$LocalHomeMarker = Join-Path $HomeDir "packages\current\opensky-driver.exe"
 if (Test-Path -LiteralPath $LocalHomeMarker) {
     foreach ($child in @("packages", "skills")) {
         $path = Join-Path $HomeDir $child
@@ -171,7 +171,7 @@ if (Test-Path -LiteralPath $LocalHomeMarker) {
         Write-Step "removed local runtime payloads from $HomeDir; preserved unrelated files"
     }
 } elseif (Test-Path -LiteralPath $HomeDir) {
-    Write-Step "$HomeDir has no cua-driver-local install marker; leaving it untouched"
+    Write-Step "$HomeDir has no opensky-driver install marker; leaving it untouched"
 }
 if (Test-Path -LiteralPath $RuntimeDir) {
     Remove-Item -LiteralPath $RuntimeDir -Force -Recurse
@@ -185,4 +185,4 @@ if ($userPath -and $LocalBinOwned) {
     [Environment]::SetEnvironmentVariable('Path', ($filtered -join ';'), 'User')
 }
 
-Write-Step "cua-driver-local uninstalled; release cua-driver was left untouched"
+Write-Step "opensky-driver uninstalled; release cua-driver was left untouched"

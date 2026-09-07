@@ -209,7 +209,7 @@ mod tests {
     fn secret_service_namespace_is_strict_and_separated() {
         assert_ne!(
             LinuxSecretServiceKeyProvider::service("cua-driver").unwrap(),
-            LinuxSecretServiceKeyProvider::service("cua-driver-local").unwrap()
+            LinuxSecretServiceKeyProvider::service("opensky-driver").unwrap()
         );
         assert!(LinuxSecretServiceKeyProvider::service("../escape").is_err());
     }
@@ -251,7 +251,7 @@ mod tests {
     #[test]
     #[ignore = "mutates uniquely named Secret Service items; run in native release qualification"]
     fn secret_service_key_lifecycle_is_isolated_corruptible_and_destroyable() {
-        let namespace = format!("cua-driver-local-test-{}", uuid::Uuid::new_v4().simple());
+        let namespace = format!("opensky-driver-test-{}", uuid::Uuid::new_v4().simple());
         let other_namespace = format!("{namespace}-other");
         let provider = LinuxSecretServiceKeyProvider;
         assert!(provider.references(&namespace).unwrap().is_empty());

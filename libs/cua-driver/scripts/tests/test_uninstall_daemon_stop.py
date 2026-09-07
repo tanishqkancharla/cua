@@ -1,3 +1,4 @@
+# Retained upstream regression coverage; public OpenSky entry points use uninstall-local.
 """Focused coverage for fail-closed Unix release daemon shutdown."""
 
 from __future__ import annotations
@@ -10,7 +11,7 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[4]
-UNINSTALL = ROOT / "libs/cua-driver/scripts/uninstall.sh"
+UNINSTALL = ROOT / "libs/cua-driver/scripts/_upstream-uninstall.sh"
 
 
 def executable(path: Path, body: str) -> None:

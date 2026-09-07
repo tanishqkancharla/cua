@@ -23,7 +23,7 @@ use serde_json::{json, Value};
 
 const CHESS_BUNDLE: &str = "com.apple.Chess";
 const RAW_SESSION: &str = "centennial-lume-continuity";
-const HISTORY_KEYCHAIN_SERVICE: &str = "com.trycua.cua-driver-local.computer-history.v1";
+const HISTORY_KEYCHAIN_SERVICE: &str = "com.opensky.driver.computer-history.v1";
 const HISTORY_KEYCHAIN_ACCOUNT: &str = "namespace-root-key-v1";
 
 fn installed_driver() -> PathBuf {
@@ -45,7 +45,7 @@ fn marker_path() -> PathBuf {
 
 fn history_root() -> PathBuf {
     PathBuf::from(std::env::var_os("HOME").expect("HOME must be set"))
-        .join("Library/Application Support/cua-driver-local/computer-history")
+        .join("Library/Application Support/opensky-driver/computer-history")
 }
 
 fn history_cli(subcommand: &str, extra: &[&str]) -> Value {

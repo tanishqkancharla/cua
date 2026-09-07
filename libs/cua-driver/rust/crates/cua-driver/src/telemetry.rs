@@ -29,7 +29,7 @@ const LIFECYCLE_RETRY_BACKOFF_SECS: u64 = 15 * 60;
 const TOOL_TELEMETRY_LIMIT_PER_HOUR: usize = 1_000;
 const TOOL_TELEMETRY_WINDOW: Duration = Duration::from_secs(60 * 60);
 
-const HOME_SUBDIRECTORY: &str = ".cua-driver";
+const HOME_SUBDIRECTORY: &str = ".opensky-driver";
 const LEGACY_HOME_SUBDIRECTORY: &str = ".cua-driver-rs";
 const CONFIG_FILE_NAME: &str = "config.json";
 const CONFIG_ENABLED_KEY: &str = "telemetry_enabled";
@@ -214,6 +214,9 @@ pub fn is_enabled() -> bool {
 }
 
 fn effective_enabled() -> (bool, &'static str) {
+    if crate::bundle::is_local_installation() {
+        return (false, "opensky_source");
+    }
     if let Some(value) = parse_env_bool(ENV_TELEMETRY_ENABLED) {
         return (value, "environment");
     }
@@ -2795,91 +2798,29 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_registration_is_single_writer_and_non_blocking_across_processes() {
+    fn opensky_lifecycle_registration_does_not_create_upstream_events() {
         let _guard = ENV_LOCK.lock().unwrap();
         with_isolated_home(|root| {
-            let mut winner = spawn_test_child("lifecycle-winner", root, 0);
-            assert!(wait_for_path(
-                &root.join("winner-ready"),
-                Duration::from_secs(15)
-            ));
-
-            let mut contender = spawn_test_child("lifecycle-contender", root, 1);
-            let contender_status = wait_for_child(&mut contender, Duration::from_secs(5));
-            if contender_status.is_none() {
-                let _ = std::fs::write(root.join("release-winner"), "1");
-                let _ = contender.kill();
-                let _ = winner.kill();
-            }
-            assert!(
-                contender_status.is_some_and(|status| status.success()),
-                "contender must skip a busy lifecycle lock without waiting for network delivery"
-            );
-
-            std::fs::write(root.join("release-winner"), "1").unwrap();
-            let winner_status = wait_for_child(&mut winner, Duration::from_secs(15));
-            if winner_status.is_none() {
-                let _ = winner.kill();
-                let _ = winner.wait();
-            }
-            assert!(
-                winner_status.is_some_and(|status| status.success()),
-                "lifecycle winner must finish successfully"
-            );
-
-            let mut events = std::fs::read_dir(root)
-                .unwrap()
-                .filter_map(Result::ok)
-                .filter(|entry| entry.file_name().to_string_lossy().starts_with("event-"))
-                .map(|entry| {
-                    serde_json::from_slice::<Value>(&std::fs::read(entry.path()).unwrap()).unwrap()
-                })
-                .collect::<Vec<_>>();
-            events.sort_by_key(|event| event["event"].as_str().unwrap_or_default().to_owned());
-            assert_eq!(events.len(), 2);
-            assert_eq!(
-                events
-                    .iter()
-                    .filter(|item| item["event"] == event::INSTALLATION_REGISTERED)
-                    .count(),
-                1
-            );
-            assert_eq!(
-                events
-                    .iter()
-                    .filter(|item| item["event"] == event::RELEASE_INSTALLED)
-                    .count(),
-                1
-            );
-            let persisted = read_install_id().expect("persisted identity");
-            assert!(events.iter().all(|item| item["distinct_id"] == persisted));
-            for index in 0..=1 {
-                assert_eq!(
-                    std::fs::read_to_string(root.join(format!("observed-id-{index}"))).unwrap(),
-                    persisted
-                );
-            }
-            assert!(root
+            capture_install_with_poster(|_| panic!("OpenSky must not post upstream events"));
+            assert!(!root
                 .join(HOME_SUBDIRECTORY)
                 .join(INSTALLATION_RECORDED_FILE_NAME)
                 .exists());
-            assert!(release_marker_path(current_product_version())
-                .unwrap()
-                .exists());
+            assert!(read_install_id().is_none());
         });
     }
 
     #[test]
-    fn precedence_is_environment_then_persisted_then_default() {
+    fn opensky_never_enables_upstream_telemetry() {
         let _guard = ENV_LOCK.lock().unwrap();
         with_isolated_home(|_| {
-            assert_eq!(effective_enabled(), (true, "default"));
+            assert_eq!(effective_enabled(), (false, "opensky_source"));
             set_enabled(false).unwrap();
-            assert_eq!(effective_enabled(), (false, "persisted"));
+            assert_eq!(effective_enabled(), (false, "opensky_source"));
             unsafe {
                 std::env::set_var(ENV_TELEMETRY_ENABLED, "true");
             }
-            assert_eq!(effective_enabled(), (true, "environment"));
+            assert_eq!(effective_enabled(), (false, "opensky_source"));
             unsafe {
                 std::env::remove_var(ENV_TELEMETRY_ENABLED);
             }
@@ -2970,54 +2911,33 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_markers_are_written_only_after_each_2xx() {
+    fn opensky_does_not_write_upstream_lifecycle_success_markers() {
         let _guard = ENV_LOCK.lock().unwrap();
         with_isolated_home(|root| {
-            let home = root.join(HOME_SUBDIRECTORY);
-            let mut calls = 0;
-            capture_install_with_poster(|_| {
-                calls += 1;
-                if calls == 1 {
-                    Ok(200)
-                } else {
-                    Ok(500)
-                }
-            });
-            assert!(home.join(INSTALLATION_RECORDED_FILE_NAME).exists());
-            assert!(!release_marker_path(current_product_version())
-                .unwrap()
+            capture_install_with_poster(|_| panic!("disabled telemetry must not deliver"));
+            assert!(!root
+                .join(HOME_SUBDIRECTORY)
+                .join(INSTALLATION_RECORDED_FILE_NAME)
                 .exists());
-
-            remove_file_if_exists(&home.join(TELEMETRY_RETRY_AFTER_FILE_NAME)).unwrap();
-            capture_install_with_poster(|_| Ok(200));
-            assert!(release_marker_path(current_product_version())
+            assert!(!release_marker_path(current_product_version())
                 .unwrap()
                 .exists());
         });
     }
 
     #[test]
-    fn failed_lifecycle_delivery_defers_retries_without_marking_success() {
+    fn opensky_does_not_schedule_upstream_lifecycle_retries() {
         let _guard = ENV_LOCK.lock().unwrap();
-        with_isolated_home(|root| {
-            let home = root.join(HOME_SUBDIRECTORY);
+        with_isolated_home(|_| {
             let mut calls = 0;
-            capture_install_with_poster(|_| {
-                calls += 1;
-                Ok(503)
-            });
-            assert_eq!(calls, 1);
-            assert!(lifecycle_retry_deferred());
-            assert!(!home.join(INSTALLATION_RECORDED_FILE_NAME).exists());
-
-            capture_install_with_poster(|_| {
-                calls += 1;
-                Ok(200)
-            });
-            assert_eq!(
-                calls, 1,
-                "retry backoff must prevent per-command network stalls"
-            );
+            for _ in 0..2 {
+                capture_install_with_poster(|_| {
+                    calls += 1;
+                    Ok(503)
+                });
+            }
+            assert_eq!(calls, 0);
+            assert!(!lifecycle_retry_deferred());
         });
     }
 

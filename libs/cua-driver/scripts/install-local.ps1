@@ -3,7 +3,7 @@
 #
 # Params mirror scripts/install.ps1 so the developer loop matches what
 # end users experience:
-#   -AutoStart      register the cua-driver-local-serve Scheduled Task at logon
+#   -AutoStart      register the opensky-driver-serve Scheduled Task at logon
 #                   (Windows-native equivalent of macOS LaunchAgent).
 #                   Default off; the post-install message prints the
 #                   registration recipe so you can opt in later.
@@ -24,7 +24,7 @@
 #   <visibleBinDir>            [junction → currentDir]
 #   <currentDir>               [junction → release dir, retargeted here]
 #   <release dir>              [real dir, this script's output]
-#     0.0.0-local-release-<target>\cua-driver-local.exe
+#     0.0.0-local-release-<target>\opensky-driver.exe
 #
 # The version-string carries `-local-release` so it never collides with
 # a real release dir and is trivial to garbage-collect.
@@ -61,9 +61,9 @@ $ScriptDir   = Split-Path -Parent $MyInvocation.MyCommand.Path
 # libs/cua-driver/scripts/; the Cargo workspace lives one level deeper
 # under libs/cua-driver/rust/.
 $RepoRoot    = (Resolve-Path "$ScriptDir\..\rust").Path
-$BinaryName  = "cua-driver-local.exe"
+$BinaryName  = "opensky-driver.exe"
 $BuiltBinaryName = "cua-driver.exe"
-$UiaBinaryName = "cua-driver-uia-local.exe"
+$UiaBinaryName = "opensky-driver-uia.exe"
 $ThemeBinaryName = "cua-cursor-theme.exe"
 # Always release-config — matches the binary install.ps1 hands end users.
 $Config      = "release"
@@ -100,12 +100,12 @@ $Target = switch -Regex ($archEnv) {
 if ($env:CUA_DRIVER_LOCAL_INSTALL_DIR) {
     $VisibleBinDir = $env:CUA_DRIVER_LOCAL_INSTALL_DIR
 } else {
-    $VisibleBinDir = Join-Path $env:LOCALAPPDATA "Programs\Cua\cua-driver-local\bin"
+    $VisibleBinDir = Join-Path $env:LOCALAPPDATA "Programs\Cua\opensky-driver\bin"
 }
 if ($env:CUA_DRIVER_LOCAL_HOME) {
     $PackageHome = $env:CUA_DRIVER_LOCAL_HOME
 } else {
-    $PackageHome = Join-Path $env:USERPROFILE ".cua-driver-local"
+    $PackageHome = Join-Path $env:USERPROFILE ".opensky-driver"
 }
 $CurrentDir  = Join-Path $PackageHome "packages\current"
 $ReleasesDir = Join-Path $PackageHome "packages\releases"
@@ -143,11 +143,11 @@ function Register-CuaDriverAutostart {
     }
     & $InstalledBinary autostart enable
     if ($LASTEXITCODE -ne 0) {
-        throw "cua-driver-local autostart enable failed (exit $LASTEXITCODE)"
+        throw "opensky-driver autostart enable failed (exit $LASTEXITCODE)"
     }
 }
 
-function Stop-CuaDriverLocalDaemons {
+function Stop-OpenSkyDriverDaemons {
     # A missing task is the normal state for -NoAutoStart and for a first
     # install. Windows PowerShell 5.1 promotes schtasks.exe stderr to an
     # ErrorRecord, so temporarily relax the script-wide Stop preference for
@@ -155,12 +155,12 @@ function Stop-CuaDriverLocalDaemons {
     $previousPreference = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
     try {
-        & schtasks.exe /End /TN "cua-driver-local-serve" 2>$null | Out-Null
+        & schtasks.exe /End /TN "opensky-driver-serve" 2>$null | Out-Null
     }
     finally {
         $ErrorActionPreference = $previousPreference
     }
-    Get-Process -Name "cua-driver-local","cua-driver-uia-local" -ErrorAction SilentlyContinue |
+    Get-Process -Name "opensky-driver","opensky-driver-uia" -ErrorAction SilentlyContinue |
         Stop-Process -Force -ErrorAction SilentlyContinue
 }
 
@@ -226,7 +226,7 @@ $VersionedDir = Join-Path $ReleasesDir "$VersionTag-$Target"
 $DestBinary = Join-Path $VersionedDir $BinaryName
 
 # If a previous install-local left a binary here and it's currently
-# being executed (typical: `cua-driver-local autostart kick` spawned a
+# being executed (typical: `opensky-driver autostart kick` spawned a
 # High-IL daemon at logon, which we can't terminate from this
 # Medium-IL shell without UAC), the Copy-Item below fails with
 # "The process cannot access the file ... because it is being used by
@@ -244,8 +244,8 @@ if (Test-Path -LiteralPath $DestBinary) {
     } catch {
         Write-Host "Note: could not rename previous binary at $DestBinary." -ForegroundColor Yellow
         Write-Host "      ($($_.Exception.Message))" -ForegroundColor Yellow
-        Write-Host "      Most likely a running cua-driver-local daemon is holding it." -ForegroundColor Yellow
-        Write-Host "      Stop it first (e.g. ``schtasks /End /TN cua-driver-local-serve`` then re-run)." -ForegroundColor Yellow
+        Write-Host "      Most likely a running opensky-driver daemon is holding it." -ForegroundColor Yellow
+        Write-Host "      Stop it first (e.g. ``schtasks /End /TN opensky-driver-serve`` then re-run)." -ForegroundColor Yellow
     }
     # Best-effort GC of stale-* siblings older than this run. Cheap;
     # keeps the dir from growing unbounded over many re-builds.
@@ -253,8 +253,8 @@ if (Test-Path -LiteralPath $DestBinary) {
         Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-1) } |
         ForEach-Object { try { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue } catch {} }
 
-    Write-Step "killing previous cua-driver-local processes (best-effort; High-IL needs admin)"
-    Stop-CuaDriverLocalDaemons
+    Write-Step "killing previous opensky-driver processes (best-effort; High-IL needs admin)"
+    Stop-OpenSkyDriverDaemons
 }
 
 Write-Step "staging into $VersionedDir"
@@ -332,10 +332,10 @@ Write-Host "  source: $installedBinary"
 Write-Host ""
 
 if ($AutoStart) {
-    Write-Step "registering Scheduled Task 'cua-driver-local-serve'"
+    Write-Step "registering Scheduled Task 'opensky-driver-serve'"
     try {
         Register-CuaDriverAutostart -InstalledBinary (Join-Path $VisibleBinDir $BinaryName)
-        Write-Host "  Registered. cua-driver-local serve auto-starts at every interactive logon." -ForegroundColor Green
+        Write-Host "  Registered. opensky-driver serve auto-starts at every interactive logon." -ForegroundColor Green
     }
     catch {
         Write-Host "  Failed to register: $($_.Exception.Message)" -ForegroundColor Red
@@ -345,27 +345,27 @@ if ($AutoStart) {
     # re-register it pointing at this
     # fresh binary. Otherwise the user ends up with a task whose
     # <Command> path is the OLD release-install dir, running the OLD
-    # binary - even though `cua-driver-local` on PATH now resolves to the
+    # binary - even though `opensky-driver` on PATH now resolves to the
     # fresh one. See trycua/cua#1654 (hidden-console wrapper landed
     # later - old tasks that survived an upgrade still produce the
     # visible console window at logon).
     $prevEAP = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        & schtasks.exe /Query /TN "cua-driver-local-serve" 2>$null | Out-Null
+        & schtasks.exe /Query /TN "opensky-driver-serve" 2>$null | Out-Null
         $hasTask = ($LASTEXITCODE -eq 0)
     } finally {
         $ErrorActionPreference = $prevEAP
     }
     if ($hasTask) {
-        Write-Step "found existing 'cua-driver-local-serve' task - re-registering against fresh binary"
+        Write-Step "found existing 'opensky-driver-serve' task - re-registering against fresh binary"
         try {
             Register-CuaDriverAutostart -InstalledBinary (Join-Path $VisibleBinDir $BinaryName)
             Write-Host "  Re-registered. Task action now uses this build's hidden-console wrapper." -ForegroundColor Green
         }
         catch {
             Write-Host "  Failed to re-register: $($_.Exception.Message)" -ForegroundColor Red
-            Write-Host "  The existing task still points at the previous binary. Run 'cua-driver-local autostart enable' from an elevated shell to update."
+            Write-Host "  The existing task still points at the previous binary. Run 'opensky-driver autostart enable' from an elevated shell to update."
         }
     }
 }
@@ -390,23 +390,7 @@ if (Test-Path -LiteralPath $HintsTxt) {
     # Repo layout changed or .txt missing — fall back to one-line
     # essentials so users still know what to do next.
     Write-Host "Next steps: $installedBinary --version  |  $installedBinary mcp-config  |  $installedBinary skills install"
-    Write-Host "Docs: https://github.com/trycua/cua/tree/main/libs/cua-driver/rust"
-}
-
-# The local/release identity split deliberately stopped source installs from
-# creating or repairing the published cua-driver.exe path. Surface the
-# migration state when only the local product is present so an existing MCP
-# client does not keep launching a missing release command. Do not create an
-# alias here: local and published products must retain separate identities.
-$releaseBinary = Join-Path $env:LOCALAPPDATA "Programs\Cua\cua-driver\bin\cua-driver.exe"
-if (-not (Test-Path -LiteralPath $releaseBinary -PathType Leaf)) {
-    Write-Host ""
-    Write-Host "Migration note: the published cua-driver CLI is not installed at $releaseBinary." -ForegroundColor Yellow
-    Write-Host "  Existing MCP clients configured for 'cua-driver' will not use this local build." -ForegroundColor Yellow
-    Write-Host "  To configure Codex for the local build, run:"
-    Write-Host "    $installedBinary mcp-config --client codex"
-    Write-Host "  To restore the published product instead, run:"
-    Write-Host "    irm https://cua.ai/driver/install.ps1 | iex"
+    Write-Host "Docs: https://github.com/tanishqkancharla/cua"
 }
 
 # Windows-specific autostart hint (kept inline; per-shell natural location).
@@ -415,19 +399,19 @@ if ($AutoStart) {
     # Surface the management subcommands so the user knows how to inspect /
     # disable later without digging through Task Scheduler.
     Write-Host ""
-    Write-Host "Auto-start: 'cua-driver-local-serve' is registered at RunLevel=Highest." -ForegroundColor Cyan
-    Write-Host "  cua-driver-local autostart status    (inspect)" -ForegroundColor Cyan
-    Write-Host "  cua-driver-local autostart disable   (remove)" -ForegroundColor Cyan
-    Write-Host "  cua-driver-local autostart kick      (start now without re-logging)" -ForegroundColor Cyan
+    Write-Host "Auto-start: 'opensky-driver-serve' is registered at RunLevel=Highest." -ForegroundColor Cyan
+    Write-Host "  opensky-driver autostart status    (inspect)" -ForegroundColor Cyan
+    Write-Host "  opensky-driver autostart disable   (remove)" -ForegroundColor Cyan
+    Write-Host "  opensky-driver autostart kick      (start now without re-logging)" -ForegroundColor Cyan
     Write-Host ""
 } else {
     # Opt-out branch (-NoAutoStart or -AutoStart:`$false`).
     Write-Host ""
     Write-Host "Auto-start at logon (NOT enabled - re-run without -NoAutoStart to register, or:):" -ForegroundColor Cyan
-    Write-Host "  cua-driver-local autostart enable    (register Scheduled Task at RunLevel=Highest)" -ForegroundColor Cyan
-    Write-Host "  cua-driver-local autostart kick      (start now without re-logging)" -ForegroundColor Cyan
-    Write-Host "  cua-driver-local autostart status    (inspect)" -ForegroundColor Cyan
-    Write-Host "  cua-driver-local autostart disable   (remove)" -ForegroundColor Cyan
+    Write-Host "  opensky-driver autostart enable    (register Scheduled Task at RunLevel=Highest)" -ForegroundColor Cyan
+    Write-Host "  opensky-driver autostart kick      (start now without re-logging)" -ForegroundColor Cyan
+    Write-Host "  opensky-driver autostart status    (inspect)" -ForegroundColor Cyan
+    Write-Host "  opensky-driver autostart disable   (remove)" -ForegroundColor Cyan
     Write-Host ""
 }
 

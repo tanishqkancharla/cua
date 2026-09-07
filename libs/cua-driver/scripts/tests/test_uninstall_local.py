@@ -20,15 +20,15 @@ def _executable(path: Path, body: str) -> None:
 def test_unix_local_uninstall_removes_owned_links_and_preserves_release(tmp_path: Path) -> None:
     home = tmp_path / "home"
     fake_bin = tmp_path / "fake-bin"
-    local_home = home / ".cua-driver-local"
+    local_home = home / ".opensky-driver"
     release_home = home / ".cua-driver"
     local_bin = home / ".local/bin"
-    local_cache = home / ".cache/cua-driver-local"
+    local_cache = home / ".cache/opensky-driver"
     release_cache = home / ".cache/cua-driver"
     for path in (fake_bin, local_home, release_home, local_bin, local_cache, release_cache):
         path.mkdir(parents=True, exist_ok=True)
 
-    local_marker = local_home / "packages/current/cua-driver-local"
+    local_marker = local_home / "packages/current/opensky-driver"
     local_marker.parent.mkdir(parents=True)
     local_marker.write_text("local\n", encoding="utf-8")
     for runtime_file in (
@@ -42,16 +42,16 @@ def test_unix_local_uninstall_removes_owned_links_and_preserves_release(tmp_path
     _executable(fake_bin / "pkill", "exit 0")
     _executable(fake_bin / "systemctl", "exit 0")
 
-    local_cli = local_bin / "cua-driver-local"
-    local_cli.symlink_to(local_home / "packages/current/cua-driver-local")
+    local_cli = local_bin / "opensky-driver"
+    local_cli.symlink_to(local_home / "packages/current/opensky-driver")
     release_cli = local_bin / "cua-driver"
     release_cli.symlink_to(release_home / "packages/current/cua-driver")
 
-    local_skill = home / ".agents/skills/cua-driver"
+    local_skill = home / ".agents/skills/opensky-driver"
     local_skill.parent.mkdir(parents=True)
-    local_skill.symlink_to(local_home / "skills/cua-driver")
+    local_skill.symlink_to(local_home / "skills/opensky-driver")
 
-    local_unit = home / ".config/systemd/user/cua-driver-local.service"
+    local_unit = home / ".config/systemd/user/opensky-driver.service"
     release_unit = home / ".config/systemd/user/cua-driver.service"
     local_unit.parent.mkdir(parents=True)
     local_unit.write_text("local\n", encoding="utf-8")
@@ -108,7 +108,7 @@ def test_unix_local_uninstall_keeps_shared_skill_link_owned_by_release(tmp_path:
     fake_bin = tmp_path / "fake-bin"
     release_skill_target = home / ".cua-driver/skills/cua-driver"
     release_skill_target.mkdir(parents=True)
-    skill_link = home / ".agents/skills/cua-driver"
+    skill_link = home / ".agents/skills/opensky-driver"
     skill_link.parent.mkdir(parents=True)
     skill_link.symlink_to(release_skill_target)
     _executable(fake_bin / "uname", "printf 'Linux\\n'")
@@ -134,18 +134,18 @@ def test_local_uninstall_contract_is_explicit_on_both_platforms() -> None:
     windows = (SCRIPTS / "uninstall-local.ps1").read_text(encoding="utf-8-sig")
 
     for token in (
-        "/Applications/CuaDriverLocal.app",
-        "com.trycua.driver.local",
-        ".cua-driver-local",
-        "cua-driver-local.service",
-        "com.trycua.cua-driver-local.plist",
+        "/Applications/OpenSkyDriver.app",
+        "com.opensky.driver",
+        ".opensky-driver",
+        "opensky-driver.service",
+        "com.opensky.driver.plist",
     ):
         assert token in unix
     for token in (
-        "cua-driver-local-serve",
-        "cua-driver-uia-local",
-        ".cua-driver-local",
-        "Programs\\Cua\\cua-driver-local\\bin",
+        "opensky-driver-serve",
+        "opensky-driver-uia",
+        ".opensky-driver",
+        "Programs\\Cua\\opensky-driver\\bin",
     ):
         assert token in windows
     assert "Test-LocalLinkTarget" in windows
@@ -187,9 +187,8 @@ def test_unix_local_uninstall_rejects_release_home_override(tmp_path: Path) -> N
     assert "release-owned local home" in result.stderr
 
 
-def test_release_uninstallers_do_not_target_local_identity() -> None:
-    for name in ("uninstall.sh", "uninstall.ps1"):
-        script = (SCRIPTS / name).read_text(encoding="utf-8-sig")
-        assert "CuaDriverLocal" not in script
-        assert ".cua-driver-local" not in script
-        assert "cua-driver-local-serve" not in script
+def test_public_uninstallers_delegate_only_to_the_fork_uninstaller() -> None:
+    for suffix in ("sh", "ps1"):
+        script = (SCRIPTS / f"uninstall.{suffix}").read_text()
+        assert f"uninstall-local.{suffix}" in script
+        assert "cua.ai" not in script

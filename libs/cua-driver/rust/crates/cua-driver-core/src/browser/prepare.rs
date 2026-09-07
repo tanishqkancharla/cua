@@ -293,7 +293,7 @@ fn profile_root() -> Result<PathBuf, BrowserRefusal> {
                 .map(PathBuf::from)
                 .map(|path| path.join(".local").join("state"))
         })
-        .map(|path| path.join("cua-driver").join("browser-profiles"));
+        .map(|path| path.join("opensky-driver").join("browser-profiles"));
     root.ok_or_else(|| {
         refusal(
             BrowserRefusalCode::BrowserRouteUnavailable,

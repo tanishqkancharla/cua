@@ -18,7 +18,7 @@
 //!   Linux  — ~/.cache/cua-driver/cua-driver.sock
 //!   Windows — \\.\pipe\cua-driver
 //!
-//! Source-installed local builds use the corresponding `cua-driver-local`
+//! Source-installed local builds use the corresponding `opensky-driver`
 //! namespace on every platform.
 
 use std::collections::{HashMap, HashSet};
@@ -367,7 +367,7 @@ pub fn default_socket_path() -> String {
 #[cfg(target_os = "windows")]
 pub fn default_uia_pipe_path() -> String {
     if crate::bundle::is_local_installation() {
-        r"\\.\pipe\cua-driver-local-uia".to_owned()
+        r"\\.\pipe\opensky-driver-uia".to_owned()
     } else {
         r"\\.\pipe\cua-driver-uia".to_owned()
     }

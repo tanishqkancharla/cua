@@ -332,7 +332,7 @@ pub fn initialize_result() -> Value {
     serde_json::json!({
         "protocolVersion": "2025-06-18",
         "capabilities": { "tools": {} },
-        "serverInfo": { "name": "cua-driver", "version": env!("CARGO_PKG_VERSION") },
+        "serverInfo": { "name": "opensky-driver", "version": env!("CARGO_PKG_VERSION") },
         "instructions": agent_instructions()
     })
 }

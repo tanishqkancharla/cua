@@ -1,13 +1,13 @@
 //! CLI subcommand parsing and execution.
 //!
-//! Subcommand dispatch (mirrors the Swift cua-driver CLI):
+//! Subcommand dispatch (mirrors the Swift opensky-driver CLI):
 //!
-//!   cua-driver                              → mcp server (default)
-//!   cua-driver mcp                          → mcp server (explicit)
-//!   cua-driver list-tools                   → print all tool names + descriptions
-//!   cua-driver describe <tool>              → print tool schema
-//!   cua-driver call <tool> [json-args]      → invoke tool, print result
-//!   cua-driver <tool> [json-args]           → shorthand for call (snake_case names)
+//!   opensky-driver                              → mcp server (default)
+//!   opensky-driver mcp                          → mcp server (explicit)
+//!   opensky-driver list-tools                   → print all tool names + descriptions
+//!   opensky-driver describe <tool>              → print tool schema
+//!   opensky-driver call <tool> [json-args]      → invoke tool, print result
+//!   opensky-driver <tool> [json-args]           → shorthand for call (snake_case names)
 //!
 //! Cursor-overlay flags (--cursor-theme, --no-overlay, etc.) are consumed by
 //! `CursorConfig::from_args()` and are ignored here.
@@ -88,7 +88,7 @@ pub enum Command {
     Status {
         socket: Option<String>,
     },
-    /// `cua-driver sessions list [--json]` — content-free operator view of
+    /// `opensky-driver sessions list [--json]` — content-free operator view of
     /// the live sessions owned by the selected daemon runtime.
     Sessions {
         json: bool,
@@ -114,7 +114,7 @@ pub enum Command {
         apply: bool,
         json: bool,
     },
-    /// `cua-driver check-update [--json] [--no-cache]` — pure check verb.
+    /// `opensky-driver check-update [--json] [--no-cache]` — pure check verb.
     /// Never installs; the apply path stays on `update --apply` so the
     /// "did anything change on disk?" question is unambiguous from argv.
     /// Mirror of the `check_for_update` MCP tool — both routes share
@@ -133,9 +133,9 @@ pub enum Command {
         json: bool,
     },
     Diagnose,
-    /// `cua-driver permissions status|grant [--json]` — report TCC status
+    /// `opensky-driver permissions status|grant [--json]` — report TCC status
     /// (with source attribution + a live capture probe) or raise the
-    /// correctly-attributed grant by launching CuaDriver via LaunchServices.
+    /// correctly-attributed grant by launching OpenSkyDriver via LaunchServices.
     Permissions {
         subcommand: String,
         json: bool,
@@ -151,8 +151,8 @@ pub enum Command {
     },
     /// Content-free telemetry preference, inspection, and installer hooks.
     Telemetry(TelemetryCommand),
-    /// `cua-driver autostart {enable|disable|status|kick}` —
-    /// platform-native auto-start so `cua-driver serve` comes up on
+    /// `opensky-driver autostart {enable|disable|status|kick}` —
+    /// platform-native auto-start so `opensky-driver serve` comes up on
     /// every logon. Windows: Scheduled Task with LogonType=Interactive
     /// (lands in Session 1+). macOS / Linux: not yet implemented; the
     /// stub returns a helpful "use install-local.sh --autostart"
@@ -160,7 +160,7 @@ pub enum Command {
     Autostart {
         subcommand: String,
     },
-    /// `cua-driver manifest` — emit a stable JSON description of the CLI
+    /// `opensky-driver manifest` — emit a stable JSON description of the CLI
     /// surface (subcommands, args, MCP invocation, version).
     ///
     /// Designed for downstream consumers (Hermes, Claude Code, future
@@ -175,15 +175,15 @@ pub enum Command {
     Manifest {
         pretty: bool,
     },
-    /// `cua-driver skills {install|update|uninstall|status|path}` —
+    /// `opensky-driver skills {install|update|uninstall|status|path}` —
     /// agent skill-pack management. The verb is the ONLY way a user
-    /// installs or updates the cua-driver skill pack into their agent
+    /// installs or updates the opensky-driver skill pack into their agent
     /// dirs (Claude Code / Codex / Prime Agent / OpenClaw / OpenCode); the install
     /// scripts never touch ~/.claude/skills/ etc. directly. `install`
     /// fetches the matching versioned release asset
-    /// (`cua-driver-rs-v<v>-skills.tar.gz` — the asset filename keeps
+    /// (`opensky-driver-rs-v<v>-skills.tar.gz` — the asset filename keeps
     /// the legacy `-rs` for backward-compat with pinned URLs) from
-    /// GitHub, places it under `<HomeDir>/skills/cua-driver/`, and
+    /// GitHub, places it under `<HomeDir>/skills/opensky-driver/`, and
     /// symlinks into each detected agent's `skills/` dir. See
     /// `crates/cua-driver/src/skills.rs`.
     Skills {
@@ -484,54 +484,56 @@ pub fn parse_command() -> Command {
     // Handle --version / -V before any other parsing so they are never
     // silently stripped as "bare flags" and swallowed by MCP mode.
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("cua-driver {}", env!("CARGO_PKG_VERSION"));
+        println!("opensky-driver {}", env!("CARGO_PKG_VERSION"));
         std::process::exit(0);
     }
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!(
-            "cua-driver {} — cross-platform computer-use automation driver",
+            "OpenSky Driver {} — cross-platform computer-use automation driver",
             env!("CARGO_PKG_VERSION")
         );
-        println!("Usage: cua-driver [SUBCOMMAND] [OPTIONS]");
+        println!("Usage: opensky-driver [SUBCOMMAND] [OPTIONS]");
         println!("Subcommands: mcp, list-tools, describe, call, serve, stop, revoke, status, config, telemetry, recording, update, check-update, doctor, diagnose, permissions, autostart, skills, manifest, channel, cursor-theme, sessions, history");
         println!();
         println!("permissions options (macOS):");
-        println!("  cua-driver permissions status   Report Accessibility + Screen Recording status. Read-only (no prompt).");
-        println!("                                  Answers via a running daemon, so the result carries the CuaDriver");
+        println!("  opensky-driver permissions status   Report Accessibility + Screen Recording status. Read-only (no prompt).");
+        println!("                                  Answers via a running daemon, so the result carries the OpenSkyDriver");
         println!("                                  identity (com.trycua.driver). If no daemon is running it reports");
         println!("                                  `unknown` rather than your terminal's grants. Add --json for the payload.");
-        println!("  cua-driver permissions grant    Launch CuaDriver via LaunchServices so dialogs attribute to the app,");
+        println!("  opensky-driver permissions grant    Launch OpenSkyDriver via LaunchServices so dialogs attribute to the app,");
         println!("                                  explain and request Accessibility, Screen Recording, and Tahoe's");
         println!("                                  direct-capture consent, then verify live capture. This is the correct");
         println!("                                  way to grant; the read-only status command never triggers that probe.");
         println!();
-        println!("Updating cua-driver:");
-        println!("  cua-driver check-update         Ask GitHub whether a newer release is available. Read-only.");
+        println!("Updating opensky-driver:");
+        println!("  opensky-driver check-update         Ask GitHub whether a newer release is available. Read-only.");
         println!("                                  Default output is human-friendly text.");
         println!("    --json                        Emit a machine-readable JSON payload (same shape as the");
         println!("                                  check_for_update MCP tool). Hermes branches on update_available.");
         println!("    --no-cache                    Skip the 20h on-disk cache and force a fresh GitHub round-trip.");
-        println!("  cua-driver update               Same check as above, then suggest --apply if outdated.");
+        println!("  opensky-driver update               Same check as above, then suggest --apply if outdated.");
         println!("    --apply                       Download + install the latest release via the canonical installer.");
         println!("    --json                        Emit the structured check payload (does not change --apply behaviour).");
-        println!("  cua-driver channel status      Show the saved stable/nightly update channel.");
-        println!("  cua-driver channel set <name>  Save stable or nightly; run update --apply to switch binaries.");
+        println!(
+            "  opensky-driver channel status      Show the saved stable/nightly update channel."
+        );
+        println!("  opensky-driver channel set <name>  Save stable or nightly; run update --apply to switch binaries.");
         println!("    --json                        Emit machine-readable channel state.");
         println!();
         println!("autostart options (Windows-only today):");
-        println!("  cua-driver autostart enable     Register a logon Scheduled Task so serve starts at every interactive logon.");
-        println!("  cua-driver autostart disable    Remove the autostart entry. No-op if not registered.");
-        println!("  cua-driver autostart status     Print whether the entry is registered + whether the daemon is running.");
-        println!("  cua-driver autostart kick       Start the entry now without re-logging.");
+        println!("  opensky-driver autostart enable     Register a logon Scheduled Task so serve starts at every interactive logon.");
+        println!("  opensky-driver autostart disable    Remove the autostart entry. No-op if not registered.");
+        println!("  opensky-driver autostart status     Print whether the entry is registered + whether the daemon is running.");
+        println!("  opensky-driver autostart kick       Start the entry now without re-logging.");
         println!();
         println!("skills options (agent skill-pack management, opt-in):");
-        println!("  cua-driver skills install       Fetch the versioned skill pack from GitHub Releases and symlink it");
+        println!("  opensky-driver skills install       Fetch the versioned skill pack from GitHub Releases and symlink it");
         println!("                                  into each detected agent's skills/ dir (Claude Code, Codex, Prime Agent,");
         println!("                                  OpenClaw, OpenCode). Idempotent. Never overwrites existing user links.");
-        println!("  cua-driver skills update        Re-fetch the skill pack from GitHub, refreshing the local copy + links.");
-        println!("  cua-driver skills uninstall     Remove the agent symlinks. Add --all to also delete the local copy.");
-        println!("  cua-driver skills status        Report local install state + per-agent link state. Read-only.");
-        println!("  cua-driver skills path          Print where the local skill pack lives.");
+        println!("  opensky-driver skills update        Re-fetch the skill pack from GitHub, refreshing the local copy + links.");
+        println!("  opensky-driver skills uninstall     Remove the agent symlinks. Add --all to also delete the local copy.");
+        println!("  opensky-driver skills status        Report local install state + per-agent link state. Read-only.");
+        println!("  opensky-driver skills path          Print where the local skill pack lives.");
         println!("  --from main                     (install only) Fetch latest from main branch instead of the tagged release.");
         println!();
         println!("agent authorization (serve only):");
@@ -560,8 +562,8 @@ pub fn parse_command() -> Command {
         );
         println!();
         println!("authorization revocation:");
-        println!("  cua-driver revoke --session <id>  Stop and revoke one session's grants.");
-        println!("  cua-driver revoke --all           Stop and revoke every live session.");
+        println!("  opensky-driver revoke --session <id>  Stop and revoke one session's grants.");
+        println!("  opensky-driver revoke --all           Stop and revoke every live session.");
         println!("                                      Revocation is deny-only and never needs a token.");
         println!();
         println!("mcp options:");
@@ -570,9 +572,9 @@ pub fn parse_command() -> Command {
         println!("                          Mutually exclusive with --socket.");
         println!("  --embedded              Declare embedding-host mode (also:");
         println!("                          CUA_DRIVER_EMBEDDED=1). Without --direct, the host");
-        println!("                          must start `cua-driver serve --embedded` and pass");
+        println!("                          must start `opensky-driver serve --embedded` and pass");
         println!("                          its private endpoint with --socket.");
-        println!("                          See Skills/cua-driver/EMBEDDING.md.");
+        println!("                          See Skills/opensky-driver/EMBEDDING.md.");
         println!(
             "  --host-bundle-id <id>   Advisory host bundle id label for check_permissions output."
         );
@@ -609,21 +611,23 @@ pub fn parse_command() -> Command {
         println!("  --cursor-theme <id>     Select an installed theme (default: cua.default).");
         println!("  --cursor-reduced-motion <auto|on|off>");
         println!("                          Follow the OS setting, force stills, or allow motion.");
-        println!("  Set these on `cua-driver serve`; MCP and one-shot CLI processes are clients");
+        println!(
+            "  Set these on `opensky-driver serve`; MCP and one-shot CLI processes are clients"
+        );
         println!("  and do not own the daemon's overlay configuration or UI runloop.");
         println!();
         println!("cursor-theme options (trusted local workflow):");
-        println!("  cua-driver cursor-theme validate <source.lottie>");
-        println!("  cua-driver cursor-theme build <source.lottie> --output <theme.cua-theme>");
-        println!("  cua-driver cursor-theme inspect <theme.cua-theme> [--json]");
-        println!("  cua-driver cursor-theme preview <theme.cua-theme> --output <directory>");
-        println!("  cua-driver cursor-theme install <theme.cua-theme>");
-        println!("  cua-driver cursor-theme list [--json]");
-        println!("  cua-driver cursor-theme uninstall <theme-id>");
+        println!("  opensky-driver cursor-theme validate <source.lottie>");
+        println!("  opensky-driver cursor-theme build <source.lottie> --output <theme.cua-theme>");
+        println!("  opensky-driver cursor-theme inspect <theme.cua-theme> [--json]");
+        println!("  opensky-driver cursor-theme preview <theme.cua-theme> --output <directory>");
+        println!("  opensky-driver cursor-theme install <theme.cua-theme>");
+        println!("  opensky-driver cursor-theme list [--json]");
+        println!("  opensky-driver cursor-theme uninstall <theme-id>");
         println!("                                  Theme installation is local-only and is never an agent tool.");
         println!();
         println!("manifest options:");
-        println!("  cua-driver manifest             Emit a stable JSON description of this CLI's surface");
+        println!("  opensky-driver manifest             Emit a stable JSON description of this CLI's surface");
         println!("                                  (subcommands, args, MCP invocation, version). Read-only.");
         println!(
             "                                  Consumers (Hermes, Claude Code, …) read it to drop"
@@ -639,10 +643,12 @@ pub fn parse_command() -> Command {
             "  --experimental-history      Admit encrypted local Computer History for this daemon."
         );
         println!(
-            "                              Capture remains off until `cua-driver history enable`."
+            "                              Capture remains off until `opensky-driver history enable`."
         );
-        println!("  cua-driver history enable   Opt in and initialize encrypted local history.");
-        println!("  cua-driver history status|pause|resume|flush|list|show|disable|delete");
+        println!(
+            "  opensky-driver history enable   Opt in and initialize encrypted local history."
+        );
+        println!("  opensky-driver history status|pause|resume|flush|list|show|disable|delete");
         println!("  --experimental-pip          Show a small always-on-top window with the latest");
         println!(
             "                              post-action screenshot + a 1-line label. macOS only"
@@ -701,9 +707,9 @@ pub fn parse_command() -> Command {
 
     if matches!(positionals.first().copied(), None | Some("mcp")) {
         if let Some(flag) = serve_only_authorization_flag(&args) {
-            eprintln!("cua-driver mcp does not accept {flag}; authorization flags belong to `cua-driver serve`.");
+            eprintln!("opensky-driver mcp does not accept {flag}; authorization flags belong to `opensky-driver serve`.");
             eprintln!("For direct MCP, use CUA_DRIVER_PERMISSION_MODE and the related CUA_DRIVER_* environment variables.");
-            eprintln!("Otherwise start a configured daemon and connect with `cua-driver mcp --socket <path>`." );
+            eprintln!("Otherwise start a configured daemon and connect with `opensky-driver mcp --socket <path>`." );
             process::exit(64);
         }
     }
@@ -715,25 +721,35 @@ pub fn parse_command() -> Command {
     let mut pos = positionals.into_iter();
     match pos.next() {
         None => {
-            // Bare `cua-driver` defaults to MCP, which reads JSON-RPC from
+            // Bare `opensky-driver` defaults to MCP, which reads JSON-RPC from
             // stdin forever. From a terminal that looks like a hang. If
             // stdin is a TTY (i.e. interactive shell, no client piping
             // stdio), surface a hint and exit. Piped / redirected stdin —
             // the normal MCP client case — falls through to MCP mode.
-            // Explicit `cua-driver mcp` bypasses the check entirely.
+            // Explicit `opensky-driver mcp` bypasses the check entirely.
             use std::io::IsTerminal as _;
             if std::io::stdin().is_terminal() {
-                eprintln!("cua-driver: bare invocation defaults to the MCP server, which reads");
+                eprintln!(
+                    "opensky-driver: bare invocation defaults to the MCP server, which reads"
+                );
                 eprintln!("JSON-RPC from stdin. From a terminal that looks like a hang.");
                 eprintln!();
                 eprintln!("You probably meant one of:");
-                eprintln!("  cua-driver list-tools                           # available tools");
-                eprintln!("  cua-driver status                               # check the daemon");
-                eprintln!("  cua-driver mcp-config --client claude-code      # wire into a client");
-                eprintln!("  cua-driver --help                               # everything else");
+                eprintln!(
+                    "  opensky-driver list-tools                           # available tools"
+                );
+                eprintln!(
+                    "  opensky-driver status                               # check the daemon"
+                );
+                eprintln!(
+                    "  opensky-driver mcp-config --client claude-code      # wire into a client"
+                );
+                eprintln!(
+                    "  opensky-driver --help                               # everything else"
+                );
                 eprintln!();
                 eprintln!("To run the MCP server explicitly (and pipe JSON-RPC by hand):");
-                eprintln!("  cua-driver mcp");
+                eprintln!("  opensky-driver mcp");
                 std::process::exit(0);
             }
             Command::Mcp {
@@ -849,7 +865,7 @@ pub fn parse_command() -> Command {
                 process::exit(64);
             }
             if subcommand == "set" && value.is_none() {
-                eprintln!("Usage: cua-driver channel set <stable|nightly>");
+                eprintln!("Usage: opensky-driver channel set <stable|nightly>");
                 process::exit(64);
             }
             Command::Channel {
@@ -903,14 +919,14 @@ pub fn parse_command() -> Command {
                     Ok(v) => Some(v),
                     Err(e) => {
                         eprintln!(
-                            "error: positional JSON arg to 'cua-driver call' did not parse: {e}"
+                            "error: positional JSON arg to 'opensky-driver call' did not parse: {e}"
                         );
                         eprintln!("       received: {s}");
                         eprintln!();
                         eprintln!("hint: PowerShell 5.1 strips quotes around JSON field names in");
                         eprintln!("      multi-field args. Pipe the JSON via stdin instead:");
                         eprintln!(
-                            "        '{{\"pid\":1234,\"window_id\":5678}}' | cua-driver call {}",
+                            "        '{{\"pid\":1234,\"window_id\":5678}}' | opensky-driver call {}",
                             tool
                         );
                         eprintln!();
@@ -938,29 +954,29 @@ pub fn parse_command() -> Command {
             Some("inspect") => {
                 let event = pos.next().unwrap_or("").to_owned();
                 if event.is_empty() {
-                    eprintln!("Usage: cua-driver telemetry inspect <event> --json");
+                    eprintln!("Usage: opensky-driver telemetry inspect <event> --json");
                     process::exit(64);
                 }
                 Command::Telemetry(TelemetryCommand::Inspect { event })
             }
             _ => {
-                eprintln!("Usage: cua-driver telemetry {{enable|disable|status [--json]|reset-id|inspect <event> --json}}");
+                eprintln!("Usage: opensky-driver telemetry {{enable|disable|status [--json]|reset-id|inspect <event> --json}}");
                 process::exit(64);
             }
         },
         Some("autostart") => {
-            // No `cua-driver autostart` (no subcommand) shortcut today —
+            // No `opensky-driver autostart` (no subcommand) shortcut today —
             // every operation is destructive enough that we want the
             // user to be explicit about which one.
             let subcommand = pos.next().unwrap_or("").to_string();
             if subcommand.is_empty() {
-                eprintln!("Usage: cua-driver autostart {{enable|disable|status|kick}}");
+                eprintln!("Usage: opensky-driver autostart {{enable|disable|status|kick}}");
                 process::exit(64);
             }
             Command::Autostart { subcommand }
         }
         Some("skills") => {
-            // Skills subcommand. Default is `status` so plain `cua-driver
+            // Skills subcommand. Default is `status` so plain `opensky-driver
             // skills` is a read-only probe — won't ever modify user state.
             let subcommand = pos.next().unwrap_or("status").to_string();
             // Pass through any other flags / args after the subcommand for
@@ -993,14 +1009,14 @@ pub fn parse_command() -> Command {
                     Ok(v) => Some(v),
                     Err(e) => {
                         eprintln!(
-                            "error: positional JSON arg to 'cua-driver {tool}' did not parse: {e}"
+                            "error: positional JSON arg to 'opensky-driver {tool}' did not parse: {e}"
                         );
                         eprintln!("       received: {s}");
                         eprintln!();
                         eprintln!("hint: PowerShell 5.1 strips quotes around JSON field names in");
                         eprintln!("      multi-field args. Pipe the JSON via stdin instead:");
                         eprintln!(
-                            "        '{{\"pid\":1234,\"window_id\":5678}}' | cua-driver {}",
+                            "        '{{\"pid\":1234,\"window_id\":5678}}' | opensky-driver {}",
                             tool
                         );
                         eprintln!();
@@ -1023,7 +1039,7 @@ pub fn parse_command() -> Command {
 fn parse_expected_stop_pid(args: &[String], command: Option<&str>) -> Option<u32> {
     let raw = flag_value(args, "--expected-pid")?;
     if command != Some("stop") {
-        eprintln!("--expected-pid is valid only with `cua-driver stop`");
+        eprintln!("--expected-pid is valid only with `opensky-driver stop`");
         process::exit(64);
     }
     match raw.parse::<u32>() {
@@ -1232,7 +1248,7 @@ fn launch_daemon_with_state_and_wait(
     use std::time::{Duration, Instant};
 
     // Forward `--socket <path>` to the relaunched daemon when the caller
-    // passed a non-default socket via `cua-driver mcp --socket /path`.
+    // passed a non-default socket via `opensky-driver mcp --socket /path`.
     // Without this the daemon would listen on `default_socket_path()`,
     // and the proxy would block forever waiting for a daemon on the
     // user-supplied path that never comes up. Only added when the path
@@ -1244,7 +1260,7 @@ fn launch_daemon_with_state_and_wait(
     let open_args = daemon_launch_arguments(app_name, socket_path, state, experimental_history);
     // Thread the Claude-Code compat flag through to the daemon. Without this
     // the proxy-spawned daemon always called build_macos_registry() (compat
-    // hardcoded false), so `cua-driver mcp --claude-code-computer-use-compat`
+    // hardcoded false), so `opensky-driver mcp --claude-code-computer-use-compat`
     // SILENTLY DROPPED the flag on the proxy path — the path users actually
     // run on an installed bundle. Today this is latent: the compat screenshot
     // tool was removed in #1692, so `register_all(compat)` ignores the flag and
@@ -1254,7 +1270,7 @@ fn launch_daemon_with_state_and_wait(
     // travel end-to-end. Only honoured on a freshly-launched daemon — a
     // pre-existing daemon keeps whatever surface it launched with.
     let status = Cmd::new("/usr/bin/open")
-        // `-n` forces a new instance: CuaDriver.app might already be
+        // `-n` forces a new instance: OpenSkyDriver.app might already be
         // running from a previous MCP session, and without `-n`, `open
         // -a` would re-use it and drop our `--args serve`, leaving no
         // daemon up. `-g` keeps the new instance backgrounded —
@@ -1340,7 +1356,7 @@ fn launch_daemon_with_state_and_wait(
 
     let executable = std::env::current_exe().map_err(|error| LaunchDaemonError {
         kind: LaunchDaemonErrorKind::Failed,
-        message: format!("current Cua Driver executable is unavailable: {error}"),
+        message: format!("current OpenSky Driver executable is unavailable: {error}"),
     })?;
     let managed = allow_managed_restart
         && socket_path == crate::serve::default_socket_path()
@@ -1516,9 +1532,9 @@ fn restart_managed_daemon_if_present(executable: &std::path::Path) -> bool {
 fn restart_managed_daemon_if_present(_executable: &std::path::Path) -> bool {
     use std::process::{Command as Cmd, Stdio};
     let unit = if crate::bundle::is_local_installation() {
-        "cua-driver-local.service"
+        "opensky-driver.service"
     } else {
-        "cua-driver.service"
+        "opensky-driver.service"
     };
     let exists = Cmd::new("systemctl")
         .args(["--user", "is-enabled", unit])
@@ -1643,15 +1659,15 @@ where
     let mut daemon = McpDaemonStartup::AlreadyRunning;
     if !already_running {
         // Never replace an embedded host's TCC identity by launching the
-        // standalone CuaDriver.app daemon.
+        // standalone OpenSkyDriver.app daemon.
         if cua_driver_core::embedded_mode() {
             if let Some(on_startup) = on_startup.take() {
                 on_startup(McpDaemonStartup::Unreachable, false);
             }
             anyhow::bail!(
-                "no Cua Driver daemon listening on {socket_path}. Start one with \
-                 `cua-driver serve --socket {socket_path}` and retry. Embedded hosts \
-                 must spawn `cua-driver serve --embedded` before starting the MCP proxy."
+                "no OpenSky Driver daemon listening on {socket_path}. Start one with \
+                 `opensky-driver serve --socket {socket_path}` and retry. Embedded hosts \
+                 must spawn `opensky-driver serve --embedded` before starting the MCP proxy."
             );
         }
         #[cfg(target_os = "macos")]
@@ -1696,11 +1712,11 @@ where
                     on_startup(McpDaemonStartup::UnsupportedRelaunch, false);
                 }
                 anyhow::bail!(
-                    "no Cua Driver daemon listening on {socket_path}. Start one in \
+                    "no OpenSky Driver daemon listening on {socket_path}. Start one in \
                      your interactive session — on Windows run \
-                     `cua-driver autostart enable && cua-driver autostart kick`; \
-                     on Linux run `cua-driver serve &` in the user's session. \
-                     Then re-run `cua-driver mcp`."
+                     `opensky-driver autostart enable && opensky-driver autostart kick`; \
+                     on Linux run `opensky-driver serve &` in the user's session. \
+                     Then re-run `opensky-driver mcp`."
                 );
             }
             if let Err(error) =
@@ -1733,7 +1749,7 @@ where
     rt.block_on(crate::proxy::run_proxy(socket_path))
 }
 
-/// Emit a stable, machine-readable JSON description of the cua-driver CLI
+/// Emit a stable, machine-readable JSON description of the opensky-driver CLI
 /// surface — subcommands, their args, the canonical MCP invocation, version.
 ///
 /// The shape is purely additive — `schema_version` is bumped on breaking
@@ -1771,11 +1787,11 @@ fn manifest_feature_flags(
 pub fn build_manifest() -> serde_json::Value {
     // Resolve the binary path the way `run_mcp_config` already does so the
     // emitted `mcp_invocation.command` is the actually-runnable path, not
-    // a bare "cua-driver" the caller has to resolve.
+    // a bare "opensky-driver" the caller has to resolve.
     let binary = std::env::current_exe()
         .ok()
         .and_then(|p| p.to_str().map(str::to_owned))
-        .unwrap_or_else(|| "cua-driver".to_owned());
+        .unwrap_or_else(|| "opensky-driver".to_owned());
 
     let (wayland_native, portal_input, portal_capture) = manifest_feature_flags(
         cfg!(target_os = "linux"),
@@ -1942,10 +1958,10 @@ pub fn build_manifest() -> serde_json::Value {
                   { "name": "--json", "type": "flag", "description": "Emit machine-readable status or inspection output." }
               ] },
             { "name": "autostart",
-              "description": "Platform-native auto-start so `cua-driver serve` comes up on every logon.",
+              "description": "Platform-native auto-start so `opensky-driver serve` comes up on every logon.",
               "args": [ { "name": "subcommand", "type": "positional-string", "description": "enable | disable | status | kick" } ] },
             { "name": "skills",
-              "description": "Manage the cua-driver agent skill pack (install / update / uninstall / status / path).",
+              "description": "Manage the opensky-driver agent skill pack (install / update / uninstall / status / path).",
               "args": [ { "name": "subcommand", "type": "positional-string", "description": "install | update | uninstall | status | path. Default: status." } ] }
         ]
     })
@@ -1960,14 +1976,14 @@ pub fn run_mcp_config(client: Option<&str>) {
     let binary = std::env::current_exe()
         .ok()
         .and_then(|p| p.to_str().map(str::to_owned))
-        .unwrap_or_else(|| "cua-driver".to_owned());
+        .unwrap_or_else(|| "opensky-driver".to_owned());
 
     match client {
         None | Some("") => {
             println!(
                 r#"{{
   "mcpServers": {{
-    "cua-driver": {{
+    "opensky-driver": {{
       "command": "{binary}",
       "args": ["mcp"]
     }}
@@ -1983,7 +1999,7 @@ pub fn run_mcp_config(client: Option<&str>) {
             // `~/.claude.json` and is visible from every Claude Code
             // session regardless of cwd. Without it, `claude mcp add`
             // defaults to the per-project config (`<cwd>/.claude.json`),
-            // which is the source of the "registered cua-driver but
+            // which is the source of the "registered opensky-driver but
             // Claude Code doesn't see it" surprise users hit.
             //
             // The `--claude-code-computer-use-compat` flag is NOT
@@ -2025,13 +2041,13 @@ pub fn run_mcp_config(client: Option<&str>) {
             );
         }
         Some("codex") => {
-            println!("codex mcp add cua-driver -- {binary} mcp");
+            println!("codex mcp add opensky-driver -- {binary} mcp");
         }
         Some("cursor") => {
             println!(
                 r#"{{
   "mcpServers": {{
-    "cua-driver": {{
+    "opensky-driver": {{
       "command": "{binary}",
       "args": ["mcp"],
       "type": "stdio"
@@ -2042,7 +2058,7 @@ pub fn run_mcp_config(client: Option<&str>) {
         }
         Some("openclaw") => {
             println!(
-                "openclaw mcp set cua-driver '{{\"command\":\"{binary}\",\"args\":[\"mcp\"]}}'"
+                "openclaw mcp set opensky-driver '{{\"command\":\"{binary}\",\"args\":[\"mcp\"]}}'"
             );
         }
         Some("opencode") => {
@@ -2051,7 +2067,7 @@ pub fn run_mcp_config(client: Option<&str>) {
 {{
   "$schema": "https://opencode.ai/config.json",
   "mcp": {{
-    "cua-driver": {{
+    "opensky-driver": {{
       "type": "local",
       "command": ["{binary}", "mcp"],
       "enabled": true
@@ -2064,7 +2080,7 @@ pub fn run_mcp_config(client: Option<&str>) {
             println!("# paste under mcp_servers in ~/.hermes/config.yaml,");
             println!("# then run /reload-mcp inside Hermes:");
             println!("mcp_servers:");
-            println!("  cua-driver:");
+            println!("  opensky-driver:");
             println!("    command: \"{binary}\"");
             println!("    args: [\"mcp\"]");
         }
@@ -2099,7 +2115,7 @@ pub fn run_mcp_config(client: Option<&str>) {
             // both shapes — full file and merge fragment — useful.
             let full = serde_json::json!({
                 "mcpServers": {
-                    "cua-driver": {
+                    "opensky-driver": {
                         "command": normalised,
                         "args": ["mcp"],
                     }
@@ -2123,7 +2139,7 @@ pub fn run_mcp_config(client: Option<&str>) {
             println!(
                 "Pi (badlogic/pi-mono) does not support MCP natively — the author\n\
                  has stated MCP support will not be added for context-budget reasons.\n\n\
-                 Use cua-driver as a plain CLI from inside Pi instead:\n\n\
+                 Use opensky-driver as a plain CLI from inside Pi instead:\n\n\
                      {binary} list_apps\n\
                      {binary} click  '{{\"pid\": 1234, \"x\": 100, \"y\": 200}}'\n\
                      {binary} --help        # full tool catalog\n\n\
@@ -2133,14 +2149,14 @@ pub fn run_mcp_config(client: Option<&str>) {
         }
         Some("prime-agent") => {
             println!(
-                "Prime Agent loads Agent Skills and can call cua-driver directly from its\n\
+                "Prime Agent loads Agent Skills and can call opensky-driver directly from its\n\
                  persistent IPython control environment. No MCP registration is required.\n\n\
-                 Install and verify the Cua Driver skill pack:\n\n\
+                 Install and verify the OpenSky Driver skill pack:\n\n\
                      {binary} skills install\n\
                      {binary} skills status\n\n\
                  Then run /reload in Prime Agent (or start a new session) and ask it to\n\
-                 use the Cua Driver skill. Use /skill:cua-driver to invoke it explicitly.\n\
-                 The skill calls the cua-driver CLI with a snapshot/action/verify workflow."
+                 use the OpenSky Driver skill. Use /skill:opensky-driver to invoke it explicitly.\n\
+                 The skill calls the opensky-driver CLI with a snapshot/action/verify workflow."
             );
         }
         Some("qwen") | Some("qwen-code") => {
@@ -2148,13 +2164,13 @@ pub fn run_mcp_config(client: Option<&str>) {
             // Config: ~/.qwen/settings.json (user) or .qwen/settings.json
             // (project), top-level "mcpServers" keyed by name. It also ships a
             // CLI: `qwen mcp add <name> <command> [args...]`.
-            println!("qwen mcp add cua-driver {binary} mcp");
+            println!("qwen mcp add opensky-driver {binary} mcp");
         }
         Some("droid") | Some("factory") => {
             // Factory Droid CLI. Config: ~/.factory/mcp.json (user) or
             // .factory/mcp.json (folder/project), top-level "mcpServers" with
             // "type":"stdio". The CLI takes command+args as one quoted string.
-            println!("droid mcp add cua-driver \"{binary} mcp\"");
+            println!("droid mcp add opensky-driver \"{binary} mcp\"");
         }
         Some("zcode") => {
             // ZCode by Z.ai (GLM coding harness) — a GUI app. MCP servers are
@@ -2165,7 +2181,7 @@ pub fn run_mcp_config(client: Option<&str>) {
             let normalised = binary.replace('\\', "/");
             let full = serde_json::json!({
                 "mcpServers": {
-                    "cua-driver": {
+                    "opensky-driver": {
                         "command": normalised,
                         "args": ["mcp"],
                         "type": "stdio",
@@ -2177,7 +2193,7 @@ pub fn run_mcp_config(client: Option<&str>) {
                 "# ZCode (Z.ai) is a GUI app — add via Settings -> MCP Servers ->\n\
                  # New MCP Server (type: stdio), or paste this under \"Full\n\
                  # configuration\". If you use Z.ai's `zai` CLI instead, run:\n\
-                 #   zai mcp add cua-driver --transport stdio --command \"{binary}\" --args mcp\n\
+                 #   zai mcp add opensky-driver --transport stdio --command \"{binary}\" --args mcp\n\
                  {pretty}",
             );
         }
@@ -2210,7 +2226,7 @@ fn ensure_compatible_daemon(socket_path: &str) -> Result<(), String> {
 
 fn require_compatible_daemon(socket_path: &str) {
     if let Err(error) = ensure_compatible_daemon(socket_path) {
-        eprintln!("Cua Driver daemon on {socket_path} is incompatible: {error}");
+        eprintln!("OpenSky Driver daemon on {socket_path} is incompatible: {error}");
         process::exit(1);
     }
 }
@@ -2269,8 +2285,8 @@ pub fn run_call(
     let socket_path = socket_override.unwrap_or_else(crate::serve::default_socket_path);
     if !crate::serve::is_daemon_listening(&socket_path) {
         eprintln!(
-            "Cua Driver daemon is not running on {socket_path}.\n\
-             Start it first with: cua-driver serve --socket {socket_path}"
+            "OpenSky Driver daemon is not running on {socket_path}.\n\
+             Start it first with: opensky-driver serve --socket {socket_path}"
         );
         process::exit(1);
     }
@@ -2366,7 +2382,7 @@ pub fn run_call(
                         }
                         if let Some(sc) = result.get("structuredContent") {
                             // Merge image data into the structured payload so
-                            // `cua-driver call screenshot` over
+                            // `opensky-driver call screenshot` over
                             // the daemon socket still emits
                             // `screenshot_png_b64`. Previously this path
                             // dropped the image entirely when no
@@ -2413,7 +2429,7 @@ pub fn run_call(
                 }
             }
             Err(e) => {
-                eprintln!("Cua Driver daemon request on {socket_path} failed: {e}");
+                eprintln!("OpenSky Driver daemon request on {socket_path} failed: {e}");
                 process::exit(1);
             }
         }
@@ -2515,7 +2531,7 @@ pub fn run_history_cmd(
 
     if !crate::serve::is_daemon_listening(&socket_path) {
         eprintln!(
-            "Cua Driver daemon is not running. Start it with: {} serve{}",
+            "OpenSky Driver daemon is not running. Start it with: {} serve{}",
             crate::bundle::cli_name(),
             if crate::history_runtime::preview_admitted_preference() {
                 " --experimental-history"
@@ -2534,7 +2550,7 @@ pub fn run_history_cmd(
                 prior_preview_admitted_preference,
             );
         }
-        eprintln!("Cua Driver daemon on {socket_path} is incompatible: {error}");
+        eprintln!("OpenSky Driver daemon on {socket_path} is incompatible: {error}");
         process::exit(1);
     }
 
@@ -2726,16 +2742,16 @@ fn history_daemon_status(socket_path: &str) -> Option<serde_json::Value> {
         .result
 }
 
-/// `cua-driver recording <start|stop|status>` — wrapper around
+/// `opensky-driver recording <start|stop|status>` — wrapper around
 /// `start_recording` / `stop_recording` / `get_recording_state` tools
 /// on the running daemon.
 ///
-/// Requires a running daemon (`cua-driver serve`) because recording
+/// Requires a running daemon (`opensky-driver serve`) because recording
 /// state lives in the daemon.
 pub fn run_recording_cmd(subcommand: &str, args: &[String], socket: Option<&str>) {
     // `render` is pure file-to-file work that doesn't need the daemon;
     // dispatch it before the daemon-running check so it works without
-    // a running `cua-driver serve`.
+    // a running `opensky-driver serve`.
     if subcommand == "render" {
         run_recording_render(args);
         return;
@@ -2747,8 +2763,8 @@ pub fn run_recording_cmd(subcommand: &str, args: &[String], socket: Option<&str>
 
     if !crate::serve::is_daemon_listening(&socket_path) {
         eprintln!(
-            "Cua Driver daemon is not running.\n\
-             Start it first with: cua-driver serve"
+            "OpenSky Driver daemon is not running.\n\
+             Start it first with: opensky-driver serve"
         );
         process::exit(1);
     }
@@ -2767,7 +2783,7 @@ pub fn run_recording_cmd(subcommand: &str, args: &[String], socket: Option<&str>
                     }
                 }
                 None => {
-                    eprintln!("Usage: cua-driver recording start <output-dir>");
+                    eprintln!("Usage: opensky-driver recording start <output-dir>");
                     process::exit(64);
                 }
             };
@@ -2905,10 +2921,10 @@ pub fn run_recording_cmd(subcommand: &str, args: &[String], socket: Option<&str>
     }
 }
 
-/// `cua-driver recording render <input-dir> <out.mp4> [--no-zoom] [--scale N]`
+/// `opensky-driver recording render <input-dir> <out.mp4> [--no-zoom] [--scale N]`
 /// Pure file-to-file work — does NOT go through the daemon.
 ///
-/// Note on flag parsing: the global cua-driver CLI parser strips
+/// Note on flag parsing: the global opensky-driver CLI parser strips
 /// recognised flags before this subcommand sees them, leaving only
 /// positionals. So instead of `--output <out>` (which the parser
 /// would consume and lose) we accept the output path as the second
@@ -2921,7 +2937,7 @@ fn run_recording_render(args: &[String]) {
         Some(s) if !s.is_empty() => std::path::PathBuf::from(s),
         _ => {
             eprintln!(
-                "Usage: cua-driver recording render <input-dir> <out.mp4> [--no-zoom] [--scale N]"
+                "Usage: opensky-driver recording render <input-dir> <out.mp4> [--no-zoom] [--scale N]"
             );
             process::exit(64);
         }
@@ -2930,7 +2946,7 @@ fn run_recording_render(args: &[String]) {
         Some(s) if !s.is_empty() => std::path::PathBuf::from(s),
         _ => {
             eprintln!(
-                "Usage: cua-driver recording render <input-dir> <out.mp4> [--no-zoom] [--scale N]"
+                "Usage: opensky-driver recording render <input-dir> <out.mp4> [--no-zoom] [--scale N]"
             );
             eprintln!("(second positional argument is the output path)");
             process::exit(64);
@@ -2976,7 +2992,7 @@ fn run_recording_render(args: &[String]) {
     }
 }
 
-/// `cua-driver update [--apply]` — check for a newer release and optionally apply it.
+/// `opensky-driver update [--apply]` — check for a newer release and optionally apply it.
 ///
 /// Shares the GitHub releases fetch with the startup banner via
 /// [`crate::version_check::fetch_latest_version`] so both code paths agree on
@@ -2986,7 +3002,7 @@ fn run_recording_render(args: &[String]) {
 pub fn run_update_cmd(apply: bool, json: bool) {
     if apply && crate::bundle::is_local_installation() {
         eprintln!(
-            "cua-driver-local is managed by scripts/install-local.sh (or install-local.ps1); \
+            "opensky-driver is managed by scripts/install-local.sh (or install-local.ps1); \
              refusing to run the release installer from the local product."
         );
         process::exit(2);
@@ -3018,7 +3034,7 @@ pub fn run_update_cmd(apply: bool, json: bool) {
     let selected_channel = crate::release_channel::selected().unwrap_or_else(|error| {
         eprintln!("Cannot read release channel: {error}");
         eprintln!(
-            "Repair it with `cua-driver channel set stable` or `cua-driver channel set nightly`."
+            "Repair it with `opensky-driver channel set stable` or `opensky-driver channel set nightly`."
         );
         process::exit(1);
     });
@@ -3097,7 +3113,7 @@ pub fn run_update_cmd(apply: bool, json: bool) {
                 if !json {
                     println!();
                     println!("Run with --apply to download and install it:");
-                    println!("  cua-driver update --apply");
+                    println!("  opensky-driver update --apply");
                     println!();
                     println!("Or reinstall directly:");
                     println!("  {}", crate::updater::manual_install_one_liner());
@@ -3106,7 +3122,7 @@ pub fn run_update_cmd(apply: bool, json: bool) {
             }
 
             if !json {
-                println!("Downloading and installing cua-driver {v}…");
+                println!("Downloading and installing opensky-driver {v}…");
             }
             crate::telemetry::capture_update_apply_started(&v, daemon_was_running);
             match crate::updater::run_install_script(&v) {
@@ -3119,7 +3135,7 @@ pub fn run_update_cmd(apply: bool, json: bool) {
                         apply_started_at.elapsed(),
                     );
                     if !json {
-                        println!("Installed cua-driver {v}.");
+                        println!("Installed opensky-driver {v}.");
                     }
                     if daemon_was_running {
                         // The atomic swap (symlink retarget / junction flip)
@@ -3127,7 +3143,7 @@ pub fn run_update_cmd(apply: bool, json: bool) {
                         // binary — restart picks up the new one.
                         println!();
                         println!("A daemon was running before the install. Restart it to pick up the new binary:");
-                        println!("  cua-driver stop && cua-driver serve");
+                        println!("  opensky-driver stop && opensky-driver serve");
                     }
                 }
                 Ok(s) => {
@@ -3165,7 +3181,7 @@ pub fn run_update_cmd(apply: bool, json: bool) {
     }
 }
 
-/// `cua-driver permissions status|grant`.
+/// `opensky-driver permissions status|grant`.
 pub fn run_permissions_cmd(subcommand: &str, json: bool) {
     match subcommand {
         "status" => run_permissions_status(json),
@@ -3177,7 +3193,7 @@ pub fn run_permissions_cmd(subcommand: &str, json: bool) {
     }
 }
 
-/// Report the CuaDriver daemon's TCC status — reliably, or not at all.
+/// Report the OpenSkyDriver daemon's TCC status — reliably, or not at all.
 ///
 /// macOS attributes Accessibility / Screen-Recording to the *responsible
 /// process*, so the ONLY process that can read `com.trycua.driver`'s real
@@ -3187,7 +3203,7 @@ pub fn run_permissions_cmd(subcommand: &str, json: bool) {
 /// report `unknown` rather than fall back to an in-process check — that
 /// fallback would report the *calling terminal's* grants and could print
 /// `✅ granted` while the driver itself has none. An honest "unknown" beats a
-/// confident lie. To grant + verify, use `cua-driver permissions grant`.
+/// confident lie. To grant + verify, use `opensky-driver permissions grant`.
 /// Never raises a prompt.
 fn run_permissions_status(json: bool) {
     let socket = crate::serve::default_socket_path();
@@ -3381,7 +3397,7 @@ pub fn run_permissions_host_request_if_requested() -> Option<i32> {
         return None;
     }
     if !crate::bundle::is_executable_inside_cuadriver_app() {
-        eprintln!("permission host request requires the installed CuaDriver app bundle");
+        eprintln!("permission host request requires the installed OpenSkyDriver app bundle");
         return Some(77);
     }
     let result_file = args
@@ -3402,7 +3418,9 @@ pub fn run_permissions_host_request_if_requested() -> Option<i32> {
     let valid_name = result_path
         .file_name()
         .and_then(|name| name.to_str())
-        .is_some_and(|name| name.starts_with("cua-driver-permissions-") && name.ends_with(".json"));
+        .is_some_and(|name| {
+            name.starts_with("opensky-driver-permissions-") && name.ends_with(".json")
+        });
     if !valid_name || expected_parent != actual_parent {
         eprintln!("permission host result path is outside the private temporary-file namespace");
         return Some(64);
@@ -3460,7 +3478,7 @@ fn request_permissions_via_launchservices(
         .map_err(|error| format!("system clock unavailable: {error}"))?
         .as_nanos();
     let result_file = std::env::temp_dir().join(format!(
-        "cua-driver-permissions-{}-{nonce}.json",
+        "opensky-driver-permissions-{}-{nonce}.json",
         std::process::id()
     ));
     let file = OpenOptions::new()
@@ -3531,7 +3549,7 @@ fn request_permissions_via_launchservices(
         .ok_or_else(|| "permission host returned no structured status".to_owned())
 }
 
-/// Launch CuaDriver via LaunchServices so the permission prompt attributes to
+/// Launch OpenSkyDriver via LaunchServices so the permission prompt attributes to
 /// com.trycua.driver, wait (user-paced) for the daemon to come up — its socket
 /// only appears once the permissions gate passes, i.e. the grant was given —
 /// then report the driver's own status.
@@ -3586,7 +3604,7 @@ fn run_permissions_grant() {
         // rather than bailing on the first non-success response.
         let req = permission_status_request();
         // A dedicated LaunchServices child requests the grants under the
-        // CuaDriver app identity. No prompt-capable method exists on the
+        // OpenSkyDriver app identity. No prompt-capable method exists on the
         // agent-reachable daemon socket.
         let staged_status = request_permissions_via_launchservices(false).ok();
         let poll_deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
@@ -3641,7 +3659,7 @@ fn run_permissions_grant() {
         println!(
             "macOS may now ask {app_name} to bypass the system private window picker and \
              directly access your screen and audio. This is the expected consent for exact \
-             screenshots and recordings without a picker. Cua Driver's current recorder \
+             screenshots and recordings without a picker. OpenSky Driver's current recorder \
              captures screen video only; it does not enable system-audio capture. This \
              consent does not authorize browser profiles, browser data, or CDP attachment."
         );
@@ -3702,12 +3720,12 @@ fn run_permissions_grant() {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        eprintln!("`cua-driver permissions grant` is macOS-only.");
+        eprintln!("`opensky-driver permissions grant` is macOS-only.");
         process::exit(1);
     }
 }
 
-/// `cua-driver check-update [--json] [--no-cache]` — pure check, never installs.
+/// `opensky-driver check-update [--json] [--no-cache]` — pure check, never installs.
 ///
 /// Mirror of the `check_for_update` MCP tool. Both routes call into
 /// [`crate::version_check::check_update_state`] so the CLI and MCP
@@ -3736,7 +3754,7 @@ pub fn run_check_update_cmd(json: bool, no_cache: bool) {
                 println!("Latest:  {latest}");
                 if state.update_available {
                     println!();
-                    println!("Update available. Run `cua-driver update --apply` to install.");
+                    println!("Update available. Run `opensky-driver update --apply` to install.");
                     if let Some(url) = &state.release_notes_url {
                         println!("Release notes: {url}");
                     }
@@ -3764,7 +3782,7 @@ pub fn run_check_update_cmd(json: bool, no_cache: bool) {
 }
 
 /// Inspect or persist the release channel. Selection never installs by itself;
-/// replacement remains explicit through `cua-driver update --apply`.
+/// replacement remains explicit through `opensky-driver update --apply`.
 pub fn run_channel_cmd(subcommand: &str, value: Option<&str>, json: bool) {
     let result = match subcommand {
         "status" => crate::release_channel::selected(),
@@ -3788,7 +3806,7 @@ pub fn run_channel_cmd(subcommand: &str, value: Option<&str>, json: bool) {
     let selected = result.unwrap_or_else(|error| {
         eprintln!("Failed to read release channel: {error}");
         eprintln!(
-            "Repair it with `cua-driver channel set stable` or `cua-driver channel set nightly`."
+            "Repair it with `opensky-driver channel set stable` or `opensky-driver channel set nightly`."
         );
         process::exit(1);
     });
@@ -3810,7 +3828,9 @@ pub fn run_channel_cmd(subcommand: &str, value: Option<&str>, json: bool) {
             None => println!("Current channel:  development"),
         }
         if subcommand == "set" && current != Some(selected) {
-            println!("Run `cua-driver update --apply` to install the latest {selected} release.");
+            println!(
+                "Run `opensky-driver update --apply` to install the latest {selected} release."
+            );
         }
     }
 }
@@ -3822,14 +3842,14 @@ fn cli_docs_json() -> serde_json::Value {
     let no_subcommands: Vec<serde_json::Value> = Vec::new();
 
     serde_json::json!({
-        "name": "cua-driver",
+        "name": "opensky-driver",
         "version": env!("CARGO_PKG_VERSION"),
         "abstract": "Cross-platform computer-use automation driver.",
         "commands": [
             {
                 "name": "mcp",
                 "abstract": "Run the stdio MCP server.",
-                "discussion": "On Windows and Linux, bare cua-driver mcp owns its runtime directly and shuts it down on stdin EOF. On macOS it proxies to CuaDriver.app so desktop permissions retain the app identity. Pass --direct to make the macOS MCP process own the runtime and TCC attribution, or --socket to select an explicit daemon endpoint.",
+                "discussion": "On Windows and Linux, bare opensky-driver mcp owns its runtime directly and shuts it down on stdin EOF. On macOS it proxies to OpenSkyDriver.app so desktop permissions retain the app identity. Pass --direct to make the macOS MCP process own the runtime and TCC attribution, or --socket to select an explicit daemon endpoint.",
                 "arguments": no_args,
                 "options": [
                     {"name":"socket","short_name":null,"help":"Select an explicit daemon socket or named-pipe endpoint.","type":"String","default_value":null,"is_optional":true},
@@ -3866,7 +3886,7 @@ fn cli_docs_json() -> serde_json::Value {
             {
                 "name": "call",
                 "abstract": "Invoke an MCP tool through the running daemon.",
-                "discussion": "Requires a Cua Driver daemon. JSON arguments may be passed as a positional JSON object or through stdin.",
+                "discussion": "Requires a OpenSky Driver daemon. JSON arguments may be passed as a positional JSON object or through stdin.",
                 "arguments": [
                     {"name":"tool-name","help":"Name of the MCP tool to invoke.","type":"String","is_optional":false},
                     {"name":"json-args","help":"JSON object for the tool input schema. If omitted, stdin is read when piped.","type":"String","is_optional":true}
@@ -3880,7 +3900,7 @@ fn cli_docs_json() -> serde_json::Value {
             },
             {
                 "name": "serve",
-                "abstract": "Run Cua Driver as a long-running daemon.",
+                "abstract": "Run OpenSky Driver as a long-running daemon.",
                 "discussion": "The daemon owns per-process state such as element-index caches, recording state, and cursor overlay state.",
                 "arguments": no_args,
                 "options": [
@@ -3927,7 +3947,7 @@ fn cli_docs_json() -> serde_json::Value {
             },
             {
                 "name": "status",
-                "abstract": "Report whether a Cua Driver daemon is running.",
+                "abstract": "Report whether a OpenSky Driver daemon is running.",
                 "discussion": "",
                 "arguments": no_args,
                 "options": [
@@ -4026,7 +4046,7 @@ fn cli_docs_json() -> serde_json::Value {
             },
             {
                 "name": "check-update",
-                "abstract": "Check whether a newer cua-driver release is available.",
+                "abstract": "Check whether a newer opensky-driver release is available.",
                 "discussion": "Read-only. Uses the same update-state payload as the check_for_update MCP tool.",
                 "arguments": no_args,
                 "options": no_options,
@@ -4051,7 +4071,7 @@ fn cli_docs_json() -> serde_json::Value {
             {
                 "name": "channel",
                 "abstract": "Inspect or change the stable/nightly update channel.",
-                "discussion": "Selection is persistent but never installs by itself; use cua-driver update --apply after changing it.",
+                "discussion": "Selection is persistent but never installs by itself; use opensky-driver update --apply after changing it.",
                 "arguments": no_args,
                 "options": no_options,
                 "flags": no_flags,
@@ -4191,13 +4211,13 @@ pub fn run_dump_docs_with_type(tools_list: &serde_json::Value, pretty: bool, doc
     println!("{}", out.unwrap_or_else(|_| "{}".into()));
 }
 
-/// `cua-driver diagnose` — print a paste-able bundle-path / install-layout / TCC report.
+/// `opensky-driver diagnose` — print a paste-able bundle-path / install-layout / TCC report.
 ///
 /// Mirrors Swift `DiagnoseCommand`. Covers:
 ///   - running process identity (path, pid, version)
 ///   - codesign info (cdhash, team-id, authority) via `codesign -dvvv`
 ///   - AX + screen recording TCC status (check_permissions tool)
-///   - install layout (/Applications/CuaDriver.app, ~/.local/bin/cua-driver)
+///   - install layout (/Applications/OpenSkyDriver.app, ~/.local/bin/opensky-driver)
 ///   - TCC DB rows for com.trycua.driver (sqlite3, best-effort)
 ///   - config + state paths with existence booleans
 pub fn run_diagnose_cmd() {
@@ -4307,7 +4327,7 @@ fn diagnose_tcc_section() -> String {
          screen recording  (CGPreflightScreenCaptureAccess): {sr}\n\
          direct capture    (prompt-capable probe): {direct}\n\n\
          diagnose is read-only and never runs the direct ScreenCaptureKit probe;\n\
-         use `cua-driver permissions grant` to request and verify it explicitly."
+         use `opensky-driver permissions grant` to request and verify it explicitly."
     )
 }
 
@@ -4315,7 +4335,7 @@ fn diagnose_install_layout_section() -> String {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
     let mut lines = vec!["## install layout".to_owned()];
 
-    let app_path = "/Applications/CuaDriver.app";
+    let app_path = "/Applications/OpenSkyDriver.app";
     let app_exists = std::path::Path::new(app_path).exists();
     lines.push(format!("bundle:  {app_path}   exists={app_exists}"));
     if app_exists {
@@ -4344,8 +4364,8 @@ fn diagnose_install_layout_section() -> String {
     }
 
     let cli_paths = [
-        ("symlink", format!("{home}/.local/bin/cua-driver")),
-        ("legacy symlink", "/usr/local/bin/cua-driver".to_owned()),
+        ("symlink", format!("{home}/.local/bin/opensky-driver")),
+        ("legacy symlink", "/usr/local/bin/opensky-driver".to_owned()),
     ];
     for (label, path) in &cli_paths {
         let exists = std::path::Path::new(path).exists();
@@ -4357,7 +4377,7 @@ fn diagnose_install_layout_section() -> String {
         }
     }
 
-    let stale = format!("{home}/Applications/CuaDriver.app");
+    let stale = format!("{home}/Applications/OpenSkyDriver.app");
     if std::path::Path::new(&stale).exists() {
         lines.push(format!(
             "stale:   {stale}   \u{2190} old install-local.sh path, consider removing"
@@ -4442,7 +4462,7 @@ fn diagnose_config_paths_section() -> String {
     lines.join("\n")
 }
 
-/// `cua-driver config [show|get|set|reset] [key] [value]`
+/// `opensky-driver config [show|get|set|reset] [key] [value]`
 ///
 /// Thin daemon-only wrapper around the `get_config` / `set_config` tools.
 pub fn run_config_cmd(
@@ -4457,8 +4477,8 @@ pub fn run_config_cmd(
 
     if !crate::serve::is_daemon_listening(&socket_path) {
         eprintln!(
-            "Cua Driver daemon is not running on {socket_path}.\n\
-             Start it first with: cua-driver serve --socket {socket_path}"
+            "OpenSky Driver daemon is not running on {socket_path}.\n\
+             Start it first with: opensky-driver serve --socket {socket_path}"
         );
         process::exit(1);
     }
@@ -4474,7 +4494,7 @@ pub fn run_config_cmd(
             client_kind: Some(cua_driver_core::daemon::DaemonClientKind::Cli),
         };
         let response = crate::serve::send_request(&socket_path, &req).unwrap_or_else(|error| {
-            eprintln!("Cua Driver daemon request on {socket_path} failed: {error}");
+            eprintln!("OpenSky Driver daemon request on {socket_path} failed: {error}");
             process::exit(1);
         });
         if !response.ok {
@@ -4513,7 +4533,7 @@ pub fn run_config_cmd(
             let key = match key {
                 Some(k) => k,
                 None => {
-                    eprintln!("Usage: cua-driver config get <key>");
+                    eprintln!("Usage: opensky-driver config get <key>");
                     eprintln!("Keys: capture_mode, max_image_dimension, version, platform");
                     process::exit(64);
                 }
@@ -4555,7 +4575,7 @@ pub fn run_config_cmd(
             let key = match key {
                 Some(k) => k,
                 None => {
-                    eprintln!("Usage: cua-driver config set <key> <value>");
+                    eprintln!("Usage: opensky-driver config set <key> <value>");
                     process::exit(64);
                 }
             };
@@ -4568,7 +4588,7 @@ pub fn run_config_cmd(
             let value = match value {
                 Some(v) => v,
                 None => {
-                    eprintln!("Usage: cua-driver config set {key} <value>");
+                    eprintln!("Usage: opensky-driver config set {key} <value>");
                     process::exit(64);
                 }
             };
@@ -4608,7 +4628,7 @@ pub fn run_config_cmd(
     }
 }
 
-/// `cua-driver doctor` — run platform-aware diagnostic probes and emit a
+/// `opensky-driver doctor` — run platform-aware diagnostic probes and emit a
 /// structured report.
 ///
 /// See [`crate::doctor`] for the probe catalog. Output is plain text by
@@ -4738,7 +4758,8 @@ mod tests {
             grants,
         };
         #[cfg(target_os = "macos")]
-        let launch = daemon_launch_arguments("CuaDriver", "/tmp/history-test.sock", &state, true);
+        let launch =
+            daemon_launch_arguments("OpenSkyDriver", "/tmp/history-test.sock", &state, true);
         #[cfg(not(target_os = "macos"))]
         let launch = daemon_process_arguments("history-test.sock", &state, true);
         assert!(launch

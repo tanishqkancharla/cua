@@ -48,7 +48,7 @@ requires_powershell = pytest.mark.skipif(
 REPO_ROOT = Path(__file__).resolve().parents[4]
 SCRIPTS = REPO_ROOT / "libs/cua-driver/scripts"
 
-WINDOWS_INSTALLER = SCRIPTS / "install.ps1"
+WINDOWS_INSTALLER = SCRIPTS / "_upstream-install.ps1"
 UNIX_INSTALLER = SCRIPTS / "_install-rust.sh"
 
 

@@ -61,7 +61,7 @@ pub const TOOLS_LIST_SCHEMA_VERSION: &str = "1";
 pub const CAPABILITY_VERSION: &str = "1";
 
 /// Shape version for the checked-in generated client contract.
-pub const CONTRACT_VERSION: &str = "0.7.0";
+pub const CONTRACT_VERSION: &str = "0.7.0-opensky.1";
 
 /// MCP protocol version used by current cua-driver clients.
 pub const MCP_PROTOCOL_VERSION: &str = "2025-06-18";

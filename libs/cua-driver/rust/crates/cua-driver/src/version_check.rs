@@ -85,6 +85,9 @@ const RELEASES_URL: &str = "https://api.github.com/repos/trycua/cua/releases?per
 /// - `CARGO_PKG_VERSION` has a pre-release suffix (source / dev build —
 ///   nothing on GitHub will be "newer" in a meaningful way)
 pub fn maybe_announce_update() {
+    if crate::bundle::is_local_installation() {
+        return;
+    }
     if !is_enabled() {
         tracing::debug!(target: "cua_driver::version_check",
                         "update check skipped (opt-out / pre-release build)");
@@ -195,6 +198,22 @@ fn install_one_liner() -> String {
 /// always get a well-formed payload they can branch on.
 pub fn check_update_state(no_cache: bool) -> UpdateState {
     let current = env!("CARGO_PKG_VERSION").to_owned();
+    if crate::bundle::is_local_installation() {
+        return UpdateState {
+            current_version: current,
+            current_channel: None,
+            selected_channel: None,
+            latest_version: None,
+            update_available: false,
+            source: "opensky_source",
+            checked_at: iso8601(unix_now()),
+            cache_hit: false,
+            install_command: None,
+            release_notes_url: None,
+            error: Some("OpenSky Driver is source-managed. Rebuild from https://github.com/tanishqkancharla/cua; upstream Cua releases are not compatible update sources.".to_owned()),
+        };
+    }
+
     let now = unix_now();
     let checked_at = iso8601(now);
 
@@ -456,6 +475,9 @@ fn format_banner(
 /// 2. Persisted config `update_check_enabled` (false → off)
 /// 3. Built `CARGO_PKG_VERSION` is a pre-release (`-dev`, `-rc.1`, …) → off
 fn is_enabled() -> bool {
+    if crate::bundle::is_local_installation() {
+        return false;
+    }
     if let Some(false) = parse_env_bool(ENV_UPDATE_CHECK) {
         return false;
     }
@@ -597,7 +619,7 @@ fn cache_path() -> Option<PathBuf> {
 }
 
 /// Pre-rename cache location. `None` for the source-build product, which
-/// has always used its own `~/.cua-driver-local/` home and never wrote here.
+/// has always used its own `~/.opensky-driver/` home and never wrote here.
 fn legacy_cache_path() -> Option<PathBuf> {
     if crate::bundle::is_local_installation() {
         return None;
@@ -946,30 +968,21 @@ mod tests {
     }
 
     #[test]
-    fn legacy_cache_is_migrated_and_its_home_removed() {
+    fn opensky_preserves_upstream_legacy_cache() {
         let _g = ENV_LOCK.lock().unwrap();
         with_isolated_home(|home| {
-            let legacy_home = home.join(LEGACY_HOME_SUBDIRECTORY);
-            std::fs::create_dir_all(&legacy_home).unwrap();
-            std::fs::write(
-                legacy_home.join(CACHE_FILE_NAME),
-                r#"{"latest_version":"0.1.4","dismissed_versions":["0.1.4"]}"#,
-            )
-            .unwrap();
-
-            let migrated = read_cache().expect("read_cache");
-            assert_eq!(migrated.latest_version.as_deref(), Some("0.1.4"));
-            assert_eq!(migrated.dismissed_versions, vec!["0.1.4".to_owned()]);
-            assert!(home
-                .join(crate::bundle::user_home_subdirectory())
-                .join(CACHE_FILE_NAME)
-                .is_file());
-            assert!(!legacy_home.exists());
+            let legacy = home.join(LEGACY_HOME_SUBDIRECTORY).join(CACHE_FILE_NAME);
+            std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+            let original = r#"{"latest_version":"0.1.4"}"#;
+            std::fs::write(&legacy, original).unwrap();
+            assert!(read_cache().is_none());
+            assert_eq!(std::fs::read_to_string(&legacy).unwrap(), original);
+            assert!(!home.join(crate::bundle::user_home_subdirectory()).exists());
         });
     }
 
     #[test]
-    fn migration_leaves_a_legacy_home_that_still_holds_other_files() {
+    fn opensky_preserves_all_upstream_legacy_files() {
         let _g = ENV_LOCK.lock().unwrap();
         with_isolated_home(|home| {
             let legacy_home = home.join(LEGACY_HOME_SUBDIRECTORY);
@@ -979,9 +992,8 @@ mod tests {
 
             let _ = read_cache();
 
-            // Our file is gone, somebody else's is untouched: the empty-dir
-            // removal must never turn into a recursive delete.
-            assert!(!legacy_home.join(CACHE_FILE_NAME).exists());
+            // Both files belong to upstream; neither is migrated or deleted.
+            assert!(legacy_home.join(CACHE_FILE_NAME).exists());
             assert!(legacy_home.join(".telemetry_id").is_file());
         });
     }
@@ -1189,7 +1201,7 @@ mod tests {
 
         with_isolated_home(|home| {
             // Write a config that disables the check.
-            let cfg_dir = home.join(".cua-driver");
+            let cfg_dir = home.join(".opensky-driver");
             std::fs::create_dir_all(&cfg_dir).unwrap();
             std::fs::write(
                 cfg_dir.join("config.json"),
@@ -1217,43 +1229,18 @@ mod tests {
     }
 
     #[test]
-    fn config_flag_true_or_missing_leaves_check_on() {
+    fn upstream_updates_stay_disabled_even_when_configured_on() {
         let _g = ENV_LOCK.lock().unwrap();
-        let saved = std::env::var_os(ENV_UPDATE_CHECK);
-        unsafe {
-            std::env::remove_var(ENV_UPDATE_CHECK);
-        }
-
         with_isolated_home(|home| {
-            // Case A: no config file at all → enabled.
-            // CARGO_PKG_VERSION is "0.1.3" (stable), env unset, no config file.
-            assert!(
-                is_enabled(),
-                "no config file + stable version + no env opt-out → enabled"
-            );
-
-            // Case B: config file present but flag = true → still enabled.
-            let cfg_dir = home.join(".cua-driver");
-            std::fs::create_dir_all(&cfg_dir).unwrap();
-            std::fs::write(
-                cfg_dir.join("config.json"),
-                r#"{"update_check_enabled": true, "other_key": 42}"#,
-            )
-            .unwrap();
-            assert!(
-                is_enabled(),
-                "explicit update_check_enabled=true must leave check on"
-            );
+            assert!(!is_enabled());
+            let dir = home.join(".opensky-driver");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("config.json"), r#"{"update_check_enabled":true}"#).unwrap();
+            assert!(!is_enabled());
+            let state = check_update_state(true);
+            assert_eq!(state.source, "opensky_source");
+            assert!(state.install_command.is_none());
         });
-
-        match saved {
-            Some(s) => unsafe {
-                std::env::set_var(ENV_UPDATE_CHECK, s);
-            },
-            None => unsafe {
-                std::env::remove_var(ENV_UPDATE_CHECK);
-            },
-        }
     }
 
     // ── Banner formatting ───────────────────────────────────────────────
