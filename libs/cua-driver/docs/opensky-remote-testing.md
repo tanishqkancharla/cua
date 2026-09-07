@@ -62,3 +62,57 @@ gap, including the macOS-specific items in `opensky-followups.md`.
 References: [GitHub runner limitations](https://docs.github.com/en/actions/reference/runners/github-hosted-runners),
 [exe.dev documentation](https://exe.dev/docs/all), and the repository's
 [test harness guide](test-harnesses-guide.md).
+
+## Initial hosted evidence — 2026-09-07
+
+The initial diagnostic run is
+[34149118620](https://github.com/tanishqkancharla/cua/actions/runs/34149118620),
+source `407c83ae8276e5e7df134858e9ad3b9a1506a856`. Linux native E2E passed:
+32 delivered actions, seven expected refusals, zero failures, and zero skips.
+The environment preflight and video validation passed. The
+[Linux native artifact](https://github.com/tanishqkancharla/cua/actions/runs/34149118620/artifacts/10028976101)
+contains the generated report, structured results, and recordings. Expected
+refusals verify the declared limitations; they do not prove those operations
+are supported.
+
+The first build run successfully compiled all three platforms and passed their
+driver binary unit suites, then exposed a stale upstream contract-version
+assertion. The next run exposed four Windows-only core failures: two Unix-path
+fixtures and two startup-instruction word-budget checks. The fixes preserve the
+fork contract assertion, use platform-appropriate synthetic paths in both
+manifests and attestations, and shorten the Windows documentation pointer.
+CI now retains build artifacts even if tests fail and checks the executable's
+embedded source SHA. It does not suppress these tests or convert failures into
+allowed failures.
+
+The final build/test candidate is `637723da86b3ea42aadf9e12047258a4499d361c`:
+[34150504250](https://github.com/tanishqkancharla/cua/actions/runs/34150504250).
+The diagnostic GUI evidence above is from the initial SHA, not this later SHA.
+Changes afterward are CI/evidence handling, a contract test assertion,
+platform-aware test fixtures (including Windows canonical verbatim paths), and
+a shorter Windows instruction pointer. No
+native input implementation changed, and no full parity certification is claimed.
+
+Windows native E2E also passed at the initial source SHA: 39 delivered actions,
+four expected refusals, zero failures, and zero skips. The interactive-session,
+UIA/capture preflight and video checks passed. WPF, WinUI3, WebView2, Electron,
+launch, and cursor evidence is in the
+[Windows native artifact](https://github.com/tanishqkancharla/cua/actions/runs/34149118620/artifacts/10029180653).
+The initial workflow run is red because of its stale unit assertion; both
+independent desktop jobs are green. Do not summarize the entire initial run as
+passing.
+
+Final build/unit result: **all three jobs passed**, with zero test failures or
+ignored tests in the selected suites:
+
+| Hosted platform | Driver binary unit | Contract unit | Core unit | Offline source identity |
+| --- | ---: | ---: | ---: | --- |
+| Ubuntu 24.04 | 188 | 33 | 609 | Exact candidate verified |
+| Windows 2025 | 180 | 33 | 604 | Exact candidate verified |
+| macOS 26 | 192 | 33 | 608 | Exact candidate verified |
+
+The final run retains one development binary and logs per platform. Desktop
+jobs in that build-only run are intentionally unselected; use the two independent
+native jobs in the initial diagnostic run for GUI evidence. This record is a
+documentation-only addition after the tested commit; it does not recertify other
+source revisions or the deferred SDK/driver capability work.
