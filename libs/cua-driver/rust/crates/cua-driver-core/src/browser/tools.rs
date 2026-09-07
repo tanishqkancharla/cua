@@ -1307,12 +1307,26 @@ impl Tool for BrowserClickTool {
                     "Runtime.callFunctionOn",
                     json!({
                         "objectId": object_id,
-                        "functionDeclaration": "function() { this.click(); }",
+                        // CDP can resolve detached nodes. Check attachment in the
+                        // same JS turn as dispatch so a retained stale object
+                        // cannot activate its handler after leaving the document.
+                        "functionDeclaration": "function() { if (!this.isConnected) return false; this.click(); return true; }",
+                        "returnByValue": true,
                     }),
                 )
                 .await
             {
-                Ok(_) => ToolResult::text(format!(
+                Ok(value) if value.get("exceptionDetails").is_some() => ToolResult::error(
+                    "DOM click raised an exception; delivery is unknown. Refresh page state before deciding what to do next; do not replay automatically.",
+                ),
+                Ok(value) if value.pointer("/result/value") == Some(&Value::Bool(false)) => {
+                    BrowserRefusal::new(
+                        BrowserRefusalCode::BrowserRefStale,
+                        "the ref's node is detached from the live document; no click was dispatched",
+                    )
+                    .to_tool_result()
+                }
+                Ok(value) if value.pointer("/result/value") == Some(&Value::Bool(true)) => ToolResult::text(format!(
                     "dispatched synthetic DOM click on {} in {tab_id}; application effect not \
                      verified (trust-gated controls may ignore untrusted events). Refresh page \
                      state and verify the expected postcondition",
@@ -1331,6 +1345,9 @@ impl Tool for BrowserClickTool {
                         "reason": "synthetic DOM dispatch cannot prove control activation; refresh page state and verify the expected postcondition",
                     },
                 })),
+                Ok(_) => ToolResult::error(
+                    "DOM click returned no delivery receipt; delivery is unknown. Refresh page state before deciding what to do next; do not replay automatically.",
+                ),
                 Err(e) => ToolResult::error(format!("DOM click failed: {e}")),
             };
         }

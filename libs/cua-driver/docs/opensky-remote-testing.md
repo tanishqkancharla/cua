@@ -116,3 +116,23 @@ jobs in that build-only run are intentionally unselected; use the two independen
 native jobs in the initial diagnostic run for GUI evidence. This record is a
 documentation-only addition after the tested commit; it does not recertify other
 source revisions or the deferred SDK/driver capability work.
+
+## SDK consumer regression found on Linux (2026-09-07)
+
+The first public SDK run [34159847059](https://github.com/tanishqkancharla/opensky/actions/runs/34159847059)
+used driver `637723da86b3ea42aadf9e12047258a4499d361c` and SDK `a4330d5`.
+STALE-B01 failed: a detached button retained by CDP still received a DOM click,
+and the public final AX state showed `Discarded: 1`. Node resolution proved an
+object still existed, not that a consumer could still interact with it. The
+shared DOM click path now checks `isConnected` and dispatches in one JavaScript
+turn, reports detached nodes as stale without input, and distinguishes a receipt
+from unknown delivery. The existing SDK scenario is the real regression test;
+this fix is pending an exact-build rerun. It applies to the shared Chromium path;
+Linux SDK evidence does not certify macOS/Windows GUI behavior.
+
+SCROLL-B01 also failed before dispatch. Linux explicitly refuses standalone
+trusted CDP input because it can activate the browser window, violating its
+background-delivery contract. This is not fixed by switching to synthetic wheel
+events or silently activating a window. A foreground-authorized route or a
+proven background input implementation remains required. This first lane keeps
+the positive scroll expectation failing until that capability is implemented.
