@@ -294,13 +294,13 @@ fn large_semantic_ax_tree(frame_id: &str) -> Value {
             "childIds": []
         }]});
     }
-    let mut child_ids = vec![
+    let child_ids = vec![
         "heading".to_owned(),
         "body".to_owned(),
         "editor".to_owned(),
         "reply".to_owned(),
+        "archive-list".to_owned(),
     ];
-    child_ids.extend((0..305).map(|id| format!("archive-{id}")));
     let mut nodes = vec![
         json!({
             "nodeId": "root-main",
@@ -354,11 +354,19 @@ fn large_semantic_ax_tree(frame_id: &str) -> Value {
             ],
             "childIds": []
         }),
+        json!({
+            "nodeId": "archive-list",
+            "parentId": "root-main",
+            "ignored": false,
+            "role": {"value": "list"},
+            "name": {"value": "Archive"},
+            "childIds": (0..305).map(|id| format!("archive-{id}")).collect::<Vec<_>>()
+        }),
     ];
     for id in 0..305_i64 {
         nodes.push(json!({
             "nodeId": format!("archive-{id}"),
-            "parentId": "root-main",
+            "parentId": "archive-list",
             "ignored": false,
             "backendDOMNodeId": 3_000 + id,
             "role": {"value": "button"},
@@ -1675,17 +1683,30 @@ async fn semantic_continuation_is_opaque_single_use_and_reaches_offscreen_conten
 async fn newer_semantic_snapshot_invalidates_prior_continuations() {
     let f = fixture_with(|st| st.semantic_large_page = true).await;
     let (target, tab) = bind(&f).await;
-    let first = semantic_snapshot(&f, &target, &tab).await;
+    let first = semantic_snapshot_with(&f, &target, &tab, json!({"query": ""})).await;
     let token = first["snapshot"]["continuation"]
         .as_str()
         .expect("large fixture continuation")
         .to_owned();
+    let context_token = first["query_contexts"]
+        .as_array()
+        .and_then(|contexts| {
+            contexts.iter().find_map(|context| {
+                context["after_continuation"]
+                    .as_str()
+                    .or_else(|| context["before_continuation"].as_str())
+            })
+        })
+        .expect("bounded query context continuation")
+        .to_owned();
     let newer = semantic_snapshot(&f, &target, &tab).await;
     assert_eq!(newer["status"], "ok", "{newer}");
 
-    let stale = semantic_snapshot_with(&f, &target, &tab, json!({"continuation": token})).await;
-    assert_eq!(stale["status"], "refused", "{stale}");
-    assert_eq!(stale["refusal"]["code"], "browser_ref_stale");
+    for token in [token, context_token] {
+        let stale = semantic_snapshot_with(&f, &target, &tab, json!({"continuation": token})).await;
+        assert_eq!(stale["status"], "refused", "{stale}");
+        assert_eq!(stale["refusal"]["code"], "browser_ref_stale");
+    }
 }
 
 #[tokio::test]
@@ -1746,6 +1767,471 @@ async fn semantic_query_and_content_scope_are_read_only_and_precise() {
     assert_eq!(scoped["content_refs"][0]["name"], "Visible message");
     assert!(recorded_calls(&f, "Page.bringToFront").is_empty());
     assert!(recorded_calls(&f, "Target.activateTarget").is_empty());
+}
+
+#[tokio::test]
+async fn semantic_context_reuses_exact_snapshot_without_recollection_or_action_inflation() {
+    let f = fixture_with(|st| st.semantic_large_page = true).await;
+    let (target, tab) = bind(&f).await;
+    let queried = semantic_snapshot_with(
+        &f,
+        &target,
+        &tab,
+        json!({"query": "reply body archive 304"}),
+    )
+    .await;
+    let anchor = queried["refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["name"] == "Archive item 304")
+        .and_then(|entry| entry["ref"].as_str())
+        .unwrap()
+        .to_owned();
+    let anchor_actions = queried["refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["ref"] == anchor)
+        .map(|entry| entry["actions"].clone())
+        .unwrap();
+    let prior_action = queried["refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["name"] == "Reply body")
+        .and_then(|entry| entry["ref"].as_str())
+        .unwrap()
+        .to_owned();
+    let snapshot_id = queried["snapshot"]["id"].clone();
+    let collections_before = recorded_calls(&f, "Accessibility.getFullAXTree").len();
+
+    let (context, concurrent_context) = tokio::join!(
+        semantic_snapshot_with(&f, &target, &tab, json!({"context_ref": anchor})),
+        semantic_snapshot_with(&f, &target, &tab, json!({"context_ref": anchor}))
+    );
+
+    assert_eq!(context["status"], "ok", "{context}");
+    assert_eq!(concurrent_context["status"], "ok", "{concurrent_context}");
+    assert_eq!(
+        context["context"]["group_ref"], concurrent_context["context"]["group_ref"],
+        "concurrent context calls must reuse the same stored content ref"
+    );
+    assert_eq!(context["snapshot"]["id"], snapshot_id);
+    assert_eq!(context["snapshot"]["scope"], "context");
+    assert_eq!(context["snapshot"]["continuation"], Value::Null);
+    assert_eq!(context["context"]["anchor_ref"], anchor);
+    assert_eq!(context["context"]["virtualized_extent"], "unknown");
+    assert_eq!(context["context"]["after_omitted"], 0);
+    assert!(context["context"]["before_omitted"].as_u64().unwrap() > 0);
+    assert_eq!(context["context"]["group_complete"], false);
+    assert_eq!(context["context"]["document_collection_complete"], true);
+    assert_eq!(
+        context["context"]["member_projection"],
+        "semantic_evidence_v1"
+    );
+    assert_eq!(
+        context["context"]["before_omitted"].as_u64().unwrap()
+            + context["context"]["member_refs"].as_array().unwrap().len() as u64
+            + context["context"]["after_omitted"].as_u64().unwrap()
+            + context["context"]["projected_out_nodes"].as_u64().unwrap(),
+        context["context"]["source_member_nodes"].as_u64().unwrap()
+    );
+    let parent_group_ref = context["context"]["parent_group_ref"]
+        .as_str()
+        .expect("nested list must expose its enclosing document group")
+        .to_owned();
+    let response_refs = context["refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(context["content_refs"].as_array().unwrap())
+        .collect::<Vec<_>>();
+    assert!(response_refs.iter().any(|entry| entry["ref"] == anchor));
+    let returned_anchor = response_refs
+        .iter()
+        .find(|entry| entry["ref"] == anchor)
+        .unwrap();
+    assert_eq!(
+        returned_anchor["actions"], anchor_actions,
+        "an actually issued action ref retains its exact declared capability"
+    );
+    assert!(response_refs
+        .iter()
+        .any(|entry| entry["ref"] == context["context"]["group_ref"]));
+    assert!(response_refs
+        .iter()
+        .any(|entry| entry["ref"] == parent_group_ref));
+    assert!(response_refs.iter().all(|entry| entry["frame"] == "main"));
+    assert!(
+        context["content_refs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry["actions"] == json!([])),
+        "content-only refs must not advertise source-node action hints"
+    );
+    assert_eq!(
+        recorded_calls(&f, "Accessibility.getFullAXTree").len(),
+        collections_before,
+        "context must only read the stored semantic document"
+    );
+    let outline = context["outline"].as_str().unwrap();
+    assert!(
+        outline.find("Archive item 296") < outline.find("Archive item 304"),
+        "context outline must retain source order: {outline}"
+    );
+
+    let group_ref = context["context"]["group_ref"].as_str().unwrap();
+    let from_group =
+        semantic_snapshot_with(&f, &target, &tab, json!({"context_ref": group_ref})).await;
+    assert_eq!(from_group["status"], "ok", "{from_group}");
+    assert_eq!(from_group["context"]["group_ref"], group_ref);
+    assert_eq!(
+        from_group["context"]["order_domain"], context["context"]["order_domain"],
+        "same stored snapshot and exact frame must retain one opaque order domain"
+    );
+    assert_eq!(from_group["context"]["before_omitted"], 0);
+    let emitted = from_group["refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(from_group["content_refs"].as_array().unwrap())
+        .filter_map(|entry| entry["ref"].as_str())
+        .collect::<Vec<_>>();
+    let unique = emitted
+        .iter()
+        .copied()
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(
+        emitted.len(),
+        unique.len(),
+        "duplicate context refs: {from_group}"
+    );
+    assert_eq!(
+        emitted.iter().filter(|value| **value == group_ref).count(),
+        1
+    );
+    let from_parent =
+        semantic_snapshot_with(&f, &target, &tab, json!({"context_ref": parent_group_ref})).await;
+    assert_eq!(from_parent["status"], "ok", "{from_parent}");
+    assert_eq!(from_parent["context"]["group_ref"], parent_group_ref);
+    assert!(from_parent["context"]["parent_group_ref"].is_null());
+    assert_eq!(from_parent["context"]["before_omitted"], 0);
+    assert_eq!(
+        from_parent["context"]["order_domain"],
+        context["context"]["order_domain"]
+    );
+
+    let mutation = BrowserClickTool::new(f.engine.clone())
+        .invoke(json!({
+            "target_id": target,
+            "tab_id": tab,
+            "session": SESSION,
+            "ref": group_ref,
+        }))
+        .await;
+    assert_eq!(
+        structured(&mutation)["refusal"]["code"],
+        "browser_ref_stale",
+        "context-only structural refs never enter mutation resolution"
+    );
+    let scoped = semantic_snapshot_with(&f, &target, &tab, json!({"scope_ref": group_ref})).await;
+    assert_eq!(scoped["refusal"]["code"], "browser_ref_stale");
+
+    // The originally-issued action ref remains valid after context extension.
+    let typed = BrowserTypeTool::new(f.engine.clone())
+        .invoke(json!({
+            "target_id": target,
+            "tab_id": tab,
+            "session": SESSION,
+            "ref": prior_action,
+            "text": "retained authority",
+        }))
+        .await;
+    assert_eq!(structured(&typed)["status"], "ok", "{}", structured(&typed));
+}
+
+#[tokio::test]
+async fn semantic_query_emits_read_only_context_and_pages_it_without_recollection() {
+    let f = fixture_with(|st| st.semantic_large_page = true).await;
+    let (target, tab) = bind(&f).await;
+    let queried = semantic_snapshot_with(
+        &f,
+        &target,
+        &tab,
+        json!({"query": "reply body archive 304"}),
+    )
+    .await;
+    let collections_after_query = recorded_calls(&f, "Accessibility.getFullAXTree").len();
+    assert_eq!(queried["status"], "ok", "{queried}");
+    assert_eq!(queried["snapshot"]["scope"], "query");
+    let contexts = queried["query_contexts"]
+        .as_array()
+        .expect("automatic query contexts");
+    assert!(!contexts.is_empty(), "{queried}");
+    assert!(contexts.len() <= super::semantic::QUERY_CONTEXT_MAX_BLOCKS);
+    assert!(
+        contexts
+            .iter()
+            .map(|context| context["member_refs"].as_array().unwrap().len())
+            .sum::<usize>()
+            <= super::semantic::QUERY_CONTEXT_MAX_NODES
+    );
+    assert!(
+        contexts
+            .iter()
+            .map(|context| context["outline"].as_str().unwrap().len())
+            .sum::<usize>()
+            <= super::semantic::QUERY_CONTEXT_OUTLINE_MAX_BYTES
+    );
+    assert!(
+        contexts
+            .iter()
+            .flat_map(|context| {
+                ["before_continuation", "after_continuation"]
+                    .into_iter()
+                    .filter_map(|field| context[field].as_str())
+            })
+            .count()
+            <= super::semantic::QUERY_CONTEXT_MAX_BLOCKS * 2
+    );
+    let block = &contexts[0];
+    for context in contexts {
+        assert_eq!(context["member_projection"], "semantic_evidence_v1");
+        assert_eq!(
+            context["before_omitted"].as_u64().unwrap()
+                + context["member_refs"].as_array().unwrap().len() as u64
+                + context["after_omitted"].as_u64().unwrap()
+                + context["projected_out_nodes"].as_u64().unwrap(),
+            context["source_member_nodes"].as_u64().unwrap()
+        );
+    }
+    let union = queried["refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(queried["content_refs"].as_array().unwrap())
+        .collect::<Vec<_>>();
+    for field in ["anchor_ref", "group_ref", "parent_group_ref"] {
+        if let Some(reference) = block[field].as_str() {
+            assert!(
+                union.iter().any(|entry| entry["ref"] == reference),
+                "missing {field}: {queried}"
+            );
+        }
+    }
+    for reference in block["member_refs"].as_array().unwrap() {
+        assert!(
+            union.iter().any(|entry| entry["ref"] == *reference),
+            "{queried}"
+        );
+    }
+    assert!(
+        queried["content_refs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry["actions"] == json!([])),
+        "context additions must stay read-only: {queried}"
+    );
+    let token = block["after_continuation"]
+        .as_str()
+        .or_else(|| block["before_continuation"].as_str())
+        .expect("large group must provide a bounded context continuation")
+        .to_owned();
+    let continued = semantic_snapshot_with(&f, &target, &tab, json!({"continuation": token})).await;
+    assert_eq!(continued["status"], "ok", "{continued}");
+    assert_eq!(continued["snapshot"]["id"], queried["snapshot"]["id"]);
+    assert_eq!(continued["snapshot"]["scope"], "context");
+    assert!(continued["context"]["member_refs"]
+        .as_array()
+        .is_some_and(|refs| !refs.is_empty()));
+    assert_eq!(
+        recorded_calls(&f, "Accessibility.getFullAXTree").len(),
+        collections_after_query,
+        "context continuation must not recollect"
+    );
+    let reused = semantic_snapshot_with(&f, &target, &tab, json!({"continuation": token})).await;
+    assert_eq!(
+        reused["status"], "refused",
+        "context continuation is single use: {reused}"
+    );
+}
+
+#[tokio::test]
+async fn query_match_continuation_reemits_every_context_ref_exactly_once() {
+    let f = fixture_with(|st| st.semantic_large_page = true).await;
+    let (target, tab) = bind(&f).await;
+    let first = semantic_snapshot_with(&f, &target, &tab, json!({"query": ""})).await;
+    let token = first["snapshot"]["continuation"]
+        .as_str()
+        .expect("large queried fixture continuation")
+        .to_owned();
+    let continued = semantic_snapshot_with(&f, &target, &tab, json!({"continuation": token})).await;
+    assert_eq!(continued["status"], "ok", "{continued}");
+    assert_eq!(continued["snapshot"]["scope"], "continuation");
+
+    let union = continued["refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(continued["content_refs"].as_array().unwrap())
+        .filter_map(|entry| entry["ref"].as_str())
+        .collect::<Vec<_>>();
+    let unique = union
+        .iter()
+        .copied()
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(union.len(), unique.len(), "duplicate refs: {continued}");
+    for context in continued["query_contexts"].as_array().unwrap() {
+        for field in ["anchor_ref", "group_ref", "parent_group_ref"] {
+            if let Some(reference) = context[field].as_str() {
+                assert!(unique.contains(reference), "missing {field}: {continued}");
+            }
+        }
+        for reference in context["member_refs"].as_array().unwrap() {
+            assert!(
+                reference
+                    .as_str()
+                    .is_some_and(|value| unique.contains(value)),
+                "missing context member: {continued}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn semantic_context_rejects_mixed_or_unissued_requests_without_collection() {
+    let f = fixture_with(|st| st.semantic_large_page = true).await;
+    let (target, tab) = bind(&f).await;
+    let before = recorded_calls(&f, "Accessibility.getFullAXTree").len();
+    for extra in [
+        json!({"context_ref": "p999999:0", "query": "Reply"}),
+        json!({"context_ref": "p999999:0", "include_screenshot": true}),
+        json!({"continuation": "bcc-unissued", "include_screenshot": true}),
+    ] {
+        let mut args = json!({
+            "target_id": target,
+            "tab_id": tab,
+            "session": SESSION,
+            "snapshot_format": "semantic_v2"
+        });
+        args.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        assert_eq!(
+            GetBrowserStateTool::new(f.engine.clone())
+                .invoke(args)
+                .await
+                .is_error,
+            Some(true)
+        );
+    }
+    let unissued =
+        semantic_snapshot_with(&f, &target, &tab, json!({"context_ref": "p999999:0"})).await;
+    assert_eq!(unissued["refusal"]["code"], "browser_ref_stale");
+    assert_eq!(
+        recorded_calls(&f, "Accessibility.getFullAXTree").len(),
+        before
+    );
+}
+
+#[tokio::test]
+async fn semantic_context_and_continuation_reserve_disjoint_refs_atomically() {
+    let f = fixture_with(|st| st.semantic_large_page = true).await;
+    let (target, tab) = bind(&f).await;
+    let first = semantic_snapshot(&f, &target, &tab).await;
+    let token = first["snapshot"]["continuation"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let anchor = first["refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["name"] == "Reply")
+        .and_then(|entry| entry["ref"].as_str())
+        .unwrap()
+        .to_owned();
+
+    let (context, continuation) = tokio::join!(
+        semantic_snapshot_with(&f, &target, &tab, json!({"context_ref": anchor})),
+        semantic_snapshot_with(&f, &target, &tab, json!({"continuation": token}))
+    );
+
+    assert_eq!(context["status"], "ok", "{context}");
+    assert_eq!(continuation["status"], "ok", "{continuation}");
+    let context_refs = context["refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(context["content_refs"].as_array().unwrap())
+        .filter_map(|entry| entry["ref"].as_str())
+        .collect::<std::collections::HashSet<_>>();
+    let continued_refs = continuation["refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(continuation["content_refs"].as_array().unwrap())
+        .filter_map(|entry| entry["ref"].as_str())
+        .collect::<std::collections::HashSet<_>>();
+    assert!(
+        context_refs.is_disjoint(&continued_refs),
+        "concurrent extensions must never mint an overlapping ref index"
+    );
+}
+
+#[tokio::test]
+async fn semantic_context_keeps_exact_frame_domains_and_detaches_oopif_validation() {
+    let f = fixture_with(|st| st.semantic_large_page = true).await;
+    let (target, tab) = bind(&f).await;
+    let queried =
+        semantic_snapshot_with(&f, &target, &tab, json!({"query": "Reply Embedded input"})).await;
+    let named_ref = |name: &str| {
+        queried["refs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["name"] == name)
+            .and_then(|entry| entry["ref"].as_str())
+            .unwrap()
+            .to_owned()
+    };
+    let main_ref = named_ref("Reply");
+    let oopif_ref = named_ref("Embedded input");
+    let collections_before = recorded_calls(&f, "Accessibility.getFullAXTree").len();
+    let detaches_before = recorded_calls(&f, "Target.detachFromTarget").len();
+
+    let main = semantic_snapshot_with(&f, &target, &tab, json!({"context_ref": main_ref})).await;
+    let oopif = semantic_snapshot_with(&f, &target, &tab, json!({"context_ref": oopif_ref})).await;
+
+    assert_eq!(main["status"], "ok", "{main}");
+    assert_eq!(oopif["status"], "ok", "{oopif}");
+    assert_ne!(
+        main["context"]["order_domain"], oopif["context"]["order_domain"],
+        "distinct exact frame authorities require distinct order domains"
+    );
+    assert!(main["refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(main["content_refs"].as_array().unwrap())
+        .all(|entry| entry["frame"] == "main"));
+    assert!(oopif["refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(oopif["content_refs"].as_array().unwrap())
+        .all(|entry| entry["frame"] == "oopif"));
+    assert_eq!(
+        recorded_calls(&f, "Accessibility.getFullAXTree").len(),
+        collections_before
+    );
+    assert!(
+        recorded_calls(&f, "Target.detachFromTarget").len() > detaches_before,
+        "read-only OOPIF revalidation must tear down its temporary child sessions"
+    );
 }
 
 #[tokio::test]
