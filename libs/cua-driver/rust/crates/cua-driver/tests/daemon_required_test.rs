@@ -57,7 +57,7 @@ fn embedded_mcp_does_not_fall_back_without_daemon() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("no Cua Driver daemon listening"),
+        stderr.contains("no OpenSky Driver daemon listening"),
         "unexpected stderr: {stderr}"
     );
 }

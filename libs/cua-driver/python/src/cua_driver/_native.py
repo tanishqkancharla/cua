@@ -524,6 +524,8 @@ def _uniffi_check_api_checksums(lib):
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_cua_driver_sdk_checksum_method_cuadriver_clipboard_write() != 8399:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_cua_driver_sdk_checksum_method_cuadriver_close_window() != 48168:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_cua_driver_sdk_checksum_method_cuadriver_drag() != 25742:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_cua_driver_sdk_checksum_method_cuadriver_end_session() != 18486:
@@ -593,6 +595,8 @@ def _uniffi_check_api_checksums(lib):
     if lib.uniffi_cua_driver_sdk_checksum_method_cuadriversession_clipboard_write() != 45732:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_cua_driver_sdk_checksum_method_cuadriversession_close() != 58108:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_cua_driver_sdk_checksum_method_cuadriversession_close_window() != 39626:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_cua_driver_sdk_checksum_method_cuadriversession_drag() != 5854:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
@@ -1135,6 +1139,11 @@ _UniffiLib.uniffi_cua_driver_sdk_fn_method_cuadriver_clipboard_write.argtypes = 
     cua_driver._native_contract._UniffiRustBuffer,
 )
 _UniffiLib.uniffi_cua_driver_sdk_fn_method_cuadriver_clipboard_write.restype = ctypes.c_uint64
+_UniffiLib.uniffi_cua_driver_sdk_fn_method_cuadriver_close_window.argtypes = (
+    ctypes.c_uint64,
+    cua_driver._native_contract._UniffiRustBuffer,
+)
+_UniffiLib.uniffi_cua_driver_sdk_fn_method_cuadriver_close_window.restype = ctypes.c_uint64
 _UniffiLib.uniffi_cua_driver_sdk_fn_method_cuadriver_drag.argtypes = (
     ctypes.c_uint64,
     cua_driver._native_contract._UniffiRustBuffer,
@@ -1307,6 +1316,11 @@ _UniffiLib.uniffi_cua_driver_sdk_fn_method_cuadriversession_close.argtypes = (
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_cua_driver_sdk_fn_method_cuadriversession_close.restype = None
+_UniffiLib.uniffi_cua_driver_sdk_fn_method_cuadriversession_close_window.argtypes = (
+    ctypes.c_uint64,
+    cua_driver._native_contract._UniffiRustBuffer,
+)
+_UniffiLib.uniffi_cua_driver_sdk_fn_method_cuadriversession_close_window.restype = ctypes.c_uint64
 _UniffiLib.uniffi_cua_driver_sdk_fn_method_cuadriversession_drag.argtypes = (
     ctypes.c_uint64,
     cua_driver._native_contract._UniffiRustBuffer,
@@ -1535,6 +1549,9 @@ _UniffiLib.uniffi_cua_driver_sdk_checksum_method_cuadriver_clipboard_read.restyp
 _UniffiLib.uniffi_cua_driver_sdk_checksum_method_cuadriver_clipboard_write.argtypes = (
 )
 _UniffiLib.uniffi_cua_driver_sdk_checksum_method_cuadriver_clipboard_write.restype = ctypes.c_uint16
+_UniffiLib.uniffi_cua_driver_sdk_checksum_method_cuadriver_close_window.argtypes = (
+)
+_UniffiLib.uniffi_cua_driver_sdk_checksum_method_cuadriver_close_window.restype = ctypes.c_uint16
 _UniffiLib.uniffi_cua_driver_sdk_checksum_method_cuadriver_drag.argtypes = (
 )
 _UniffiLib.uniffi_cua_driver_sdk_checksum_method_cuadriver_drag.restype = ctypes.c_uint16
@@ -1640,6 +1657,9 @@ _UniffiLib.uniffi_cua_driver_sdk_checksum_method_cuadriversession_clipboard_writ
 _UniffiLib.uniffi_cua_driver_sdk_checksum_method_cuadriversession_close.argtypes = (
 )
 _UniffiLib.uniffi_cua_driver_sdk_checksum_method_cuadriversession_close.restype = ctypes.c_uint16
+_UniffiLib.uniffi_cua_driver_sdk_checksum_method_cuadriversession_close_window.argtypes = (
+)
+_UniffiLib.uniffi_cua_driver_sdk_checksum_method_cuadriversession_close_window.restype = ctypes.c_uint16
 _UniffiLib.uniffi_cua_driver_sdk_checksum_method_cuadriversession_drag.argtypes = (
 )
 _UniffiLib.uniffi_cua_driver_sdk_checksum_method_cuadriversession_drag.restype = ctypes.c_uint16
@@ -4257,6 +4277,8 @@ class _UniffiFfiConverterTypeSdkClientKind(_UniffiConverterRustBuffer):
 
 
 
+
+
 class CuaDriverProtocol(typing.Protocol):
 
     async def call_tool(self, name: str,arguments_json: str) -> ToolResult:
@@ -4271,6 +4293,8 @@ class CuaDriverProtocol(typing.Protocol):
     async def clipboard_read(self, input: cua_driver._native_contract.ClipboardReadInput) -> ToolResult:
         raise NotImplementedError
     async def clipboard_write(self, input: cua_driver._native_contract.ClipboardWriteInput) -> ToolResult:
+        raise NotImplementedError
+    async def close_window(self, input: cua_driver._native_contract.CloseWindowInput) -> ToolResult:
         raise NotImplementedError
     async def drag(self, input: cua_driver._native_contract.DragInput) -> ToolResult:
         raise NotImplementedError
@@ -4758,6 +4782,23 @@ class CuaDriver(CuaDriverProtocol):
         _uniffi_error_converter = _UniffiFfiConverterTypeDriverError
         return await _uniffi_rust_call_async(
             _UniffiLib.uniffi_cua_driver_sdk_fn_method_cuadriver_clipboard_write(*_uniffi_lowered_args),
+            _UniffiLib.ffi_cua_driver_sdk_rust_future_poll_rust_buffer,
+            _UniffiLib.ffi_cua_driver_sdk_rust_future_complete_rust_buffer,
+            _UniffiLib.ffi_cua_driver_sdk_rust_future_free_rust_buffer,
+            _uniffi_lift_return,
+            _uniffi_error_converter,
+        )
+    async def close_window(self, input: cua_driver._native_contract.CloseWindowInput) -> ToolResult:
+
+        cua_driver._native_contract._UniffiFfiConverterTypeCloseWindowInput.check_lower(input)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            cua_driver._native_contract._UniffiFfiConverterTypeCloseWindowInput.lower(input),
+        )
+        _uniffi_lift_return = _UniffiFfiConverterTypeToolResult.lift
+        _uniffi_error_converter = _UniffiFfiConverterTypeDriverError
+        return await _uniffi_rust_call_async(
+            _UniffiLib.uniffi_cua_driver_sdk_fn_method_cuadriver_close_window(*_uniffi_lowered_args),
             _UniffiLib.ffi_cua_driver_sdk_rust_future_poll_rust_buffer,
             _UniffiLib.ffi_cua_driver_sdk_rust_future_complete_rust_buffer,
             _UniffiLib.ffi_cua_driver_sdk_rust_future_free_rust_buffer,
@@ -5307,6 +5348,8 @@ class CuaDriverSessionProtocol(typing.Protocol):
         cleanup, but trusted hosts should call it at their lifecycle boundary.
 """
         raise NotImplementedError
+    async def close_window(self, input: cua_driver._native_contract.CloseWindowInput) -> ToolResult:
+        raise NotImplementedError
     async def drag(self, input: cua_driver._native_contract.DragInput) -> ToolResult:
         raise NotImplementedError
     async def end_session(self, input: cua_driver._native_contract.EndSessionInput) -> cua_driver._native_contract.EndSessionOutput:
@@ -5465,6 +5508,23 @@ class CuaDriverSession(CuaDriverSessionProtocol):
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
+    async def close_window(self, input: cua_driver._native_contract.CloseWindowInput) -> ToolResult:
+
+        cua_driver._native_contract._UniffiFfiConverterTypeCloseWindowInput.check_lower(input)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            cua_driver._native_contract._UniffiFfiConverterTypeCloseWindowInput.lower(input),
+        )
+        _uniffi_lift_return = _UniffiFfiConverterTypeToolResult.lift
+        _uniffi_error_converter = _UniffiFfiConverterTypeDriverError
+        return await _uniffi_rust_call_async(
+            _UniffiLib.uniffi_cua_driver_sdk_fn_method_cuadriversession_close_window(*_uniffi_lowered_args),
+            _UniffiLib.ffi_cua_driver_sdk_rust_future_poll_rust_buffer,
+            _UniffiLib.ffi_cua_driver_sdk_rust_future_complete_rust_buffer,
+            _UniffiLib.ffi_cua_driver_sdk_rust_future_free_rust_buffer,
+            _uniffi_lift_return,
+            _uniffi_error_converter,
+        )
     async def drag(self, input: cua_driver._native_contract.DragInput) -> ToolResult:
 
         cua_driver._native_contract._UniffiFfiConverterTypeDragInput.check_lower(input)

@@ -384,40 +384,34 @@ class TestCuaDriverReleaseWiring(unittest.TestCase):
         installer = self.read("libs/cua-driver/scripts/_install-local-rust.sh")
 
         self.assertIn(
-            'HOME_DIR="${CUA_DRIVER_LOCAL_HOME:-$HOME/.cua-driver-local}"',
+            'HOME_DIR="${CUA_DRIVER_LOCAL_HOME:-$HOME/.opensky-driver}"',
             installer,
         )
         self.assertNotIn("LEGACY_HOME_DIR", installer)
         self.assertNotIn(".cua-driver-rs", installer)
         self.assertNotIn('rm -rf "$HOME/.cua-driver"', installer)
 
-    def test_local_install_hints_name_the_local_permission_identity(self) -> None:
+    def test_local_install_hints_name_the_opensky_permission_identity(self) -> None:
         installer = self.read("libs/cua-driver/scripts/_install-local-rust.sh")
         shared_hints = self.read("libs/cua-driver/scripts/post-install-hints.txt")
 
-        self.assertIn('permission prompts say \\"Cua Driver Local\\"', installer)
-        self.assertNotIn('permission prompts say \\"Cua Driver\\"', installer)
-        self.assertIn("launches the installed", shared_hints)
-        self.assertNotIn("launches CuaDriver", shared_hints)
+        self.assertIn('permission prompts say \\"OpenSky Driver\\"', installer)
+        self.assertIn("grant to OpenSky Driver", shared_hints)
+        self.assertIn("{{BINARY}} permissions grant", shared_hints)
 
-    def test_post_install_hints_include_muse_stdio_mcp_config(self) -> None:
+    def test_post_install_hints_link_the_opensky_sdk_and_source(self) -> None:
         shared_hints = self.read("libs/cua-driver/scripts/post-install-hints.txt")
 
-        self.assertIn("Muse Code (macOS / Linux", shared_hints)
-        self.assertIn("$XDG_CONFIG_HOME/muse/settings.json", shared_hints)
-        self.assertIn('"mcp_servers": {', shared_hints)
-        self.assertIn('"transport": "stdio"', shared_hints)
-        self.assertIn('"command": "{{BINARY}}"', shared_hints)
-        self.assertIn('"args": ["mcp"]', shared_hints)
-        self.assertIn("MCP servers load at startup", shared_hints)
+        self.assertIn("https://github.com/tanishqkancharla/opensky", shared_hints)
+        self.assertIn("https://github.com/tanishqkancharla/cua", shared_hints)
+        self.assertIn("{{BINARY}} skills install", shared_hints)
 
-    def test_post_install_hints_use_canonical_capability_manifest_flags(self) -> None:
+    def test_post_install_hints_show_product_identity_and_sdk_diagnostics(self) -> None:
         shared_hints = self.read("libs/cua-driver/scripts/post-install-hints.txt")
 
-        self.assertIn("--capability-manifest", shared_hints)
-        self.assertIn("--approve-capability-manifest", shared_hints)
-        self.assertNotIn("--session-policy", shared_hints)
-        self.assertNotIn("--approve-session-policy", shared_hints)
+        self.assertIn("{{BINARY}} --version", shared_hints)
+        self.assertIn("{{BINARY}} --opensky-driver-identity", shared_hints)
+        self.assertIn("opensky doctor", shared_hints)
 
     def test_agent_sdk_examples_use_implicit_sessions_and_per_call_targets(self) -> None:
         example_dir = REPO_ROOT / "libs/cua-driver/examples/agent-sdks"

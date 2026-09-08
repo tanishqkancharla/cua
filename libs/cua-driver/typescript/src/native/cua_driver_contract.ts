@@ -997,6 +997,139 @@ const FfiConverterTypeClipboardWriteOutput = (() => {
     return new FFIConverter();
 })();
 
+/**
+ * Exact top-level window to close cooperatively through the operating
+ * system's accessibility/window-management API.
+ */
+export type CloseWindowInput = {
+    pid: number,
+    windowId: bigint,
+    /**
+     * For multi-call work, prefer a short public session label and repeat it on every call that
+     * accepts it. Omit it to use the authenticated transport's implicit lifecycle session.
+     */
+    session?: string
+}
+
+/**
+ * Generated factory for {@link CloseWindowInput} record objects.
+ */
+export const CloseWindowInput = (() => {
+    const defaults = () => ({
+    });
+    const create = (() => {
+        return uniffiCreateRecord<CloseWindowInput, ReturnType<typeof defaults>>(defaults);
+    })();
+    return Object.freeze({
+        create,
+        new: create,
+        defaults: () => Object.freeze(defaults()) as Partial<CloseWindowInput>,
+    });
+})();
+
+const FfiConverterTypeCloseWindowInput = (() => {
+    type TypeName = CloseWindowInput;
+    class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
+        read(from: RustBuffer): TypeName {
+            return {
+                pid: FfiConverterUInt32.read(from),
+                windowId: FfiConverterUInt64.read(from),
+                session: FfiConverterOptionalString.read(from)
+            };
+        }
+        write(value: TypeName, into: RustBuffer): void {
+            FfiConverterUInt32.write(value.pid, into);
+            FfiConverterUInt64.write(value.windowId, into);
+            FfiConverterOptionalString.write(value.session, into);
+        }
+        allocationSize(value: TypeName): number {
+            return FfiConverterUInt32.allocationSize(value.pid) +
+             FfiConverterUInt64.allocationSize(value.windowId) +
+             FfiConverterOptionalString.allocationSize(value.session);
+
+        }
+    };
+    return new FFIConverter();
+})();
+
+export enum CloseWindowStatus {
+    Closed
+}
+
+const FfiConverterTypeCloseWindowStatus = (() => {
+    const ordinalConverter = FfiConverterInt32;
+    type TypeName = CloseWindowStatus;
+    class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
+        read(from: RustBuffer): TypeName {
+            switch (ordinalConverter.read(from)) {
+                case 1: return CloseWindowStatus.Closed;
+                default: throw new UniffiInternalError.UnexpectedEnumCase();
+            }
+        }
+        write(value: TypeName, into: RustBuffer): void {
+            switch (value) {
+                case CloseWindowStatus.Closed: return ordinalConverter.write(1, into);
+            }
+        }
+        allocationSize(value: TypeName): number {
+            return ordinalConverter.allocationSize(0);
+        }
+    }
+    return new FFIConverter();
+})();
+
+/**
+ * Successful result of an exact cooperative window close. Refused, missing,
+ * disabled, ambiguous, no-op, and confirmation-required outcomes use the
+ * standard typed refusal envelope instead.
+ */
+export type CloseWindowOutput = {
+    status: CloseWindowStatus,
+    pid: number,
+    windowId: bigint
+}
+
+/**
+ * Generated factory for {@link CloseWindowOutput} record objects.
+ */
+export const CloseWindowOutput = (() => {
+    const defaults = () => ({
+    });
+    const create = (() => {
+        return uniffiCreateRecord<CloseWindowOutput, ReturnType<typeof defaults>>(defaults);
+    })();
+    return Object.freeze({
+        create,
+        new: create,
+        defaults: () => Object.freeze(defaults()) as Partial<CloseWindowOutput>,
+    });
+})();
+
+const FfiConverterTypeCloseWindowOutput = (() => {
+    type TypeName = CloseWindowOutput;
+    class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
+        read(from: RustBuffer): TypeName {
+            return {
+                status: FfiConverterTypeCloseWindowStatus.read(from),
+                pid: FfiConverterUInt32.read(from),
+                windowId: FfiConverterUInt64.read(from)
+            };
+        }
+        write(value: TypeName, into: RustBuffer): void {
+            FfiConverterTypeCloseWindowStatus.write(value.status, into);
+            FfiConverterUInt32.write(value.pid, into);
+            FfiConverterUInt64.write(value.windowId, into);
+        }
+        allocationSize(value: TypeName): number {
+            return FfiConverterTypeCloseWindowStatus.allocationSize(value.status) +
+             FfiConverterUInt32.allocationSize(value.pid) +
+             FfiConverterUInt64.allocationSize(value.windowId);
+
+        }
+    };
+    return new FFIConverter();
+})();
+
 export type CursorMotionOutput = {
     startHandle: number,
     endHandle: number,
@@ -3878,6 +4011,9 @@ export default Object.freeze({
     FfiConverterTypeClipboardReadOutput,
     FfiConverterTypeClipboardWriteInput,
     FfiConverterTypeClipboardWriteOutput,
+    FfiConverterTypeCloseWindowInput,
+    FfiConverterTypeCloseWindowOutput,
+    FfiConverterTypeCloseWindowStatus,
     FfiConverterTypeCursorAction,
     FfiConverterTypeCursorMotionOutput,
     FfiConverterTypeCursorPointOutput,

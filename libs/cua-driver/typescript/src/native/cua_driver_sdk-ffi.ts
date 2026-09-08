@@ -433,6 +433,11 @@ const DEFINITIONS = {
       ret: FfiType.Handle,
       hasRustCallStatus: false,
     },
+    "uniffi_cua_driver_sdk_fn_method_cuadriver_close_window": {
+      args: [FfiType.Handle, FfiType.RustBuffer],
+      ret: FfiType.Handle,
+      hasRustCallStatus: false,
+    },
     "uniffi_cua_driver_sdk_fn_method_cuadriver_drag": {
       args: [FfiType.Handle, FfiType.RustBuffer],
       ret: FfiType.Handle,
@@ -607,6 +612,11 @@ const DEFINITIONS = {
       args: [FfiType.Handle],
       ret: FfiType.Void,
       hasRustCallStatus: true,
+    },
+    "uniffi_cua_driver_sdk_fn_method_cuadriversession_close_window": {
+      args: [FfiType.Handle, FfiType.RustBuffer],
+      ret: FfiType.Handle,
+      hasRustCallStatus: false,
     },
     "uniffi_cua_driver_sdk_fn_method_cuadriversession_drag": {
       args: [FfiType.Handle, FfiType.RustBuffer],
@@ -883,6 +893,11 @@ const DEFINITIONS = {
       ret: FfiType.UInt16,
       hasRustCallStatus: false,
     },
+    "uniffi_cua_driver_sdk_checksum_method_cuadriver_close_window": {
+      args: [],
+      ret: FfiType.UInt16,
+      hasRustCallStatus: false,
+    },
     "uniffi_cua_driver_sdk_checksum_method_cuadriver_drag": {
       args: [],
       ret: FfiType.UInt16,
@@ -1054,6 +1069,11 @@ const DEFINITIONS = {
       hasRustCallStatus: false,
     },
     "uniffi_cua_driver_sdk_checksum_method_cuadriversession_close": {
+      args: [],
+      ret: FfiType.UInt16,
+      hasRustCallStatus: false,
+    },
+    "uniffi_cua_driver_sdk_checksum_method_cuadriversession_close_window": {
       args: [],
       ret: FfiType.UInt16,
       hasRustCallStatus: false,
@@ -1373,6 +1393,7 @@ interface NativeModuleInterface {
     uniffi_cua_driver_sdk_fn_method_cuadriver_click(uniffiSelf: bigint, input: Uint8Array): bigint;
     uniffi_cua_driver_sdk_fn_method_cuadriver_clipboard_read(uniffiSelf: bigint, input: Uint8Array): bigint;
     uniffi_cua_driver_sdk_fn_method_cuadriver_clipboard_write(uniffiSelf: bigint, input: Uint8Array): bigint;
+    uniffi_cua_driver_sdk_fn_method_cuadriver_close_window(uniffiSelf: bigint, input: Uint8Array): bigint;
     uniffi_cua_driver_sdk_fn_method_cuadriver_drag(uniffiSelf: bigint, input: Uint8Array): bigint;
     uniffi_cua_driver_sdk_fn_method_cuadriver_end_session(uniffiSelf: bigint, input: Uint8Array): bigint;
     uniffi_cua_driver_sdk_fn_method_cuadriver_escalate_session(uniffiSelf: bigint, input: Uint8Array): bigint;
@@ -1408,6 +1429,7 @@ interface NativeModuleInterface {
     uniffi_cua_driver_sdk_fn_method_cuadriversession_clipboard_read(uniffiSelf: bigint, input: Uint8Array): bigint;
     uniffi_cua_driver_sdk_fn_method_cuadriversession_clipboard_write(uniffiSelf: bigint, input: Uint8Array): bigint;
     uniffi_cua_driver_sdk_fn_method_cuadriversession_close(uniffiSelf: bigint, uniffi_out_err: UniffiRustCallStatus): void;
+    uniffi_cua_driver_sdk_fn_method_cuadriversession_close_window(uniffiSelf: bigint, input: Uint8Array): bigint;
     uniffi_cua_driver_sdk_fn_method_cuadriversession_drag(uniffiSelf: bigint, input: Uint8Array): bigint;
     uniffi_cua_driver_sdk_fn_method_cuadriversession_end_session(uniffiSelf: bigint, input: Uint8Array): bigint;
     uniffi_cua_driver_sdk_fn_method_cuadriversession_escalate_session(uniffiSelf: bigint, input: Uint8Array): bigint;
@@ -1463,6 +1485,7 @@ interface NativeModuleInterface {
     uniffi_cua_driver_sdk_checksum_method_cuadriver_click(): number;
     uniffi_cua_driver_sdk_checksum_method_cuadriver_clipboard_read(): number;
     uniffi_cua_driver_sdk_checksum_method_cuadriver_clipboard_write(): number;
+    uniffi_cua_driver_sdk_checksum_method_cuadriver_close_window(): number;
     uniffi_cua_driver_sdk_checksum_method_cuadriver_drag(): number;
     uniffi_cua_driver_sdk_checksum_method_cuadriver_end_session(): number;
     uniffi_cua_driver_sdk_checksum_method_cuadriver_escalate_session(): number;
@@ -1498,6 +1521,7 @@ interface NativeModuleInterface {
     uniffi_cua_driver_sdk_checksum_method_cuadriversession_clipboard_read(): number;
     uniffi_cua_driver_sdk_checksum_method_cuadriversession_clipboard_write(): number;
     uniffi_cua_driver_sdk_checksum_method_cuadriversession_close(): number;
+    uniffi_cua_driver_sdk_checksum_method_cuadriversession_close_window(): number;
     uniffi_cua_driver_sdk_checksum_method_cuadriversession_drag(): number;
     uniffi_cua_driver_sdk_checksum_method_cuadriversession_end_session(): number;
     uniffi_cua_driver_sdk_checksum_method_cuadriversession_escalate_session(): number;
