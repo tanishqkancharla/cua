@@ -2108,9 +2108,7 @@ pub fn send_type_text_with_delay(xid: u64, text: &str, inter_char_ms: u64) -> Re
         // Resolve the keycode and whether Shift must be held — without it,
         // uppercase and shifted symbols would otherwise type their unshifted
         // form (e.g. "A" arriving as "a").
-        let Some((keycode, needs_shift)) = char_to_keycode_shift(&mapping, ch as u32) else {
-            continue;
-        };
+        let (keycode, needs_shift, _remapped) = text_keycode(&conn, &mapping, ch)?;
         let state = if needs_shift {
             KeyButMask::SHIFT
         } else {
@@ -2179,14 +2177,7 @@ pub fn send_type_text_xtest(text: &str) -> Result<()> {
         .and_then(|s| s.iter().copied().find(|&k| k != 0))
         .unwrap_or(50);
     for ch in text.chars() {
-        let cp = match ch {
-            '\n' => 0xff0d, // XK_Return
-            '\t' => 0xff09, // XK_Tab
-            c => c as u32,
-        };
-        let Some((keycode, needs_shift)) = char_to_keycode_shift(&mapping, cp) else {
-            continue;
-        };
+        let (keycode, needs_shift, _remapped) = text_keycode(&conn, &mapping, ch)?;
         if needs_shift {
             conn.xtest_fake_input(KEY_PRESS_EVENT, shift_kc, 0, x11rb::NONE, 0, 0, 0)?;
         }
@@ -2690,6 +2681,34 @@ fn key_name_to_keysym(key: &str) -> Result<u32> {
     Ok(keysym)
 }
 
+// X11 protocol appendix A: Latin-1 keysyms equal their codepoints; other
+// Unicode characters use the 0x01000000 offset. Keep Return/Tab as keys.
+fn text_keysym(ch: char) -> u32 {
+    match ch {
+        '\n' | '\r' => 0xff0d,
+        '\t' => 0xff09,
+        ch if (ch as u32) < 0x100 => ch as u32,
+        ch => 0x01000000 | ch as u32,
+    }
+}
+
+fn text_keycode<'a>(
+    conn: &'a RustConnection,
+    mapping: &GetKeyboardMappingReply,
+    ch: char,
+) -> Result<(u8, bool, Option<RemappedKeycode<'a>>)> {
+    let keysym = text_keysym(ch);
+    if let Some((code, shift)) = char_to_keycode_shift(mapping, keysym) {
+        return Ok((code, shift, None));
+    }
+    // A standard US layout has no direct key for most Unicode characters.
+    // Borrow an unused keycode and retain its restoration guard through event
+    // delivery. Never report success after silently omitting a character.
+    let guard = remap_spare_keycode(conn, mapping, keysym)
+        .with_context(|| format!("Cannot type character {ch:?} (U+{:04X})", ch as u32))?;
+    Ok((guard.keycode, false, Some(guard)))
+}
+
 /// A keycode we have *temporarily* rebound to host a keysym that is absent from
 /// the current X keyboard map (sparse/headless keymaps such as a minimal
 /// Xwayland). On drop it reinstates the keycode's original keysyms so the
@@ -2914,6 +2933,21 @@ mod path_tests {
         EVDEV_UINPUT_NAME_MAX_BYTES, UINPUT_POINTER_SUFFIX,
     };
     use x11rb::protocol::xproto::KeyButMask;
+
+    #[test]
+    fn text_keysyms_cover_latin1_unicode_and_control_keys() {
+        for (character, expected) in [
+            ('A', 0x41),
+            ('é', 0xe9),
+            ('—', 0x01002014),
+            ('中', 0x01004e2d),
+            ('😀', 0x0101f600),
+            ('\n', 0xff0d),
+            ('\t', 0xff09),
+        ] {
+            assert_eq!(super::text_keysym(character), expected);
+        }
+    }
 
     #[test]
     fn click_modifier_state_combines_canonical_names_and_aliases() {
