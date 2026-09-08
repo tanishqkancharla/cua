@@ -909,8 +909,11 @@ impl Tool for GetWindowStateTool {
                     // its existing integer `element_index`. The integer
                     // surface stays unchanged — the token is additive.
                     let snapshot_id = (!observation_only).then(|| {
-                        cua_driver_core::element_token::global()
-                            .register_snapshot(pid as i32, xid as u32, count)
+                        cua_driver_core::element_token::global().register_snapshot_indices(
+                            pid as i32,
+                            xid as u32,
+                            tr.nodes.iter().filter_map(|node| node.element_index),
+                        )
                     });
 
                     // Structured `elements` array: one entry per actionable node.
