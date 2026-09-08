@@ -2975,7 +2975,7 @@ impl Tool for ClickTool {
             // click (the agent's escalation when background didn't land).
             let inject = |fg: bool| -> anyhow::Result<&'static str> {
                 if !fg && button == 1 && count == 1 && modifiers_for_task.is_empty() {
-                    if let Ok(Some(_)) = crate::atspi::perform_action_at_point(pid, xi, yi) {
+                    if let Ok(Some(_)) = crate::atspi::perform_action_at_point(pid, xid, xi, yi) {
                         return Ok("x11_atspi");
                     }
                 }

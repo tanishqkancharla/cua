@@ -186,8 +186,13 @@ pub fn list_windows(filter_pid: Option<u32>) -> Vec<crate::x11::WindowInfo> {
 /// click on toolkits (GTK) that drop synthetic X11 pointer events. Returns
 /// `Ok(Some(action))` when an element was actuated, `Ok(None)` when no
 /// actionable element covers the point (caller falls back to the X11 path).
-pub fn perform_action_at_point(pid: u32, win_x: i32, win_y: i32) -> Result<Option<String>> {
-    native::perform_action_at_point(pid, win_x, win_y)
+pub fn perform_action_at_point(
+    pid: u32,
+    xid: u64,
+    win_x: i32,
+    win_y: i32,
+) -> Result<Option<String>> {
+    native::perform_action_at_point(pid, xid, win_x, win_y)
 }
 
 /// Resolve a *screen* pixel to the indexable element whose reconstructed screen

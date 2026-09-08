@@ -2100,13 +2100,22 @@ pub fn focus_element(pid: u32, idx: usize) -> Result<bool> {
 /// a click lands on the button, not its enclosing panel. Returns `Ok(Some(action))`
 /// when an element was actuated, `Ok(None)` when no actionable element covers the
 /// point (the caller then falls back to the synthetic X11 path).
-pub fn perform_action_at_point(pid: u32, win_x: i32, win_y: i32) -> Result<Option<String>> {
+pub fn perform_action_at_point(
+    pid: u32,
+    xid: u64,
+    win_x: i32,
+    win_y: i32,
+) -> Result<Option<String>> {
     bounded(
         async {
             let conn = shared_connection().await?;
-            let visited = match collect_visited(conn, pid).await? {
-                Some(v) => v,
-                None => return Ok(None),
+            // A process can expose overlapping local coordinates in several
+            // windows. Match the exact top-level from this same traversal before
+            // hit-testing; an unproven match cannot authorize another window.
+            let (visited, frame) = match collect_visited_bounded(conn, pid, xid, None, None).await?
+            {
+                Some((visited, Some(frame))) => (visited, frame),
+                _ => return Ok(None),
             };
             let web_document_origin = web_document_origin_for_visited(&visited, pid)
                 .await
@@ -2120,7 +2129,7 @@ pub fn perform_action_at_point(pid: u32, win_x: i32, win_y: i32) -> Result<Optio
             // children, but the area/role split is what actually disambiguates.
             let mut frames: Vec<(usize, i32, i32, u32, u32, bool)> = Vec::new();
             for (i, v) in visited.iter().enumerate() {
-                if v.actions.is_empty() || !v.has_component {
+                if v.frame_ordinal != frame || v.actions.is_empty() || !v.has_component {
                     continue;
                 }
                 let Some(Ok(proxies)) = call(v.acc.proxies()).await else {
@@ -2205,9 +2214,13 @@ pub fn perform_action_at_screen_point(
     bounded(
         async {
             let conn = shared_connection().await?;
-            let visited = match collect_visited(conn, pid).await? {
-                Some(v) => v,
-                None => return Ok(None),
+            // A process can expose overlapping local coordinates in several
+            // windows. Match the exact top-level from this same traversal before
+            // hit-testing; an unproven match cannot authorize another window.
+            let (visited, frame) = match collect_visited_bounded(conn, pid, xid, None, None).await?
+            {
+                Some((visited, Some(frame))) => (visited, frame),
+                _ => return Ok(None),
             };
             let web_document_origin = web_document_origin_for_visited(&visited, pid)
                 .await
@@ -2232,7 +2245,7 @@ pub fn perform_action_at_screen_point(
             let action_nodes: Vec<&Visited> = visited.iter().filter(|v| is_indexable(v)).collect();
             let mut frames: Vec<(usize, i32, i32, u32, u32, bool)> = Vec::new();
             for (idx, node) in action_nodes.iter().enumerate() {
-                if !node.has_component {
+                if node.frame_ordinal != frame || !node.has_component {
                     continue;
                 }
                 let Some(Ok(proxies)) = call(node.acc.proxies()).await else {
