@@ -3063,6 +3063,51 @@ impl Tool for ClickTool {
     }
 }
 
+/// Replace a selected range with genuine key input; never delete first and
+/// retry an uncertain partial insertion. Background refusal precedes all input.
+async fn type_selection_with_keys(
+    pid: u32,
+    xid: u64,
+    element_index: Option<usize>,
+    text: String,
+    foreground: bool,
+) -> ToolResult {
+    if !foreground {
+        return crate::input::delivery::background_unavailable_error(
+            crate::input::delivery::BackgroundUnavailable::FocusedInputOnly,
+        );
+    }
+    let text_len = text.chars().count();
+    let result = tokio::task::spawn_blocking(move || {
+        let inject = || -> anyhow::Result<()> {
+            if let Some(index) = element_index {
+                if !crate::atspi::focus_element(pid, index)? {
+                    anyhow::bail!("Could not focus selected element {index}; no text was sent");
+                }
+            }
+            if crate::wayland::wayland_input_enabled() {
+                crate::wayland::type_text_focused(&text)
+            } else {
+                crate::input::send_type_text_xtest(&text)
+            }
+        };
+        if crate::wayland::wayland_input_enabled() {
+            crate::wayland::with_target_foreground(pid, xid, inject)
+        } else {
+            crate::input::with_x11_foreground(xid, 80, inject)
+        }
+    })
+    .await;
+    match result {
+        Ok(Ok(())) => ToolResult::text(format!(
+            "Typed {text_len} character(s) into the selected range."
+        ))
+        .with_structured(type_text_structured("key_events_fg", text_len, false)),
+        Ok(Err(error)) => linux_input_error(error),
+        Err(error) => ToolResult::error(format!("Task error: {error}")),
+    }
+}
+
 // ── px-focus helper (keyboard family) ───────────────────────────────────────
 
 /// px-focus for the keyboard family (type_text / press_key / hotkey): pixel-click
@@ -3426,6 +3471,16 @@ impl Tool for TypeTextTool {
                 Ok(Ok(())) => {
                     return type_text_ax_result(pid, text_len, "via targeted AT-SPI");
                 }
+                Ok(Err(error)) if error.is::<crate::atspi::EditableSelectionNeedsKeys>() => {
+                    return type_selection_with_keys(
+                        pid,
+                        xid,
+                        Some(idx),
+                        text,
+                        delivery.is_foreground(),
+                    )
+                    .await;
+                }
                 Ok(Err(_)) | Err(_)
                     if !delivery.is_foreground() && crate::wayland::wayland_input_enabled() =>
                 {
@@ -3612,6 +3667,10 @@ impl Tool for TypeTextTool {
                 .await;
 
         match atspi_result {
+            Ok(Err(error)) if error.is::<crate::atspi::EditableSelectionNeedsKeys>() => {
+                return type_selection_with_keys(pid, xid, None, text, delivery.is_foreground())
+                    .await;
+            }
             Ok(Ok(())) => {
                 // AT-SPI succeeded — focus-free typing worked (Qt6, GTK4, etc.)!
                 // Electron/Chromium can echo this write without the renderer

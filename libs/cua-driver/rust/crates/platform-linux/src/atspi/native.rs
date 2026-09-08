@@ -1455,7 +1455,20 @@ async fn write_through_editable_proxies(
         .map_err(|e| anyhow!("EditableText unavailable: {e}"))?;
 
     let off = match proxies.text().await {
-        Ok(tp) => tp.caret_offset().await.unwrap_or(0),
+        Ok(tp) => {
+            // InsertText inserts at the caret without replacing the selected
+            // range. Refuse before mutation so the caller can send real keys,
+            // preserving rich-text formatting and the application's undo action.
+            if tp
+                .get_n_selections()
+                .await
+                .map_err(|_| super::EditableSelectionNeedsKeys)?
+                != 0
+            {
+                return Err(super::EditableSelectionNeedsKeys.into());
+            }
+            tp.caret_offset().await.unwrap_or(0)
+        }
         Err(_) => 0,
     };
     let len = text.chars().count() as i32;
