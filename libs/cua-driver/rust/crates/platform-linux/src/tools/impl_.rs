@@ -4067,19 +4067,41 @@ impl Tool for PressKeyTool {
 // ── hotkey ────────────────────────────────────────────────────────────────────
 
 fn is_modifier(k: &str) -> bool {
-    matches!(
-        k.to_lowercase().as_str(),
-        "ctrl"
-            | "control"
-            | "shift"
-            | "alt"
-            | "super"
-            | "meta"
-            | "cmd"
-            | "command"
-            | "win"
-            | "windows"
-    )
+    canonical_modifier(k).is_some()
+}
+
+fn canonical_modifier(key: &str) -> Option<&'static str> {
+    match key.to_ascii_lowercase().as_str() {
+        "ctrl" | "control" => Some("ctrl"),
+        "shift" => Some("shift"),
+        "alt" | "option" => Some("alt"),
+        "super" | "meta" | "cmd" | "command" | "win" | "windows" => Some("super"),
+        _ => None,
+    }
+}
+
+fn normalize_hotkey_key(key: &str) -> String {
+    canonical_modifier(key).unwrap_or(key).to_owned()
+}
+
+#[cfg(test)]
+mod hotkey_alias_tests {
+    use super::{is_modifier, normalize_hotkey_key};
+
+    #[test]
+    fn public_option_chord_preserves_alt_instead_of_typing_a_plain_letter() {
+        let keys: Vec<_> = ["option", "o"].map(normalize_hotkey_key).into();
+        assert_eq!(keys, ["alt", "o"]);
+        assert!(is_modifier(&keys[0]));
+        assert!(!is_modifier(&keys[1]));
+    }
+
+    #[test]
+    fn public_command_aliases_use_the_linux_super_modifier() {
+        for alias in ["CMD", "command", "meta", "windows", "win", "super"] {
+            assert_eq!(normalize_hotkey_key(alias), "super");
+        }
+    }
 }
 
 pub struct HotkeyTool {
@@ -4121,7 +4143,11 @@ impl Tool for HotkeyTool {
                 Ok(input) => input,
                 Err(result) => return result,
             };
-            let keys = input.keys;
+            let keys: Vec<String> = input
+                .keys
+                .iter()
+                .map(|key| normalize_hotkey_key(key))
+                .collect();
             if keys.len() < 2 {
                 return ToolResult::error("hotkey.keys must contain at least two keys.")
                     .with_structured(json!({ "code": "invalid_arguments" }));
@@ -4207,7 +4233,7 @@ impl Tool for HotkeyTool {
         let (key, mods) = if let Some(arr) = args.get("keys").and_then(|v| v.as_array()) {
             let keys: Vec<String> = arr
                 .iter()
-                .filter_map(|v| v.as_str().map(str::to_owned))
+                .filter_map(|v| v.as_str().map(normalize_hotkey_key))
                 .collect();
             let modifiers: Vec<String> = keys.iter().filter(|k| is_modifier(k)).cloned().collect();
             let non_mods: Vec<String> = keys.iter().filter(|k| !is_modifier(k)).cloned().collect();
@@ -4216,7 +4242,11 @@ impl Tool for HotkeyTool {
             }
             (non_mods.last().unwrap().clone(), modifiers)
         } else if let Some(k) = args.opt_str("key") {
-            let mods: Vec<String> = args.str_array("modifiers");
+            let mods: Vec<String> = args
+                .str_array("modifiers")
+                .iter()
+                .map(|key| normalize_hotkey_key(key))
+                .collect();
             (k, mods)
         } else {
             return ToolResult::error(
