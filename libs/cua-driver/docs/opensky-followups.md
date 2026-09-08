@@ -96,3 +96,24 @@ Generated Python UniFFI bindings and release validation's assumption of baked
 upstream download installers are still pending. OpenSky's public installers
 build this fork from source. These failures must be repaired without restoring
 an upstream binary fallback or silently disabling meaningful release checks.
+
+CI at 33283a34c confirmed the macOS release build links successfully (6m 10s),
+then failed on generated CLI/MCP reference drift. Regenerated both references
+from the built driver and verified the drift check; the five existing generator
+tests pass. Supplying CUA_DRIVER_BINARY now avoids an unrelated release rebuild
+before extracting that explicitly selected binary's documentation.
+
+Release metadata CI explicitly selects source installation mode. All existing
+source/package/documentation version comparisons still run; baked download
+version checks remain available in the default release mode for historical
+release tooling. Fourteen version-validation and stamping tests pass, including
+source package drift rejection. Historical stamping tests use installer-text
+inputs containing a baked version, rather than treating OpenSky's current
+source wrapper as a release downloader. Remaining upstream installer-wiring
+assumptions are still pending; this does not certify an installer release.
+
+UniFFI CI now generates bindings, fails on tracked or untracked generated-file
+drift, and retains the candidate files plus the actual checkout commit as an
+artifact even when that drift check fails. This preserves the freshness gate
+while making repairs reviewable without a large local build. No generated
+bindings have been accepted or silently updated by CI; their repair is pending.

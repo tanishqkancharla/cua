@@ -42,7 +42,7 @@ Print a tool's full description and JSON input schema.
 
 Invoke an MCP tool through the running daemon.
 
-Requires a Cua Driver daemon. JSON arguments may be passed as a positional JSON object or through stdin.
+Requires a OpenSky Driver daemon. JSON arguments may be passed as a positional JSON object or through stdin.
 
 **Arguments:**
 
@@ -64,7 +64,7 @@ Requires a Cua Driver daemon. JSON arguments may be passed as a positional JSON 
 
 Run the stdio MCP server.
 
-On Windows and Linux, bare cua-driver mcp owns its runtime directly and shuts it down on stdin EOF. On macOS it proxies to CuaDriver.app so desktop permissions retain the app identity. Pass --direct to make the macOS MCP process own the runtime and TCC attribution, or --socket to select an explicit daemon endpoint.
+On Windows and Linux, bare opensky-driver mcp owns its runtime directly and shuts it down on stdin EOF. On macOS it proxies to OpenSkyDriver.app so desktop permissions retain the app identity. Pass --direct to make the macOS MCP process own the runtime and TCC attribution, or --socket to select an explicit daemon endpoint.
 
 **Options:**
 
@@ -86,7 +86,7 @@ On Windows and Linux, bare cua-driver mcp owns its runtime directly and shuts it
 
 ### `cua-driver serve`
 
-Run Cua Driver as a long-running daemon.
+Run OpenSky Driver as a long-running daemon.
 
 The daemon owns per-process state such as element-index caches, recording state, and cursor overlay state.
 
@@ -125,7 +125,7 @@ Ask the running daemon to exit gracefully.
 
 ### `cua-driver status`
 
-Report whether a Cua Driver daemon is running.
+Report whether a OpenSky Driver daemon is running.
 
 **Options:**
 
@@ -250,7 +250,7 @@ Reset config to defaults.
 
 ### `cua-driver check-update`
 
-Check whether a newer cua-driver release is available.
+Check whether a newer opensky-driver release is available.
 
 Read-only. Uses the same update-state payload as the check_for_update MCP tool.
 
@@ -365,7 +365,7 @@ The distinct ID is replaced with a redacted placeholder.
 
 Inspect or change the stable/nightly update channel.
 
-Selection is persistent but never installs by itself; use cua-driver update --apply after changing it.
+Selection is persistent but never installs by itself; use opensky-driver update --apply after changing it.
 
 #### `cua-driver channel status`
 

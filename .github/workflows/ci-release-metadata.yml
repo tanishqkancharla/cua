@@ -82,7 +82,7 @@ jobs:
           python3 .github/scripts/release_attribution.py "${ARGS[@]}"
 
       - name: Validate checked-in release versions
-        run: python3 .github/scripts/validate_release_versions.py --product all
+        run: python3 .github/scripts/validate_release_versions.py --product all --driver-installation source
 
       - name: Preflight trusted Release Please attribution
         if: >-

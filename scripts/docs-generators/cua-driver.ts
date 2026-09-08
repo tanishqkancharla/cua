@@ -210,16 +210,20 @@ async function main() {
   console.log('===================================\n');
 
   // Step 1: Build cua-driver
-  console.log('Building cua-driver...');
-  try {
-    const cargo = resolveCargoCommand();
-    execFileSync(cargo, ['build', '-p', 'cua-driver', '--release'], {
-      cwd: CUA_DRIVER_DIR,
-      stdio: 'inherit',
-    });
-  } catch (error) {
-    console.error('Failed to build cua-driver');
-    process.exit(1);
+  if (!process.env.CUA_DRIVER_BINARY) {
+    console.log('Building cua-driver...');
+    try {
+      const cargo = resolveCargoCommand();
+      execFileSync(cargo, ['build', '-p', 'cua-driver', '--release'], {
+        cwd: CUA_DRIVER_DIR,
+        stdio: 'inherit',
+      });
+    } catch (error) {
+      console.error('Failed to build cua-driver');
+      process.exit(1);
+    }
+  } else {
+    console.log(`Using the explicitly supplied driver: ${process.env.CUA_DRIVER_BINARY}`);
   }
 
   // Step 2: Extract all docs in a single invocation

@@ -19,7 +19,6 @@ def copy_installers(tmp_path: Path) -> tuple[Path, Path, Path]:
     shell = tmp_path / "_install-rust.sh"
     powershell = tmp_path / "install.ps1"
     shell.write_bytes((source / shell.name).read_bytes())
-    powershell.write_bytes((source / powershell.name).read_bytes())
     state = tmp_path / "published-version"
     state.write_bytes(
         (
@@ -27,6 +26,9 @@ def copy_installers(tmp_path: Path) -> tuple[Path, Path, Path]:
             / ".github/release-state/cua-driver-rs-published-version"
         ).read_bytes()
     )
+    # Input document for the retained historical release stamper. OpenSky's
+    # source installer is not a versioned binary-download installer.
+    powershell.write_text(f'$Script:CuaDriverRsBakedVersion = "{state.read_text().strip()}" # published-installer-version\n')
     return shell, powershell, state
 
 
