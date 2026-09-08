@@ -2783,6 +2783,10 @@ fn remap_spare_keycode<'a>(
     // Round-trip so the server has installed the new mapping before we emit the
     // key event against it.
     let _ = conn.get_input_focus()?.reply();
+    // GTK/Xlib consumers refresh cached keymaps on MappingNotify. The server
+    // round-trip alone does not wait for those clients to handle that event.
+    // Keep the binding stable briefly before its first injected key press.
+    sleep(Duration::from_millis(50));
 
     Ok(RemappedKeycode {
         conn,
