@@ -2154,6 +2154,10 @@ pub fn send_type_text_with_delay(xid: u64, text: &str, inter_char_ms: u64) -> Re
             // A flush only sends bytes. Confirm the server processed this
             // character before the guard restores its temporary key mapping.
             conn.get_input_focus()?.reply()?;
+            // Server delivery does not mean the client has translated the
+            // keycode yet. Keep this mapping stable while the app processes
+            // it; immediately reusing the spare code turned é into the later —.
+            sleep(Duration::from_millis(200));
         }
         if inter_char_ms > 0 {
             sleep(Duration::from_millis(inter_char_ms));
@@ -2196,6 +2200,10 @@ pub fn send_type_text_xtest(text: &str) -> Result<()> {
             // The final round-trip below runs after per-character guards drop.
             // Each temporary binding needs its own delivery barrier first.
             conn.get_input_focus()?.reply()?;
+            // Server delivery does not mean the client has translated the
+            // keycode yet. Keep this mapping stable while the app processes
+            // it; immediately reusing the spare code turned é into the later —.
+            sleep(Duration::from_millis(200));
         }
         sleep(Duration::from_millis(KEY_DELAY_MS));
     }
