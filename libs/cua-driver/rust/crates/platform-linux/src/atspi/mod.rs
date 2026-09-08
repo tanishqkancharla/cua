@@ -214,8 +214,6 @@ pub fn perform_action_at_screen_point(
     native::perform_action_at_screen_point(pid, xid, screen_x, screen_y)
 }
 
-/// Try to type text into any editable field in the window via AT-SPI EditableText.
-/// This works for unfocused windows if the toolkit exposes EditableText (Qt6, some GTK).
 /// No input was sent: replacing a selection requires native key semantics.
 #[derive(Debug)]
 pub struct EditableSelectionNeedsKeys;
@@ -230,6 +228,8 @@ impl std::fmt::Display for EditableSelectionNeedsKeys {
 }
 impl std::error::Error for EditableSelectionNeedsKeys {}
 
+/// Try to type text into any editable field in the window via AT-SPI EditableText.
+/// This works for unfocused windows if the toolkit exposes EditableText (Qt6, some GTK).
 /// For Qt5, which doesn't expose widgets when unfocused, this will return Err.
 /// Returns Ok if an editable was found and text was set, Err otherwise.
 pub fn type_into_editable(pid: u32, text: &str) -> Result<()> {
