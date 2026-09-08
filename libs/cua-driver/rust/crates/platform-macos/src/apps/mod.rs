@@ -44,6 +44,27 @@ pub fn list_running_apps() -> Vec<AppInfo> {
     list_running_apps_native()
 }
 
+/// Service AppKit's application lifecycle notifications without creating UI.
+/// NSWorkspace.runningApplications and NSRunningApplication properties only
+/// refresh while the main run loop runs in a common mode. Joining the server
+/// thread instead leaves launch/quit discovery frozen when overlays are off.
+pub fn run_main_loop() {
+    use objc2::runtime::AnyObject;
+    use objc2::{class, msg_send};
+
+    let _mtm = objc2_foundation::MainThreadMarker::new()
+        .expect("run_main_loop must be called from the main thread");
+    unsafe {
+        let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
+        // Accessory policy keeps the daemon out of the Dock and app switcher.
+        // NSApplication installs and services AppKit's lifecycle event sources;
+        // a bare CFRunLoopRun can return immediately when no source is ready.
+        let _: bool = msg_send![app, setActivationPolicy: 1i64];
+        let _: () = msg_send![app, finishLaunching];
+        let _: () = msg_send![app, run];
+    }
+}
+
 fn list_running_apps_native() -> Vec<AppInfo> {
     use objc2_app_kit::{NSApplicationActivationPolicy, NSWorkspace};
 

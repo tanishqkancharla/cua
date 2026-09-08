@@ -181,3 +181,28 @@ types. CI explicitly builds the real executable and allows 30 minutes for the
 combined native build/test job; this is independent of uncapped agent runs.
 Python syntax and workflow YAML passed. Real loader execution on this candidate
 is pending CI, as are TypeScript native SDK tests and Windows uninstall execution.
+
+
+## No-overlay macOS app discovery (2026-09-08)
+
+A live SDK retry opened TextEdit PID 48904 but the existing no-overlay daemon
+reported dead PID 58643. The app was visible and both TCC checks were granted.
+NSWorkspace runningApplications and NSRunningApplication properties refresh
+through the main run loop; the no-overlay serve branch instead joined its
+background server thread. Share the existing accessory NSApplication event loop
+with that branch, preserving the PiP path and creating no overlay/Dock icon.
+A simpler CFRunLoop-only attempt failed and is not included in the final change.
+
+A temporary signed build of fa11d162c plus this repair passed a launch/quit
+public-SDK probe and two permanent Vitest regressions in the OpenSky SDK repo:
+`e2e/specs/native-app-discovery.test.ts` (2 passed, 16.29 s). The same daemon was
+used across each lifecycle. All owned apps/documents and the private daemon,
+socket and temporary bundle were removed. Evidence is in the SDK repo at
+`evals/runs/native-app-discovery-e2e-1`. No new TCC grants or agent spending.
+This verifies inventory behavior, not Unicode selection, AX, capture or the
+complete canonical macOS desktop matrix. The installed driver is unchanged.
+
+CI fa11d162c also passed real Python/TypeScript SDK, binding freshness, portable
+contracts and Windows unit checks. Linux/Nix were blocked by a Hermes fixture
+using the old skill name; its two paths now use opensky-driver and the real CLI
+regression passed locally. Full next-candidate CI and desktop gates remain open.

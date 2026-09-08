@@ -731,8 +731,8 @@ fn main() {
             // PiP needs the AppKit main run loop to process the
             // dispatch_async_f calls that push frames into NSImageView;
             // park main in NSApplication.run() when --experimental-pip is
-            // on. Otherwise just join the serve thread so the process
-            // stays up as long as the daemon does.
+            // on. Even without UI, NSWorkspace needs the main run loop to
+            // refresh application launch/quit state and dispatch callbacks.
             if pip_cfg.enabled {
                 platform_macos::pip::run_appkit_main_loop();
             } else if cursor_cfg.enabled {
@@ -745,6 +745,7 @@ fn main() {
                 platform_macos::cursor::overlay::run_on_main_thread();
                 let _ = serve_handle.join();
             } else {
+                platform_macos::apps::run_main_loop();
                 let _ = serve_handle.join();
             }
         }
