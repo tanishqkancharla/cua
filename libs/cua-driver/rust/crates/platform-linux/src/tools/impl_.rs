@@ -2945,10 +2945,15 @@ impl Tool for ClickTool {
                 // working. (x,y) are screen coords here, matching the frames in
                 // `get_window_state`. Miss → fall through to the injection paths.
                 if !delivery.is_foreground() && button == 1 && count == 1 {
-                    if let Ok(Some(_)) =
-                        crate::atspi::perform_action_at_screen_point(pid, xid, output_x, output_y)
+                    match crate::atspi::perform_action_at_screen_point(pid, xid, output_x, output_y)
                     {
-                        return Ok("wayland_atspi");
+                        Ok(Some(crate::atspi::PixelAction::Performed)) => {
+                            return Ok("wayland_atspi")
+                        }
+                        Ok(Some(crate::atspi::PixelAction::NeedsForeground)) => {
+                            return Ok("background_unavailable")
+                        }
+                        _ => {}
                     }
                 }
                 if crate::wayland::is_inject_mode() {
@@ -2975,8 +2980,12 @@ impl Tool for ClickTool {
             // click (the agent's escalation when background didn't land).
             let inject = |fg: bool| -> anyhow::Result<&'static str> {
                 if !fg && button == 1 && count == 1 && modifiers_for_task.is_empty() {
-                    if let Ok(Some(_)) = crate::atspi::perform_action_at_point(pid, xid, xi, yi) {
-                        return Ok("x11_atspi");
+                    match crate::atspi::perform_action_at_point(pid, xid, xi, yi) {
+                        Ok(Some(crate::atspi::PixelAction::Performed)) => return Ok("x11_atspi"),
+                        Ok(Some(crate::atspi::PixelAction::NeedsForeground)) => {
+                            return Ok("background_unavailable")
+                        }
+                        _ => {}
                     }
                 }
                 if fg {

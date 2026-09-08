@@ -181,17 +181,22 @@ pub fn list_windows(filter_pid: Option<u32>) -> Vec<crate::x11::WindowInfo> {
     native::list_windows(filter_pid)
 }
 
+/// Whether pixel hit-testing dispatched an action or requires a real focus click.
+pub enum PixelAction {
+    Performed,
+    NeedsForeground,
+}
+
 /// Resolve a window-local pixel to the actionable AT-SPI element at that point
 /// and perform its primary action — the no-focus-steal way to land a *pixel*
-/// click on toolkits (GTK) that drop synthetic X11 pointer events. Returns
-/// `Ok(Some(action))` when an element was actuated, `Ok(None)` when no
-/// actionable element covers the point (caller falls back to the X11 path).
+/// click on toolkits (GTK) that drop synthetic X11 pointer events. Returns a performed action, a pre-input foreground requirement for an editable
+/// field, or no hit (caller falls back to the X11 path).
 pub fn perform_action_at_point(
     pid: u32,
     xid: u64,
     win_x: i32,
     win_y: i32,
-) -> Result<Option<String>> {
+) -> Result<Option<PixelAction>> {
     native::perform_action_at_point(pid, xid, win_x, win_y)
 }
 
@@ -205,7 +210,7 @@ pub fn perform_action_at_screen_point(
     xid: u64,
     screen_x: i32,
     screen_y: i32,
-) -> Result<Option<String>> {
+) -> Result<Option<PixelAction>> {
     native::perform_action_at_screen_point(pid, xid, screen_x, screen_y)
 }
 

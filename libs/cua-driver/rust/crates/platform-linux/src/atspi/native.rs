@@ -2097,15 +2097,15 @@ pub fn focus_element(pid: u32, idx: usize) -> Result<bool> {
 /// Hit-testing uses `Component.GetExtents(CoordType::Window)` so the caller's
 /// window-local coordinates are compared directly against window-local widget
 /// bounds — no screen-origin guessing. The smallest-area containing node wins so
-/// a click lands on the button, not its enclosing panel. Returns `Ok(Some(action))`
-/// when an element was actuated, `Ok(None)` when no actionable element covers the
-/// point (the caller then falls back to the synthetic X11 path).
+/// a click lands on the button, not its enclosing panel. Editable fields request
+/// foreground delivery before sending input: their activation action may submit
+/// a dialog instead of placing the caret. No hit falls back to native input.
 pub fn perform_action_at_point(
     pid: u32,
     xid: u64,
     win_x: i32,
     win_y: i32,
-) -> Result<Option<String>> {
+) -> Result<Option<super::PixelAction>> {
     bounded(
         async {
             let conn = shared_connection().await?;
@@ -2129,7 +2129,10 @@ pub fn perform_action_at_point(
             // children, but the area/role split is what actually disambiguates.
             let mut frames: Vec<(usize, i32, i32, u32, u32, bool)> = Vec::new();
             for (i, v) in visited.iter().enumerate() {
-                if v.frame_ordinal != frame || v.actions.is_empty() || !v.has_component {
+                if v.frame_ordinal != frame
+                    || (v.actions.is_empty() && !v.has_editable)
+                    || !v.has_component
+                {
                     continue;
                 }
                 let Some(Ok(proxies)) = call(v.acc.proxies()).await else {
@@ -2163,6 +2166,12 @@ pub fn perform_action_at_point(
                 return Ok(None);
             };
             let target = &visited[idx];
+            // EditableText's "activate" often submits its dialog. A pixel
+            // click means placing a caret, not activating the entry. No action
+            // has been sent: let the caller explicitly use real foreground input.
+            if target.has_editable {
+                return Ok(Some(super::PixelAction::NeedsForeground));
+            }
             let Some(chosen) = activation_index(&target.role, &target.actions) else {
                 return Ok(None);
             };
@@ -2177,7 +2186,7 @@ pub fn perform_action_at_point(
             ap.do_action(chosen as i32)
                 .await
                 .map_err(|e| anyhow!("doAction failed: {e}"))?;
-            Ok(target.actions.get(chosen).cloned())
+            Ok(Some(super::PixelAction::Performed))
         },
         || Ok(None),
     )
@@ -2210,7 +2219,7 @@ pub fn perform_action_at_screen_point(
     xid: u64,
     screen_x: i32,
     screen_y: i32,
-) -> Result<Option<String>> {
+) -> Result<Option<super::PixelAction>> {
     bounded(
         async {
             let conn = shared_connection().await?;
@@ -2279,6 +2288,12 @@ pub fn perform_action_at_screen_point(
                 return Ok(None);
             };
             let target = action_nodes[idx];
+            // EditableText's "activate" often submits its dialog. A pixel
+            // click means placing a caret, not activating the entry. No action
+            // has been sent: let the caller explicitly use real foreground input.
+            if target.has_editable {
+                return Ok(Some(super::PixelAction::NeedsForeground));
+            }
             let Some(chosen) = activation_index(&target.role, &target.actions) else {
                 return Ok(None);
             };
@@ -2293,7 +2308,7 @@ pub fn perform_action_at_screen_point(
             ap.do_action(chosen as i32)
                 .await
                 .map_err(|e| anyhow!("doAction failed: {e}"))?;
-            Ok(target.actions.get(chosen).cloned())
+            Ok(Some(super::PixelAction::Performed))
         },
         || Ok(None),
     )
