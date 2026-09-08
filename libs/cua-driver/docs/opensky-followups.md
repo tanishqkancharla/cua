@@ -70,3 +70,29 @@ existing build. Real path binding, cold launch, and stable-signing verification
 are pending. The old permissioned driver has not been replaced. The fork has
 issues disabled and no matching active PR was found; this document records the
 narrow problem/decision for the dedicated codex/exact-app-paths branch.
+
+## Fork build and contract checks (2026-09-08)
+
+PR #2 ordinary CI exposed upstream identity assumptions left behind by the
+OpenSky rename. The compatibility baseline now explicitly adapts only the CLI
+command and MCP server name. The exact discovery manifest includes the fork's
+`browser_key` and `close_window` tools and their two output schemas. The local
+macOS metadata probe verified 58 tools / 34 output schemas and exited cleanly.
+All four CLI/MCP compatibility checks passed (0.86 s) with the signed 05624b9bc
+candidate selected for daemon fixtures. Bare unbundled daemon fixtures stalled
+before creating a socket; cleanup was independently checked. This is protocol
+evidence, not GUI acceptance or proof that unbundled startup works locally.
+
+ScreenCaptureKit 6.0.1 and apple-cf both compiled Swift types into the same
+CoreMediaBridge module. Updated to the published 8.0.1 dependency containing
+[upstream PR #159](https://github.com/doom-fish/screencapturekit-rs/pull/159),
+which gives the ScreenCaptureKit bridge its own Swift module namespace. The
+local driver build succeeds with no duplicate Swift symbol messages (20.84 s).
+Release linking and GUI capture/recording remain to be verified; neither the
+installed permissioned driver nor the staged signed candidate was replaced.
+Only 4.7 GiB was free locally, so the larger release build is assigned to CI.
+
+Generated Python UniFFI bindings and release validation's assumption of baked
+upstream download installers are still pending. OpenSky's public installers
+build this fork from source. These failures must be repaired without restoring
+an upstream binary fallback or silently disabling meaningful release checks.
