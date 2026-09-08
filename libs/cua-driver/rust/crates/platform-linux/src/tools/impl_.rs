@@ -209,7 +209,8 @@ impl Tool for ListAppsTool {
                 files in $XDG_DATA_HOME/applications and each $XDG_DATA_DIRS entry's \
                 applications/ subdir. Entries with `NoDisplay=true` or `Hidden=true` are \
                 filtered. A `.desktop` file whose launcher matches a running process \
-                (by basename) is merged into a single entry with `running: true`.\n\n\
+                (by window identity, then executable basename) is merged with `running: true`. \
+                A no-argument suite launcher also shares its component's running process.\n\n\
                 Use this for \"is X installed?\" as well as \"is X running?\". For per-window \
                 state — visibility, geometry, titles — call list_windows instead."
                     .into(),
@@ -225,6 +226,21 @@ impl Tool for ListAppsTool {
         let apps = tokio::task::spawn_blocking(|| -> Vec<serde_json::Value> {
             let procs = crate::proc_fs::list_processes();
             let installed = crate::installed_apps::list_installed_apps();
+            // Desktop launchers often exec a differently named child. Resolve
+            // window identity once, using the same X11/Wayland adapter as the
+            // public window tools, before falling back to process basenames.
+            let mut window_classes: std::collections::HashMap<u32, Vec<String>> =
+                std::collections::HashMap::new();
+            for window in crate::wayland::list_windows_dispatch(None) {
+                if let (Some(pid), Some((instance, class))) =
+                    (window.pid, crate::wayland::wm_class_dispatch(window.xid))
+                {
+                    window_classes
+                        .entry(pid)
+                        .or_default()
+                        .extend([instance, class]);
+                }
+            }
 
             // Match running processes to installed apps by executable
             // basename (Exec=firefox %u → "firefox"; cmdline /usr/bin/firefox
@@ -255,44 +271,59 @@ impl Tool for ListAppsTool {
                     continue;
                 }
                 let candidates = by_exe.get(&basename).map(|v| v.as_slice()).unwrap_or(&[]);
-                let merged = disambiguate_installed_match(candidates, &installed, key_source);
-                if let Some(idx) = merged {
-                    consumed.insert(idx);
+                let mut matches = window_installed_matches(
+                    window_classes.get(&p.pid).map(Vec::as_slice).unwrap_or(&[]),
+                    &installed,
+                );
+                if matches.is_empty() {
+                    matches.extend(disambiguate_installed_match(
+                        candidates, &installed, key_source,
+                    ));
                 }
-                let (name, bundle_id, launch_path, kind, last_used) = match merged {
-                    Some(idx) => {
-                        let a = &installed[idx];
-                        (
-                            a.name.clone(),
-                            Some(a.bundle_id.clone()),
-                            Some(a.launch_path.clone()),
-                            Some("desktop".to_owned()),
-                            a.last_used.clone(),
-                        )
-                    }
-                    None => (
-                        if !p.name.is_empty() {
-                            p.name.clone()
-                        } else {
-                            basename.clone()
-                        },
-                        None,
-                        None,
-                        None,
-                        None,
-                    ),
+                let matches: Vec<Option<usize>> = if matches.is_empty() {
+                    vec![None]
+                } else {
+                    matches.into_iter().map(Some).collect()
                 };
-                out.push(json!({
-                    "pid":         p.pid,
-                    "bundle_id":   bundle_id,
-                    "name":        name,
-                    "running":     true,
-                    "active":      false,
-                    "kind":        kind,
-                    "launch_path": launch_path,
-                    "last_used":   last_used,
-                    "windows":     Vec::<serde_json::Value>::new(),
-                }));
+                for merged in matches {
+                    if let Some(idx) = merged {
+                        consumed.insert(idx);
+                    }
+                    let (name, bundle_id, launch_path, kind, last_used) = match merged {
+                        Some(idx) => {
+                            let a = &installed[idx];
+                            (
+                                a.name.clone(),
+                                Some(a.bundle_id.clone()),
+                                Some(a.launch_path.clone()),
+                                Some("desktop".to_owned()),
+                                a.last_used.clone(),
+                            )
+                        }
+                        None => (
+                            if !p.name.is_empty() {
+                                p.name.clone()
+                            } else {
+                                basename.clone()
+                            },
+                            None,
+                            None,
+                            None,
+                            None,
+                        ),
+                    };
+                    out.push(json!({
+                        "pid":         p.pid,
+                        "bundle_id":   bundle_id,
+                        "name":        name,
+                        "running":     true,
+                        "active":      false,
+                        "kind":        kind,
+                        "launch_path": launch_path,
+                        "last_used":   last_used,
+                        "windows":     Vec::<serde_json::Value>::new(),
+                    }));
+                }
             }
             for (i, app) in installed.iter().enumerate() {
                 if consumed.contains(&i) {
@@ -386,6 +417,45 @@ fn disambiguate_installed_match(
                 .cmp(installed[b].last_used.as_deref().unwrap_or(""))
         })
         .or_else(|| candidates.first().copied())
+}
+
+/// XDG StartupWMClass identifies windows even when Exec is a shell wrapper.
+/// Native Wayland app IDs may instead equal the desktop file ID. A no-argument
+/// suite launcher sharing the exact executable with a matched component also
+/// represents that running suite; unrelated components/profiles remain stopped.
+fn window_installed_matches(
+    classes: &[String],
+    installed: &[crate::installed_apps::InstalledApp],
+) -> Vec<usize> {
+    let mut matches: Vec<usize> = installed
+        .iter()
+        .enumerate()
+        .filter_map(|(i, app)| {
+            classes
+                .iter()
+                .any(|class| {
+                    !class.is_empty()
+                        && (app.startup_wm_class.as_ref() == Some(class) || app.bundle_id == *class)
+                })
+                .then_some(i)
+        })
+        .collect();
+    let component_executables: Vec<&str> = matches
+        .iter()
+        .filter_map(|&i| installed[i].launch_path.split_whitespace().next())
+        .collect();
+    for (i, app) in installed.iter().enumerate() {
+        let mut command = app.launch_path.split_whitespace();
+        if let Some(executable) = command.next() {
+            if command.next().is_none()
+                && component_executables.contains(&executable)
+                && !matches.contains(&i)
+            {
+                matches.push(i);
+            }
+        }
+    }
+    matches
 }
 
 /// Return the lowercase basename of an executable token, stripping any
@@ -1209,6 +1279,7 @@ mod launch_app_tests {
             name: name.to_owned(),
             bundle_id: bundle_id.to_owned(),
             launch_path: launch_path.to_owned(),
+            startup_wm_class: None,
             last_used: None,
         }
     }
@@ -1228,6 +1299,43 @@ mod launch_app_tests {
                 "thunar-settings",
             ),
         ]
+    }
+
+    #[test]
+    fn window_installed_matches_wrapper_component_and_suite_without_other_components() {
+        let mut writer = app("Example Writer", "example-writer", "example --writer");
+        writer.startup_wm_class = Some("ExampleWriterWindow".into());
+        let apps = vec![
+            app("Example", "example-center", "example"),
+            writer,
+            app("Example Calc", "example-calc", "example --calc"),
+            app("Other installation", "other-example", "/opt/other/example"),
+        ];
+        assert_eq!(
+            window_installed_matches(&["ExampleWriterWindow".into()], &apps),
+            vec![1, 0]
+        );
+        assert!(window_installed_matches(&["unknown".into()], &apps).is_empty());
+        assert!(window_installed_matches(&[], &apps).is_empty());
+    }
+
+    #[test]
+    fn window_installed_matches_native_app_ids_and_multiple_component_windows() {
+        let apps = vec![
+            app("Writer", "org.example.Writer", "example --writer"),
+            app("Calc", "org.example.Calc", "example --calc"),
+        ];
+        assert_eq!(
+            window_installed_matches(&["org.example.Writer".into()], &apps),
+            vec![0]
+        );
+        assert_eq!(
+            window_installed_matches(
+                &["org.example.Writer".into(), "org.example.Calc".into()],
+                &apps
+            ),
+            vec![0, 1]
+        );
     }
 
     /// Process state letter from `/proc/<pid>/stat`, or `None` once the entry
