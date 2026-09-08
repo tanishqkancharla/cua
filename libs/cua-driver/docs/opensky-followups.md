@@ -50,3 +50,23 @@ driver would be misleading:
 For each later capability, record the exact driver/host revision, a failing
 baseline, the corrected fresh state, and exact cleanup evidence. Keep contract
 fixtures, live controlled probes and model evaluations separately labeled.
+
+## Exact installed app paths (2026-09-08)
+
+Observed through the real OpenSky public REPL against a disposable VS Code
+installation: getApp with its absolute .app path failed with "Provide either
+bundle_id or name" although the process was already running. The native
+reference accepted the same path. The driver set every running launch_path to
+None, then borrowed installed metadata by bundle ID; multiple copies can share
+that ID. The fix reads NSRunningApplication.bundleURL, merges installed entries
+by exact path, leaves unknown paths unknown, and accepts an absolute launch_path
+through the existing macOS launch route. The SDK preserves an explicit path
+instead of replacing it with a bundle ID during launch recovery.
+
+This corrects the macOS adapter; it does not claim new Windows/Linux behavior.
+Three inventory checks and eleven existing launch checks pass; the local driver
+build succeeds. Swift dependency duplicate-symbol linker warnings remain in the
+existing build. Real path binding, cold launch, and stable-signing verification
+are pending. The old permissioned driver has not been replaced. The fork has
+issues disabled and no matching active PR was found; this document records the
+narrow problem/decision for the dedicated codex/exact-app-paths branch.
