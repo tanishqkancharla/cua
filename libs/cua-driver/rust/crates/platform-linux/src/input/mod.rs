@@ -2108,7 +2108,7 @@ pub fn send_type_text_with_delay(xid: u64, text: &str, inter_char_ms: u64) -> Re
         // Resolve the keycode and whether Shift must be held — without it,
         // uppercase and shifted symbols would otherwise type their unshifted
         // form (e.g. "A" arriving as "a").
-        let (keycode, needs_shift, _remapped) = text_keycode(&conn, &mapping, ch)?;
+        let (keycode, needs_shift, remapped) = text_keycode(&conn, &mapping, ch)?;
         let state = if needs_shift {
             KeyButMask::SHIFT
         } else {
@@ -2150,6 +2150,11 @@ pub fn send_type_text_with_delay(xid: u64, text: &str, inter_char_ms: u64) -> Re
         sleep(Duration::from_millis(KEY_DELAY_MS));
         conn.send_event(false, window, EventMask::KEY_RELEASE, &release)?;
         conn.flush()?;
+        if remapped.is_some() {
+            // A flush only sends bytes. Confirm the server processed this
+            // character before the guard restores its temporary key mapping.
+            conn.get_input_focus()?.reply()?;
+        }
         if inter_char_ms > 0 {
             sleep(Duration::from_millis(inter_char_ms));
         }
@@ -2177,7 +2182,7 @@ pub fn send_type_text_xtest(text: &str) -> Result<()> {
         .and_then(|s| s.iter().copied().find(|&k| k != 0))
         .unwrap_or(50);
     for ch in text.chars() {
-        let (keycode, needs_shift, _remapped) = text_keycode(&conn, &mapping, ch)?;
+        let (keycode, needs_shift, remapped) = text_keycode(&conn, &mapping, ch)?;
         if needs_shift {
             conn.xtest_fake_input(KEY_PRESS_EVENT, shift_kc, 0, x11rb::NONE, 0, 0, 0)?;
         }
@@ -2187,6 +2192,11 @@ pub fn send_type_text_xtest(text: &str) -> Result<()> {
             conn.xtest_fake_input(KEY_RELEASE_EVENT, shift_kc, 0, x11rb::NONE, 0, 0, 0)?;
         }
         conn.flush()?;
+        if remapped.is_some() {
+            // The final round-trip below runs after per-character guards drop.
+            // Each temporary binding needs its own delivery barrier first.
+            conn.get_input_focus()?.reply()?;
+        }
         sleep(Duration::from_millis(KEY_DELAY_MS));
     }
     // Round-trip so the server delivers the final character's key events before
