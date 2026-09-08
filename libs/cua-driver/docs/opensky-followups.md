@@ -136,3 +136,28 @@ message; its process exited and temporary directory was removed. No GUI apps
 opened and no model calls occurred. Remaining installer/channel/telemetry wiring
 failures and Windows history-uninstall validation are unresolved; do not remove
 meaningful lifecycle or privacy checks simply because a wrapper changed.
+
+## Windows uninstall preserves history unless explicitly purged (2026-09-08)
+
+The source-product uninstaller recursively removed LOCALAPPDATA/opensky-driver,
+which contains encrypted Computer History, without invoking native key purge.
+Normal uninstall now preserves its computer-history child. Explicit -Purge is
+forwarded by the public wrapper and invokes the exact installed OpenSky helper
+before executable removal. Missing, unlaunchable or unsuccessful helpers abort
+removal; only native purge may destroy the key and remove history. The prompt
+and ValidateOnly output state the selected behavior. Windows CI checks parsing,
+ordering/refusal requirements and both public validation modes. PowerShell is
+not installed on the development Mac: execution and complete uninstall/reinstall
+acceptance remain pending, and no local uninstaller was executed.
+
+Seven legacy download/channel/telemetry/UAC checks now explicitly target the
+retained upstream Windows downloader, alongside its retained Unix counterpart.
+They retain their assertions and names distinguish historical download coverage
+from OpenSky's public source installer. Both affected Python modules pass 55
+checks (0.16 s); this does not certify source installation or lifecycle behavior.
+The public Unix install.sh --help command succeeds without building/installing.
+
+After installing the CI-declared jsonschema/toml dependencies in the isolated
+driver test environment, the full script suite passed 248 tests and 21 subtests
+in 3.96 s. Workflow YAML parsed. Windows PowerShell execution remains assigned
+to CI; these local results do not prove Windows uninstall behavior.

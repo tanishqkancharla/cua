@@ -1,4 +1,9 @@
-"""Regression tests for cua-driver-rs release and PyPI wiring."""
+"""Release/PyPI wiring and explicitly named retained upstream download checks.
+
+OpenSky's public installers build source through install-local. Download version,
+channel, migration and UAC checks below target the retained upstream installer,
+not the source wrapper; they do not certify the OpenSky installation workflow.
+"""
 
 import json
 from pathlib import Path
@@ -325,7 +330,7 @@ class TestCuaDriverReleaseWiring(unittest.TestCase):
         self.assertIn("-F force=false", workflow)
         self.assertIn("[skip ci]", workflow)
 
-    def test_release_installers_preserve_legacy_telemetry_state_before_cleanup(self) -> None:
+    def test_retained_upstream_release_installers_preserve_legacy_telemetry_state_before_cleanup(self) -> None:
         installer = self.read("libs/cua-driver/scripts/_install-rust.sh")
         cleanup = installer.index('rm -rf "$LEGACY_HOME_DIR"')
         self.assertLess(
@@ -337,7 +342,7 @@ class TestCuaDriverReleaseWiring(unittest.TestCase):
             cleanup,
         )
 
-        powershell = self.read("libs/cua-driver/scripts/install.ps1")
+        powershell = self.read("libs/cua-driver/scripts/_upstream-install.ps1")
         cleanup = powershell.index("Remove-Item -LiteralPath $LegacyHomeDir -Recurse -Force")
         self.assertLess(
             powershell.index(
@@ -350,19 +355,19 @@ class TestCuaDriverReleaseWiring(unittest.TestCase):
             cleanup,
         )
 
-    def test_release_installers_bound_cursor_theme_compatibility(self) -> None:
+    def test_retained_upstream_release_installers_bound_cursor_theme_compatibility(self) -> None:
         shell = self.read("libs/cua-driver/scripts/_install-rust.sh")
         self.assertIn('CURSOR_THEME_REQUIRED_FROM="0.12.7"', shell)
         self.assertIn('"$VERSION" "$CURSOR_THEME_REQUIRED_FROM"', shell)
 
-        powershell = self.read("libs/cua-driver/scripts/install.ps1")
+        powershell = self.read("libs/cua-driver/scripts/_upstream-install.ps1")
         self.assertIn('$CursorThemeRequiredFrom = [version]"0.12.7"', powershell)
         self.assertIn("[version]$version -ge $CursorThemeRequiredFrom", powershell)
 
-    def test_windows_installer_elevates_autostart_binary_without_command_string(
+    def test_retained_upstream_windows_installer_elevates_autostart_binary_without_command_string(
         self,
     ) -> None:
-        powershell = self.read("libs/cua-driver/scripts/install.ps1")
+        powershell = self.read("libs/cua-driver/scripts/_upstream-install.ps1")
         block = powershell.split(
             "function Register-CuaDriverAutostart {", maxsplit=1
         )[1].split(
@@ -447,17 +452,17 @@ class TestCuaDriverReleaseWiring(unittest.TestCase):
         )
         self.assertNotIn("printf '%s' \"$CUA_LOCAL_SIGN_CN\"; return", signing)
 
-    def test_release_installers_persist_channel_before_binary_swap(self) -> None:
+    def test_retained_upstream_release_installers_persist_channel_before_binary_swap(self) -> None:
         shell = self.read("libs/cua-driver/scripts/_install-rust.sh")
         hint = shell.index('> "$HOME_DIR/.telemetry_install_channel"')
         self.assertLess(hint, shell.index('ditto "$SRC_APP" "$APP_DEST"'))
         self.assertLess(hint, shell.index('mv -Tf "$TMP_LINK" "$CURRENT_LINK"'))
 
-        powershell = self.read("libs/cua-driver/scripts/install.ps1")
+        powershell = self.read("libs/cua-driver/scripts/_upstream-install.ps1")
         hint = powershell.index("Set-Content -LiteralPath $telemetryHintPath")
         self.assertLess(hint, powershell.index("Ensure-Junction $CurrentDir    $versionedDir"))
 
-    def test_release_installers_gate_channel_hint_on_effective_consent(self) -> None:
+    def test_retained_upstream_release_installers_gate_channel_hint_on_effective_consent(self) -> None:
         shell = self.read("libs/cua-driver/scripts/_install-rust.sh")
         self.assertIn(
             "for telemetry_env_name in CUA_DRIVER_RS_TELEMETRY_ENABLED CUA_TELEMETRY_ENABLED",
@@ -467,7 +472,7 @@ class TestCuaDriverReleaseWiring(unittest.TestCase):
         self.assertIn('"telemetry_enabled"', shell)
         self.assertIn('[[ "$TELEMETRY_HINT_ENABLED" == "1" ]]', shell)
 
-        powershell = self.read("libs/cua-driver/scripts/install.ps1")
+        powershell = self.read("libs/cua-driver/scripts/_upstream-install.ps1")
         self.assertIn(
             "@('CUA_DRIVER_RS_TELEMETRY_ENABLED', 'CUA_TELEMETRY_ENABLED')",
             powershell,

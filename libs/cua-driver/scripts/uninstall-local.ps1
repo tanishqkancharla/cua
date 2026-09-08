@@ -1,6 +1,6 @@
 # Remove only the source-built opensky-driver product on Windows.
 [CmdletBinding()]
-param([switch]$Force, [switch]$ValidateOnly)
+param([switch]$Force, [switch]$ValidateOnly, [switch]$Purge)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
@@ -41,13 +41,15 @@ if ($ValidateOnly) {
     Write-Output "cli=$(Join-Path $VisibleBinDir 'opensky-driver.exe')"
     Write-Output "home=$HomeDir"
     Write-Output "runtime=$RuntimeDir"
+    Write-Output "history=$(if ($Purge) { 'purge' } else { 'preserve' })"
     Write-Output "task=$TaskName"
     Write-Output "processes=opensky-driver,opensky-driver-uia"
     exit 0
 }
 
 if (-not $Force) {
-    $reply = Read-Host "Remove the local cua-driver identity and its state? [y/N]"
+    $historyAction = if ($Purge) { 'permanently purge Computer History' } else { 'preserve Computer History' }
+    $reply = Read-Host "Remove OpenSky Driver and $historyAction? [y/N]"
     if ($reply -notmatch '^(y|yes)$') { Write-Step "cancelled"; exit 0 }
 }
 
@@ -76,6 +78,31 @@ if ($taskExists) {
 
 Get-Process -Name "opensky-driver","opensky-driver-uia" -ErrorAction SilentlyContinue |
     Stop-Process -Force -ErrorAction SilentlyContinue
+
+# Purge through the exact installed helper before removing its executable.
+# Native purge verifies key destruction before deleting encrypted history.
+# A failure keeps the helper and history available for retry.
+$HistoryPurgeHelper = Join-Path $HomeDir "packages\current\opensky-driver.exe"
+if ($Purge) {
+    if (-not (Test-Path -LiteralPath $HistoryPurgeHelper)) {
+        Write-Error "history_purge_incomplete: installed OpenSky Driver helper unavailable; preserved history and runtime for retry" -ErrorAction Continue
+        exit 1
+    }
+    try {
+        & $HistoryPurgeHelper history purge-offline --yes
+        $historyPurgeExit = $LASTEXITCODE
+    } catch {
+        Write-Error "history_purge_incomplete: installed helper could not complete purge; preserved history and runtime for retry: $_" -ErrorAction Continue
+        exit 1
+    }
+    if ($historyPurgeExit -ne 0) {
+        Write-Error "history_purge_incomplete: native key destruction was not verified; preserved history and runtime for retry" -ErrorAction Continue
+        exit 1
+    }
+    Write-Step "cryptographically purged OpenSky Computer History key and local history state"
+} else {
+    Write-Step "preserved encrypted Computer History if present; reinstall to reopen it or use -Purge to delete it"
+}
 
 # The visible bin path is local-only, but still require the junction shape the
 # installer creates before removing it.
@@ -174,8 +201,17 @@ if (Test-Path -LiteralPath $LocalHomeMarker) {
     Write-Step "$HomeDir has no opensky-driver install marker; leaving it untouched"
 }
 if (Test-Path -LiteralPath $RuntimeDir) {
-    Remove-Item -LiteralPath $RuntimeDir -Force -Recurse
-    Write-Step "removed $RuntimeDir"
+    # Only native purge may remove Computer History, after verifying that its
+    # Credential Manager key is gone. Ordinary uninstall preserves it.
+    foreach ($child in Get-ChildItem -LiteralPath $RuntimeDir -Force) {
+        if ($child.Name -ne "computer-history") {
+            Remove-Item -LiteralPath $child.FullName -Force -Recurse
+        }
+    }
+    if (@(Get-ChildItem -LiteralPath $RuntimeDir -Force).Count -eq 0) {
+        Remove-Item -LiteralPath $RuntimeDir -Force
+        Write-Step "removed empty runtime directory $RuntimeDir"
+    }
 }
 
 # Remove only the exact local PATH entry.
