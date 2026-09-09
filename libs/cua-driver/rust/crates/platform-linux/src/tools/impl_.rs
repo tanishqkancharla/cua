@@ -3585,11 +3585,16 @@ impl Tool for TypeTextTool {
                 Err(e) => ToolResult::error(format!("Task error: {e}")),
             };
         }
-        // Foreground means the caller explicitly permits activation. Chromium
-        // and WebKitGTK can acknowledge an accessibility write without
-        // producing the renderer input event, so web embedders use real XTest
-        // key events. Native toolkits keep their verifiable AT-SPI path below.
-        if delivery.is_foreground() && (is_chromium_embedder(pid) || is_webkitgtk_embedder(pid)) {
+        // Unindexed foreground typing addresses the current keyboard focus,
+        // just as a human typing would. Searching the entire application for an
+        // editable both repeats the background attempt's work and can choose a
+        // different field. Keep native element-addressed writes on their AT-SPI
+        // path; web embedders need real key events even when element-addressed.
+        if delivery.is_foreground()
+            && (resolved_elem_idx.is_none()
+                || is_chromium_embedder(pid)
+                || is_webkitgtk_embedder(pid))
+        {
             let text_f = text.clone();
             let idx = resolved_elem_idx;
             let result = tokio::task::spawn_blocking(move || {

@@ -276,3 +276,21 @@ Seven app cleanup receipts passed; all four input keymaps restored. An initial
 Writer setup failure was traced to the older image lacking a UTF-8 locale;
 unchanged tests passed with the locale already used by the full desktop image.
 Merged-cell and separate compositor/canonical desktop lanes remain unverified.
+
+### DRV-L07: foreground typing repeats full accessibility scans
+
+The exact df79e0cf1 binary passed TYPE-L01 and COORD-L01 in the remote
+`type-profile-01` diagnostic, with app exit and keyboard restoration verified.
+Typing 30 characters took 4.309 seconds to refuse background delivery, then
+5.913 seconds in foreground; typing 16 characters into a selected font field
+took 10.014 seconds to refuse, then 10.155 seconds in foreground. Timestamped
+AT-SPI markers show the same 1,964-node walk repeated in the first case and
+two 2,365-node walks repeated in the second. These are diagnostic timings with
+a transparent CLI wrapper, not agent task completion measurements.
+
+The candidate sends unindexed foreground text directly through the existing
+XTest route, preserving the current focused field. Native indexed writes,
+background capability checks, terminal handling, and Wayland routes retain
+their existing behavior. Linux compilation and the same real SDK saved-file,
+Unicode/selection, and keyboard-restoration checks must pass before this is
+accepted. No fresh paired-agent speedup or full desktop matrix is claimed.
