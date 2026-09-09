@@ -456,3 +456,12 @@ Chromium background refusal keep their existing paths. Exact candidate compile,
 saved Calc/name-box/new-sheet/double-click workflows, dialog alignment and
 foreground/sibling/modal regression checks are pending. No speed or broad
 isolation acceptance is claimed from the source review.
+
+
+Candidate4e3028d6f compiled, but its first four real SDK checks all stopped at
+`action_outcome_mismatch`: the new raw path name was not registered with the
+common execution-record publisher. The correction uses the existing `xtest`
+transport label, already used by focused typing; it does not bypass outcome
+validation or claim a verified click effect. Failed evidence is retained as
+focused-click-after-01. The unchanged four saved-file tests must be rerun on
+the corrected exact binary before any performance/acceptance claim.

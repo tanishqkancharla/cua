@@ -2996,7 +2996,9 @@ impl Tool for ClickTool {
                     count,
                     &modifier_refs,
                 )? {
-                    return Ok("x11_xtest_focused");
+                    // Reuse the registered XTest transport name so the common
+                    // action publisher can construct its execution record.
+                    return Ok("xtest");
                 }
             }
             // X11 injection. Tiered no-focus-steal delivery (background):
