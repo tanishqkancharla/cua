@@ -417,3 +417,22 @@ and modal-content assertions, alongside the foreground/sibling, range/formula,
 Unicode, indexed and existing input checks. Formatting or build success alone
 is not acceptance. The change affects the X11 unindexed background ladder;
 no new macOS/Windows/Wayland acceptance is claimed.
+
+
+Exact source435ef5940 passed build/focused Rust checks in OpenSky CI34394343940.
+BinarySHA2564031b914b757bde656f5ea6d0b4ca4cb612fbaa8d3d91e3e7b3e4671fd796d99
+passed ten unchanged real SDK checks: FOCUS-L01/02/03, CALC-L01/02/05,
+and TYPE/KEY/CLICK/COORD-L01. The previous modal mutation is refused and both
+documents remain unchanged. All13 owned app groups exited, four keyboard maps
+were restored, focus temporary directories and all containers were removed.
+The saved range contains all nine expected E2:E10 formulas; its workflow took
+64.476s and range typing0.245s. Evidence names: focus-modal-435-01,
+focus-siblings-435-01, calc-regression-435-01, input-regression-435-01.
+The evaluation workflow now pins this binary. Fresh agent performance is pending;
+these supporting SDK checks do not replace the canonical desktop matrix.
+
+Two limitations remain explicit. The frame-focus refusal also rejects ordinary
+nonmodal sibling windows in the same process; FOCUS-L02 tests independent
+processes. The existing Tk fallback uses a global application name and does not
+honor caller PID/XID. Neither limitation is resolved by the ten passing checks.
+This documentation-only follow-up does not change the tested435 executable.
