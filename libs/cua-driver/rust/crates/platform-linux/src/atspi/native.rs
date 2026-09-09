@@ -243,6 +243,7 @@ struct Visited<'a> {
     has_value: bool,
     has_component: bool,
     focused: bool,
+    children_limited: bool,
     /// True when an ancestor is a web document (e.g. role "document web"),
     /// i.e. this node is page content rather than browser chrome.
     in_web_doc: bool,
@@ -344,33 +345,174 @@ impl RawObjectRef {
     }
 }
 
-/// Read Accessible.GetChildren without deserializing the bus-name field as a
-/// `UniqueName`. WebKitGTK's embedded WebProcess exposes a well-known name
-/// containing a UUID; D-Bus can address it, but the stricter AT-SPI wrapper
-/// rejects it as an invalid unique name.
+type WireRef = (String, atspi::zbus::zvariant::OwnedObjectPath);
+
+struct Children {
+    refs: Vec<RawObjectRef>,
+    limited: bool,
+}
+
+fn raw_ref((name, path): WireRef) -> RawObjectRef {
+    RawObjectRef {
+        name,
+        path: path.to_string(),
+    }
+}
+
+fn intersect_rect(
+    a: (i32, i32, i32, i32),
+    b: (i32, i32, i32, i32),
+) -> Option<(i32, i32, i32, i32)> {
+    if a.2 <= 0 || a.3 <= 0 || b.2 <= 0 || b.3 <= 0 {
+        return None;
+    }
+    let left = i64::from(a.0.max(b.0));
+    let top = i64::from(a.1.max(b.1));
+    let right = (i64::from(a.0) + i64::from(a.2)).min(i64::from(b.0) + i64::from(b.2));
+    let bottom = (i64::from(a.1) + i64::from(a.3)).min(i64::from(b.1) + i64::from(b.3));
+    if right <= left || bottom <= top {
+        return None;
+    }
+    Some((
+        left.try_into().ok()?,
+        top.try_into().ok()?,
+        (right - 1).try_into().ok()?,
+        (bottom - 1).try_into().ok()?,
+    ))
+}
+
+/// Virtual spreadsheet tables can report billions of children. Never request
+/// their full child list: even a timed-out D-Bus call can leave the app busy
+/// constructing it. Resolve visible corner cells, then fetch a bounded row-major
+/// range using Table.GetAccessibleAt. Merged cells are emitted only once.
+async fn visible_table_children(
+    conn: &atspi::zbus::Connection,
+    oref: &RawObjectRef,
+    frame: &RawObjectRef,
+    limit: usize,
+) -> Result<Vec<RawObjectRef>> {
+    let component = atspi::zbus::Proxy::new(
+        conn,
+        oref.name.as_str(),
+        oref.path.as_str(),
+        "org.a11y.atspi.Component",
+    )
+    .await?;
+    let frame_component = atspi::zbus::Proxy::new(
+        conn,
+        frame.name.as_str(),
+        frame.path.as_str(),
+        "org.a11y.atspi.Component",
+    )
+    .await?;
+    let table_bounds: (i32, i32, i32, i32) = component.call("GetExtents", &(0u32,)).await?;
+    let frame_bounds: (i32, i32, i32, i32) = frame_component.call("GetExtents", &(0u32,)).await?;
+    let Some((left, top, right, bottom)) = intersect_rect(table_bounds, frame_bounds) else {
+        return Ok(Vec::new());
+    };
+    let inset_x = ((right - left) / 2).min(2);
+    let inset_y = ((bottom - top) / 2).min(2);
+    let (left, right, top, bottom) = (
+        left + inset_x,
+        right - inset_x,
+        top + inset_y,
+        bottom - inset_y,
+    );
+    let table = atspi::zbus::Proxy::new(
+        conn,
+        oref.name.as_str(),
+        oref.path.as_str(),
+        "org.a11y.atspi.Table",
+    )
+    .await?;
+    let mut rows = Vec::new();
+    let mut columns = Vec::new();
+    for (x, y) in [(left, top), (right, top), (left, bottom), (right, bottom)] {
+        let cell: WireRef = component
+            .call("GetAccessibleAtPoint", &(x, y, 0u32))
+            .await?;
+        let accessible = atspi::zbus::Proxy::new(
+            conn,
+            cell.0.as_str(),
+            cell.1.as_str(),
+            "org.a11y.atspi.Accessible",
+        )
+        .await?;
+        let index: i32 = accessible.call("GetIndexInParent", &()).await?;
+        let row: i32 = table.call("GetRowAtIndex", &(index,)).await?;
+        let column: i32 = table.call("GetColumnAtIndex", &(index,)).await?;
+        if row < 0 || column < 0 {
+            return Err(anyhow!("Visible table corner has no cell coordinates"));
+        }
+        rows.push(row);
+        columns.push(column);
+    }
+    let mut refs = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut queried = 0usize;
+    for row in *rows.iter().min().unwrap()..=*rows.iter().max().unwrap() {
+        for column in *columns.iter().min().unwrap()..=*columns.iter().max().unwrap() {
+            if queried >= limit {
+                return Ok(refs);
+            }
+            queried += 1;
+            let cell: WireRef = table.call("GetAccessibleAt", &(row, column)).await?;
+            if seen.insert((cell.0.clone(), cell.1.to_string())) {
+                refs.push(raw_ref(cell));
+            }
+        }
+    }
+    Ok(refs)
+}
+
+/// Keep bus names as strings for WebKit's well-known peers. Check ChildCount
+/// before GetChildren, and never send an unbounded request to a virtual tree.
 async fn raw_children(
     conn: &atspi::zbus::Connection,
     oref: &RawObjectRef,
-) -> Result<Vec<RawObjectRef>> {
+    frame: &RawObjectRef,
+    limit: usize,
+) -> Result<Children> {
+    if limit == 0 {
+        return Ok(Children {
+            refs: Vec::new(),
+            limited: true,
+        });
+    }
     let proxy = atspi::zbus::Proxy::new(
         conn,
         oref.name.as_str(),
         oref.path.as_str(),
         "org.a11y.atspi.Accessible",
     )
-    .await
-    .map_err(|e| anyhow!("Accessible proxy unavailable: {e}"))?;
-    let refs: Vec<(String, atspi::zbus::zvariant::OwnedObjectPath)> = proxy
-        .call("GetChildren", &())
-        .await
-        .map_err(|e| anyhow!("Accessible.GetChildren failed: {e}"))?;
-    Ok(refs
-        .into_iter()
-        .map(|(name, path)| RawObjectRef {
-            name,
-            path: path.to_string(),
-        })
-        .collect())
+    .await?;
+    let count: i32 = proxy.get_property("ChildCount").await?;
+    if count < 0 {
+        return Err(anyhow!("Accessible.ChildCount is unknown"));
+    }
+    if count as usize <= limit {
+        let refs: Vec<WireRef> = proxy.call("GetChildren", &()).await?;
+        let limited = refs.len() > limit;
+        return Ok(Children {
+            refs: refs.into_iter().take(limit).map(raw_ref).collect(),
+            limited,
+        });
+    }
+    let interfaces: Vec<String> = proxy.call("GetInterfaces", &()).await?;
+    let refs = if interfaces.iter().any(|name| name == "org.a11y.atspi.Table") {
+        visible_table_children(conn, oref, frame, limit).await?
+    } else {
+        let mut refs = Vec::new();
+        for index in 0..limit.min(i32::MAX as usize) {
+            let child: WireRef = proxy.call("GetChildAtIndex", &(index as i32,)).await?;
+            refs.push(raw_ref(child));
+        }
+        refs
+    };
+    Ok(Children {
+        refs,
+        limited: true,
+    })
 }
 
 /// Resolve the process id behind an application accessible's D-Bus name.
@@ -698,7 +840,8 @@ async fn collect_visited_bounded<'a>(
     };
 
     let mut stack: Vec<(RawObjectRef, usize, bool, usize)> = seeds
-        .into_iter()
+        .iter()
+        .cloned()
         .enumerate()
         .map(|(ordinal, r)| (r, 0usize, false, ordinal))
         .rev()
@@ -797,6 +940,7 @@ async fn collect_visited_bounded<'a>(
         let has_component = ifaces.contains(Interface::Component);
         let has_text = ifaces.contains(Interface::Text);
 
+        let descend = max_depth.map(|d| depth + 1 <= d).unwrap_or(true);
         // These four are independent — issue them concurrently to cut the
         // per-node round-trip cost (large trees like Chromium's have hundreds
         // of nodes, so sequential reads dominate the walk time).
@@ -804,7 +948,12 @@ async fn collect_visited_bounded<'a>(
             call(acc.get_role_name()),
             call(acc.name()),
             call(acc.get_state()),
-            call(raw_children(zconn, &oref)),
+            call(raw_children(
+                zconn,
+                &oref,
+                &seeds[frame_ordinal],
+                if descend { budget } else { 0 }
+            )),
         );
         let role = match role_r {
             Some(Ok(r)) => r,
@@ -911,11 +1060,14 @@ async fn collect_visited_bounded<'a>(
         // Enqueue children (fetched above) before moving `acc` into `visited`.
         // Honor max_depth (#22865): skip enqueueing descendants whose depth
         // would exceed the cap.
-        let descend = max_depth.map(|d| depth + 1 <= d).unwrap_or(true);
+        let children_limited = children_r
+            .as_ref()
+            .and_then(|r| r.as_ref().ok())
+            .is_none_or(|c| c.limited);
         if descend {
             match children_r {
                 Some(Ok(children)) => {
-                    for c in children.into_iter().rev() {
+                    for c in children.refs.into_iter().rev() {
                         stack.push((c, depth + 1, child_in_web_doc, frame_ordinal));
                     }
                 }
@@ -938,6 +1090,7 @@ async fn collect_visited_bounded<'a>(
             has_value,
             has_component,
             focused,
+            children_limited,
             in_web_doc,
             on_web_process_bus: is_web_process_bus(&oref.name),
             frame_ordinal,
@@ -1023,7 +1176,9 @@ fn render(visited: &[Visited<'_>], only_frame: Option<usize>) -> (String, Vec<At
                 checked: v.checked,
                 enabled: v.enabled,
                 selected: v.selected,
-                description: None,
+                description: v.children_limited.then(|| {
+                    "Partial child list; virtual tables expose a bounded visible range.".to_owned()
+                }),
                 actions: v.actions.clone(),
                 element_key: idx as u64,
                 depth: v.depth,
@@ -1045,6 +1200,11 @@ fn render(visited: &[Visited<'_>], only_frame: Option<usize>) -> (String, Vec<At
                 "{indent}- {role} = \"{name}\"\n",
                 role = v.role,
                 name = v.name,
+            ));
+        }
+        if emit && v.children_limited {
+            md.push_str(&format!(
+                "{indent}  (Partial child list; virtual tables expose a bounded visible range.)\n"
             ));
         }
     }
@@ -3488,5 +3648,32 @@ mod coord_tests {
             "activate".to_owned(),
         ];
         assert_eq!(activation_index("button", &sparse), Some(2));
+    }
+}
+
+#[cfg(test)]
+mod virtual_table_tests {
+    use super::intersect_rect;
+
+    #[test]
+    fn table_range_is_clipped_to_the_visible_frame() {
+        assert_eq!(
+            intersect_rect((-100, -100, 1000, 1000), (10, 20, 300, 200)),
+            Some((10, 20, 309, 219))
+        );
+        assert_eq!(
+            intersect_rect((33, 153, 1174, 662), (0, 0, 1280, 900)),
+            Some((33, 153, 1206, 814))
+        );
+    }
+
+    #[test]
+    fn table_range_handles_empty_and_extreme_geometry_without_wrapping() {
+        assert_eq!(intersect_rect((0, 0, 0, 100), (0, 0, 100, 100)), None);
+        assert_eq!(intersect_rect((0, 0, 10, 10), (10, 10, 10, 10)), None);
+        assert_eq!(
+            intersect_rect((i32::MAX - 2, 0, 10, 10), (i32::MAX - 1, 0, 1, 1)),
+            Some((i32::MAX - 1, 0, i32::MAX - 1, 0))
+        );
     }
 }

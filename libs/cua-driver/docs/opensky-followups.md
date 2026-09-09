@@ -206,3 +206,22 @@ CI fa11d162c also passed real Python/TypeScript SDK, binding freshness, portable
 contracts and Windows unit checks. Linux/Nix were blocked by a Hermes fixture
 using the old skill name; its two paths now use opensky-driver and the real CLI
 regression passed locally. Full next-candidate CI and desktop gates remain open.
+
+
+### DRV-L06: Linux Calc virtual table traversal
+
+The real SDK income-statement setup check fails because the Calc sheet reports
+2,147,483,647 children and the native walker requests GetChildren for all of
+them. Bounded D-Bus diagnostics confirm a visible range of rows 0–36 and
+columns 0–11 through Component and Table queries. The candidate checks child
+counts first, queries bounded visible cells for large tables, clips them to the
+app frame, and reports partial child lists explicitly. Large non-table
+containers use a bounded prefix. Existing per-call/operation limits remain.
+
+The same collector supplies snapshot and action indices. Merged cell object
+references are deduplicated within the table. Visible-range discovery refuses
+unusable corner coordinates instead of issuing a full child-list request.
+This is a candidate, not accepted behavior: Linux compilation, unchanged
+SETUP-L02, current keyboard/dialog regressions, scrolled and merged-cell cases
+and Wayland window geometry still need validation. No macOS or Windows GUI
+behavior has been changed or certified by this Linux-only implementation.
