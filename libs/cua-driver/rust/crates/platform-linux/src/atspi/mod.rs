@@ -14,7 +14,7 @@ use anyhow::Result;
 pub mod cache;
 pub mod native;
 pub use cache::ElementCache;
-pub use native::ensure_listener_active;
+pub use native::{ensure_listener_active, resolve_indexed_click_target, IndexedClickTarget};
 
 #[derive(Clone, Debug)]
 pub struct AtspiNode {
@@ -473,3 +473,15 @@ impl std::fmt::Display for ElementClickNeedsForeground {
     }
 }
 impl std::error::Error for ElementClickNeedsForeground {}
+
+/// The requested indexed click has no supported AX activation route. This
+/// classification is made before submitting any action, so pointer fallback
+/// is safe. Other action errors must not be treated as this pre-input result.
+#[derive(Debug)]
+pub struct ClickActionUnavailable(pub String);
+impl std::fmt::Display for ClickActionUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for ClickActionUnavailable {}

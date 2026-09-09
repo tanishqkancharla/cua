@@ -2073,6 +2073,184 @@ pub fn invoke_menu_path(pid: u32, path: &[String]) -> Result<()> {
     )
 }
 
+/// One fresh, window-proven element resolution retained only for a click request.
+/// Keeping live proxies lets geometry, classification and activation share the
+/// same indexed target instead of independently resolving potentially changed
+/// application-wide ordinals. This is not a cross-request snapshot cache.
+pub struct IndexedClickTarget {
+    pid: u32,
+    xid: u64,
+    index: usize,
+    target_position: usize,
+    frame_ordinal: usize,
+    visited: Vec<Visited<'static>>,
+}
+
+impl IndexedClickTarget {
+    pub fn is_table_cell(&self) -> bool {
+        self.visited[self.target_position].role == "table cell"
+    }
+
+    /// Refresh Component extents through the retained proxies. No tree walk is
+    /// repeated, and AX-only controls need not have bounds to be resolved.
+    pub fn screen_bounds(&self) -> Result<(i32, i32, u32, u32)> {
+        bounded(
+            async {
+                element_bounds_for_visited(
+                    &self.visited,
+                    self.pid,
+                    self.xid,
+                    Some(self.frame_ordinal),
+                    Some(self.index),
+                )
+                .await
+                .into_iter()
+                .next()
+                .map(|(_, x, y, width, height)| (x, y, width, height))
+                .ok_or_else(|| anyhow!("element {} has no usable Component bounds", self.index))
+            },
+            || {
+                Err(anyhow!(
+                    "indexed click bounds timed out for pid {}",
+                    self.pid
+                ))
+            },
+        )
+    }
+
+    /// Only ClickActionUnavailable and ElementClickNeedsForeground prove that
+    /// no action was submitted. Other errors (including timeout/doAction
+    /// failures) must not trigger a second pointer mutation.
+    pub fn perform_action(&self, allow_activation: bool) -> Result<(String, bool)> {
+        let target = &self.visited[self.target_position];
+        if self.is_table_cell() {
+            return Err(super::ElementClickNeedsForeground.into());
+        }
+        if !allow_activation {
+            return Err(super::ClickActionUnavailable(
+                "modified click requires pointer delivery".to_owned(),
+            )
+            .into());
+        }
+        if activation_index(&target.role, &target.actions).is_none() {
+            return Err(super::ClickActionUnavailable(format!(
+                "element {} does not advertise a safe activation action",
+                self.index,
+            ))
+            .into());
+        }
+        bounded(
+            activate_visited(target, self.index, allow_activation),
+            || {
+                Err(anyhow!(
+                    "indexed click action timed out for pid {}",
+                    self.pid
+                ))
+            },
+        )
+    }
+}
+
+/// Resolve exactly once, retaining application-wide index ordering while
+/// requiring the selected element to belong to the explicitly named X11 window.
+pub fn resolve_indexed_click_target(pid: u32, idx: usize, xid: u64) -> Result<IndexedClickTarget> {
+    if xid == 0 {
+        return Err(anyhow!(
+            "indexed click resolution requires an exact X11 window"
+        ));
+    }
+    bounded(
+        async {
+            let conn = shared_connection().await?;
+            let (visited, scoped_frame) = collect_visited_bounded(conn, pid, xid, None, None)
+                .await?
+                .ok_or_else(|| anyhow!("no AT-SPI application for pid {pid}"))?;
+            let frame_ordinal = scoped_frame.ok_or_else(|| {
+                anyhow!("cannot correlate window {xid} to an AT-SPI frame for pid {pid}")
+            })?;
+            // Snapshot indices are application-wide even when only one frame
+            // is emitted. Filtering to the frame first would reinterpret them.
+            let target_position = visited
+                .iter()
+                .enumerate()
+                .filter(|(_, node)| is_indexable(node))
+                .nth(idx)
+                .map(|(position, _)| position)
+                .ok_or_else(|| anyhow!("element {idx} not found"))?;
+            if visited[target_position].frame_ordinal != frame_ordinal {
+                return Err(anyhow!("element {idx} does not belong to window {xid}"));
+            }
+            Ok(IndexedClickTarget {
+                pid,
+                xid,
+                index: idx,
+                target_position,
+                frame_ordinal,
+                visited,
+            })
+        },
+        || Err(anyhow!("indexed click resolution timed out for pid {pid}")),
+    )
+}
+
+async fn activate_visited(
+    target: &Visited<'_>,
+    idx: usize,
+    allow_activation: bool,
+) -> Result<(String, bool)> {
+    // Calc accepts synthetic targeted clicks without selecting their
+    // cell. Refuse before input so callers can retain this exact target
+    // and explicitly use the real pointer route.
+    if target.role == "table cell" {
+        return Err(super::ElementClickNeedsForeground.into());
+    }
+    if !allow_activation {
+        return Err(anyhow!("modified click requires pointer delivery"));
+    }
+
+    // Suspected no-op: actuating `do_action(0)` on a passive display role
+    // (a `label`/`static`/`image` indexed only for its Value interface) or a
+    // node that advertises no action at all is the AT-SPI analogue of macOS'
+    // "element does not advertise this action" — the call returns success but
+    // likely changes nothing. Reuses the same passive-role detector
+    // `select_click_target` leans on for the coordinate paths. The caller
+    // turns this into `effect: "suspected_noop"` + an escalation hint.
+    let suspected_noop = target.actions.is_empty() || is_passive_role(&target.role);
+
+    // Which action to actuate is decided by NAME, not by position. A
+    // GTK4 text view advertises `buffer.delete-line` first, so firing
+    // "action 0" there deletes a line of the user's document while
+    // reporting an ordinary click. An element that advertises no
+    // activation at all is a no-op the caller must escalate past —
+    // not an invitation to fire whatever happens to be first.
+    let chosen = activation_index(&target.role, &target.actions)
+        .ok_or_else(|| anyhow!("element {idx} does not advertise a safe activation action"))?;
+
+    let ap = target
+        .acc
+        .proxies()
+        .await
+        .map_err(|e| anyhow!("interface proxies unavailable: {e}"))?
+        .action()
+        .await
+        .map_err(|e| anyhow!("Action unavailable: {e}"))?;
+    let action = target.actions.get(chosen).cloned().unwrap_or_default();
+    let accepted = ap
+        .do_action(chosen as i32)
+        .await
+        .map_err(|e| anyhow!("doAction failed: {e}"))?;
+    if !accepted {
+        // A request was submitted: report refusal, never retry by pointer.
+        return Err(anyhow!("element {idx} rejected the accessibility action"));
+    }
+    // AT-SPI's doAction acknowledgement can precede the renderer's
+    // queued DOM mutation. Give WebKit/Chromium one short event-loop
+    // turn before returning success so a caller's immediate external
+    // state read observes the action it was told was delivered.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    Ok((action, suspected_noop))
+}
+
 pub fn perform_action(pid: u32, idx: usize, allow_activation: bool) -> Result<(String, bool)> {
     bounded(
         async {
@@ -2084,54 +2262,7 @@ pub fn perform_action(pid: u32, idx: usize, allow_activation: bool) -> Result<(S
             let target = action_nodes.get(idx).ok_or_else(|| {
                 anyhow!("element {idx} not found (total: {})", action_nodes.len())
             })?;
-
-            // Calc accepts synthetic targeted clicks without selecting their
-            // cell. Refuse before input so callers can retain this exact target
-            // and explicitly use the real pointer route.
-            if target.role == "table cell" {
-                return Err(super::ElementClickNeedsForeground.into());
-            }
-            if !allow_activation {
-                return Err(anyhow!("modified click requires pointer delivery"));
-            }
-
-            // Suspected no-op: actuating `do_action(0)` on a passive display role
-            // (a `label`/`static`/`image` indexed only for its Value interface) or a
-            // node that advertises no action at all is the AT-SPI analogue of macOS'
-            // "element does not advertise this action" — the call returns success but
-            // likely changes nothing. Reuses the same passive-role detector
-            // `select_click_target` leans on for the coordinate paths. The caller
-            // turns this into `effect: "suspected_noop"` + an escalation hint.
-            let suspected_noop = target.actions.is_empty() || is_passive_role(&target.role);
-
-            // Which action to actuate is decided by NAME, not by position. A
-            // GTK4 text view advertises `buffer.delete-line` first, so firing
-            // "action 0" there deletes a line of the user's document while
-            // reporting an ordinary click. An element that advertises no
-            // activation at all is a no-op the caller must escalate past —
-            // not an invitation to fire whatever happens to be first.
-            let chosen = activation_index(&target.role, &target.actions).ok_or_else(|| {
-                anyhow!("element {idx} does not advertise a safe activation action")
-            })?;
-
-            let ap = target
-                .acc
-                .proxies()
-                .await
-                .map_err(|e| anyhow!("interface proxies unavailable: {e}"))?
-                .action()
-                .await
-                .map_err(|e| anyhow!("Action unavailable: {e}"))?;
-            let action = target.actions.get(chosen).cloned().unwrap_or_default();
-            ap.do_action(chosen as i32)
-                .await
-                .map_err(|e| anyhow!("doAction failed: {e}"))?;
-            // AT-SPI's doAction acknowledgement can precede the renderer's
-            // queued DOM mutation. Give WebKit/Chromium one short event-loop
-            // turn before returning success so a caller's immediate external
-            // state read observes the action it was told was delivered.
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            Ok((action, suspected_noop))
+            activate_visited(target, idx, allow_activation).await
         },
         || {
             Err(anyhow!(

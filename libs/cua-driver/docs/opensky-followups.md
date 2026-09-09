@@ -477,3 +477,19 @@ BuildCI34400764844 produced SHA256
 3550951c28dd413893f39b2fb4e7c5c5cadb1256517800b8937bad8daab420ce.
 This is supporting Linux SDK acceptance; the canonical cross-platform matrix
 and a fresh agent benchmark remain pending. The SDK evaluation workflow selects this verified build.
+
+### One live indexed-click target per X11 request — candidate
+
+The range replay spends24.640s of a24.835s indexed click in five complete
+AT-SPI walks. The candidate resolves the global index once per request, requires
+its exact native window/frame correlation, and retains the live accessible
+proxies for activation and refreshed geometry. Plain single-left AX activation
+remains preferred; other pointer gestures use the shared checked focused-XTest
+route when possible. A foreground retry resolves afresh rather than caching
+across calls. Wayland and legacy callers retain their routes.
+
+Only typed pre-input unavailability allows pointer fallback. Uncertain AX
+errors, timeouts and negative doAction acknowledgments return errors without
+replay. Live proxies do not provide an atomic lease against concurrent app
+changes. Compilation, indexed/scrolled/range saved outcomes, real AX buttons,
+and cross-window rejection need validation before any evaluation pin change.
