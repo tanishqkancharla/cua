@@ -526,3 +526,17 @@ and index comparison, saved indexed-cell outcomes and modal/dialog regressions
 remain pending. Concurrent toolkit mutations may change relative observation
 timing; the existing first-stage role/name/state/children reads already overlap.
 This is a candidate, with no performance or parity improvement claimed yet.
+
+Exact candidate1cd998ede compiled with focused Rust checks inCI34407163131;
+binarySHA25684e185a3edd60730153482057aa7a8939974a5b9b04c839771314e15498c2c0d.
+The unchanged CALC-L01/02/05 tests passed on baseline486 and candidate1cd in
+ax-metadata-before-01/after-01. All saved XLSX cells match between runs, including
+E2=75000, E50=42 and all nine range formulas. Nine public AX observations retain
+identical fields and indices after replacing only each owned document URI from
+its launch receipt; raw observations and URI-only differences remain retained.
+All six owned app groups exited and both containers were removed.
+
+Nine AX reads totaled56.351s before and54.356s after (3.5% lower); suite wall time
+was110.45s versus107.55s. This single pair cannot establish a reliable small
+performance gain. Modal/dialog and broader acceptance remain pending. The paid
+SDK workflow stays on486; this candidate is not promoted as a parity improvement.
