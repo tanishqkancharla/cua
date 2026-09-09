@@ -540,3 +540,19 @@ Nine AX reads totaled56.351s before and54.356s after (3.5% lower); suite wall ti
 was110.45s versus107.55s. This single pair cannot establish a reliable small
 performance gain. Modal/dialog and broader acceptance remain pending. The paid
 SDK workflow stays on486; this candidate is not promoted as a parity improvement.
+
+### Bounded preorder metadata enrichment — candidate
+
+The next candidate keeps structural DFS and child enumeration sequential, but
+collects up to eight nodes before reading their independent Action/Value/Text
+metadata concurrently. Completed nodes are appended in their original preorder.
+The same operation deadline covers discovery and enrichment; a timeout retains
+only the fully enriched prefix, since incomplete action lists could otherwise
+renumber later element indices. Futures are scoped to the request, with no new
+dependency, detached work, cross-request cache or new timeout budget.
+
+Node/depth limits, exact seed/frame correlation, web-document inheritance,
+per-interface defaults, action-name slots and spreadsheet text precedence stay
+intact. Read timing across nearby nodes changes, so real observation/indices,
+saved edits and modal/dialog behavior need verification. Formatting checks pass;
+exact Linux compilation and before/after acceptance remain pending.

@@ -795,6 +795,159 @@ async fn resolve_window_frame(
     resolved
 }
 
+/// Structural discovery remains sequential; only metadata that cannot change
+/// the DFS stack is deferred. These nodes must be enriched before indexing:
+/// action availability participates in the global element-index predicate.
+struct PendingVisited<'a> {
+    node: Visited<'a>,
+    has_action: bool,
+    has_text: bool,
+}
+
+const METADATA_BATCH_SIZE: usize = 8;
+
+async fn enrich_visited(pending: PendingVisited<'_>) -> Visited<'_> {
+    let PendingVisited {
+        mut node,
+        has_action,
+        has_text,
+    } = pending;
+    let acc = &node.acc;
+    let has_value = node.has_value;
+    // Collect action names, numeric value, and (crucially) Text-interface
+    // content. Only touch `proxies` when an interface is actually present.
+    let mut actions: Vec<String> = Vec::new();
+    let mut value: Option<String> = None;
+    let mut text_content = String::new();
+    let mut observed_text = None;
+    if has_action || has_value || has_text {
+        if let Some(Ok(proxies)) = call(acc.proxies()).await {
+            // These interfaces expose independent metadata. Fetch them in
+            // parallel while keeping each interface's dependent calls and
+            // action-name slots ordered. The surrounding tree traversal
+            // remains sequential, so window identity and global indices do
+            // not change.
+            tokio::join!(
+                async {
+                    if has_action {
+                        if let Some(Ok(ap)) = call(proxies.action()).await {
+                            let n = call(ap.n_actions()).await.and_then(|r| r.ok()).unwrap_or(0);
+                            for i in 0..n {
+                                // Preserve the AT-SPI action index even when an
+                                // individual name lookup fails. `do_action` takes
+                                // this original index, so compacting the vector
+                                // could otherwise actuate a different action than
+                                // the name we selected.
+                                actions.push(
+                                    call(ap.get_name(i))
+                                        .await
+                                        .and_then(|result| result.ok())
+                                        .unwrap_or_default(),
+                                );
+                            }
+                        }
+                    }
+                },
+                async {
+                    if has_value {
+                        if let Some(Ok(vp)) = call(proxies.value()).await {
+                            value = call(vp.current_value())
+                                .await
+                                .and_then(|r| r.ok())
+                                .map(format_value);
+                        }
+                    }
+                },
+                async {
+                    // Text content is where editable/entry text (the typed string)
+                    // lives; `name` is usually empty for such widgets.
+                    if has_text {
+                        if let Some(Ok(tp)) = call(proxies.text()).await {
+                            if let Some(Ok(count)) = call(tp.character_count()).await {
+                                if count == 0 {
+                                    observed_text = Some(String::new());
+                                } else if count > 0 {
+                                    if let Some(Ok(t)) = call(tp.get_text(0, count.min(4096))).await
+                                    {
+                                        text_content = t.clone();
+                                        observed_text = Some(t);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+            );
+        }
+    }
+
+    // Spreadsheet cell names identify coordinates (e.g. E1), while Text
+    // contains the displayed content. Preserve both. Value often reports
+    // zero for a string/empty cell and must not replace its actual text.
+    if node.role.eq_ignore_ascii_case("table cell") {
+        if let Some(text) = observed_text {
+            value = if text.is_empty() { None } else { Some(text) };
+        }
+    }
+
+    // Surface Text content as the display name when the widget has no name.
+    if node.name.trim().is_empty() && !text_content.trim().is_empty() {
+        node.name = text_content;
+    }
+    node.actions = actions;
+    node.value = value;
+    node
+}
+
+/// Poll a bounded batch of borrowed reads without detached tasks or a new
+/// timeout budget. Completion order cannot reorder nodes. On deadline expiry,
+/// only the fully enriched preorder prefix is retained: an unenriched action
+/// list could otherwise renumber every later element.
+async fn enrich_visited_batch<'a>(
+    pending: &mut Vec<PendingVisited<'a>>,
+    visited: &mut Vec<Visited<'a>>,
+    deadline: std::time::Instant,
+) -> bool {
+    use std::future::Future;
+    use std::task::Poll;
+
+    if pending.is_empty() {
+        return true;
+    }
+    if std::time::Instant::now() >= deadline {
+        return false;
+    }
+    let mut reads: Vec<_> = std::mem::take(pending)
+        .into_iter()
+        .map(|node| Some(Box::pin(enrich_visited(node))))
+        .collect();
+    let mut completed: Vec<Option<Visited<'a>>> =
+        std::iter::repeat_with(|| None).take(reads.len()).collect();
+    let batch = std::future::poll_fn(|cx| {
+        let mut all_complete = true;
+        for (index, slot) in reads.iter_mut().enumerate() {
+            let Some(read) = slot.as_mut() else { continue };
+            match read.as_mut().poll(cx) {
+                Poll::Ready(node) => {
+                    completed[index] = Some(node);
+                    *slot = None;
+                }
+                Poll::Pending => all_complete = false,
+            }
+        }
+        if all_complete {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    });
+    let finished = tokio::time::timeout_at(deadline.into(), batch)
+        .await
+        .is_ok();
+    visited.extend(completed.into_iter().take_while(Option::is_some).flatten());
+    finished
+}
+
 /// `collect_visited` with caller-supplied caps.
 /// - `max_elements = None` keeps the historical 5 000-node budget.
 /// - `max_depth = None` keeps depth uncapped (the historical behaviour);
@@ -848,6 +1001,7 @@ async fn collect_visited_bounded<'a>(
         .collect();
 
     let mut visited: Vec<Visited<'a>> = Vec::new();
+    let mut pending = Vec::with_capacity(METADATA_BATCH_SIZE);
     // Guard against pathological/looping trees. Defaults to 5 000 (the
     // historical hard-coded budget); callers can override via max_elements.
     let mut budget = max_elements.unwrap_or(5000usize);
@@ -959,7 +1113,7 @@ async fn collect_visited_bounded<'a>(
             Some(Ok(r)) => r,
             _ => String::new(),
         };
-        let mut name = match name_r {
+        let name = match name_r {
             Some(Ok(n)) => n,
             _ => String::new(),
         };
@@ -996,90 +1150,6 @@ async fn collect_visited_bounded<'a>(
             None
         };
 
-        // Collect action names, numeric value, and (crucially) Text-interface
-        // content. Only touch `proxies` when an interface is actually present,
-        // and drop the borrow before `acc` moves into `visited`.
-        let mut actions: Vec<String> = Vec::new();
-        let mut value: Option<String> = None;
-        let mut text_content = String::new();
-        let mut observed_text = None;
-        if has_action || has_value || has_text {
-            if let Some(Ok(proxies)) = call(acc.proxies()).await {
-                // These interfaces expose independent metadata. Fetch them in
-                // parallel while keeping each interface's dependent calls and
-                // action-name slots ordered. The surrounding tree traversal
-                // remains sequential, so window identity and global indices do
-                // not change.
-                tokio::join!(
-                    async {
-                        if has_action {
-                            if let Some(Ok(ap)) = call(proxies.action()).await {
-                                let n =
-                                    call(ap.n_actions()).await.and_then(|r| r.ok()).unwrap_or(0);
-                                for i in 0..n {
-                                    // Preserve the AT-SPI action index even when an
-                                    // individual name lookup fails. `do_action` takes
-                                    // this original index, so compacting the vector
-                                    // could otherwise actuate a different action than
-                                    // the name we selected.
-                                    actions.push(
-                                        call(ap.get_name(i))
-                                            .await
-                                            .and_then(|result| result.ok())
-                                            .unwrap_or_default(),
-                                    );
-                                }
-                            }
-                        }
-                    },
-                    async {
-                        if has_value {
-                            if let Some(Ok(vp)) = call(proxies.value()).await {
-                                value = call(vp.current_value())
-                                    .await
-                                    .and_then(|r| r.ok())
-                                    .map(format_value);
-                            }
-                        }
-                    },
-                    async {
-                        // Text content is where editable/entry text (the typed string)
-                        // lives; `name` is usually empty for such widgets.
-                        if has_text {
-                            if let Some(Ok(tp)) = call(proxies.text()).await {
-                                if let Some(Ok(count)) = call(tp.character_count()).await {
-                                    if count == 0 {
-                                        observed_text = Some(String::new());
-                                    } else if count > 0 {
-                                        if let Some(Ok(t)) =
-                                            call(tp.get_text(0, count.min(4096))).await
-                                        {
-                                            text_content = t.clone();
-                                            observed_text = Some(t);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    },
-                );
-            }
-        }
-
-        // Spreadsheet cell names identify coordinates (e.g. E1), while Text
-        // contains the displayed content. Preserve both. Value often reports
-        // zero for a string/empty cell and must not replace its actual text.
-        if role_lower == "table cell" {
-            if let Some(text) = observed_text {
-                value = if text.is_empty() { None } else { Some(text) };
-            }
-        }
-
-        // Surface Text content as the display name when the widget has no name.
-        if name.trim().is_empty() && !text_content.trim().is_empty() {
-            name = text_content;
-        }
-
         // Children inherit web-document context, plus this node's own role.
         let child_in_web_doc = in_web_doc || is_document_role(&role);
 
@@ -1102,28 +1172,41 @@ async fn collect_visited_bounded<'a>(
             }
         }
 
-        visited.push(Visited {
-            depth,
-            role,
-            name,
-            value,
-            checked,
-            enabled,
-            selected,
-            selectable,
-            actions,
-            has_editable,
-            has_value,
-            has_component,
-            focused,
-            children_limited,
-            in_web_doc,
-            on_web_process_bus: is_web_process_bus(&oref.name),
-            frame_ordinal,
-            acc,
+        pending.push(PendingVisited {
+            node: Visited {
+                depth,
+                role,
+                name,
+                value: None,
+                checked,
+                enabled,
+                selected,
+                selectable,
+                actions: Vec::new(),
+                has_editable,
+                has_value,
+                has_component,
+                focused,
+                children_limited,
+                in_web_doc,
+                on_web_process_bus: is_web_process_bus(&oref.name),
+                frame_ordinal,
+                acc,
+            },
+            has_action,
+            has_text,
         });
+        if pending.len() == METADATA_BATCH_SIZE
+            && !enrich_visited_batch(&mut pending, &mut visited, deadline).await
+        {
+            dlog!("collect_visited metadata deadline exhausted; returning enriched prefix");
+            break;
+        }
     }
 
+    // Flush a final short chunk after a node/depth limit or exhausted stack.
+    // The same deadline applies even when discovery stopped on an error.
+    enrich_visited_batch(&mut pending, &mut visited, deadline).await;
     dlog!("walked pid {pid}: {} node(s)", visited.len());
     Ok(Some((visited, scoped_frame)))
 }
