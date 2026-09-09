@@ -1744,8 +1744,9 @@ fn non_ax_escalation() -> Value {
 /// caller confirms through a separate observation) and
 /// carries a `foreground` escalation, because the field IS in the AT-SPI tree —
 /// it's a delivery/focus problem, not a missing element. The foreground rung
-/// itself (`key_events_fg`) is already the last resort, so it emits no
-/// escalation. Mirrors the macOS `type_text` contract.
+/// itself (`key_events_fg`), or real keys sent to an already-focused X11
+/// target (`xtest`), is already the last resort, so it emits no escalation.
+/// Mirrors the macOS `type_text` contract.
 fn type_text_structured(path: &str, characters: usize, verified: bool) -> Value {
     let mut s = json!({
         "path": path,
@@ -1753,7 +1754,7 @@ fn type_text_structured(path: &str, characters: usize, verified: bool) -> Value 
         "verified": verified,
         "effect": if verified { "confirmed" } else { "unverifiable" },
     });
-    if !verified && path != "key_events_fg" {
+    if !verified && !matches!(path, "key_events_fg" | "xtest") {
         s["escalation"] = json!({
             "recommended": "foreground",
             "reason": "background insert could not be confirmed — re-call with \
@@ -3630,6 +3631,30 @@ impl Tool for TypeTextTool {
                 Ok(Err(e)) => ToolResult::error(e.to_string()),
                 Err(e) => ToolResult::error(format!("Task error: {e}")),
             };
+        }
+
+        // An unindexed request addresses the target's current keyboard focus.
+        // If that exact X11 window already owns both active and core focus,
+        // use real keys without any activation instead of walking the whole
+        // accessibility tree. A pre-input miss keeps the focus-free ladder;
+        // errors may have delivered input and must never fall through.
+        if resolved_elem_idx.is_none() {
+            let text_f = text.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                crate::input::try_type_text_xtest_already_focused(xid, &text_f)
+            })
+            .await;
+            match result {
+                Ok(Ok(true)) => {
+                    return ToolResult::text(format!(
+                        "Typed {text_len} character(s) into the already-focused X11 window."
+                    ))
+                    .with_structured(type_text_structured("xtest", text_len, false));
+                }
+                Ok(Ok(false)) => {}
+                Ok(Err(error)) => return ToolResult::error(error.to_string()),
+                Err(error) => return ToolResult::error(format!("Task error: {error}")),
+            }
         }
 
         // Prefer the focused widget — the element the user just clicked. If a

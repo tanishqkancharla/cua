@@ -2175,8 +2175,74 @@ pub fn send_type_text_with_delay(xid: u64, text: &str, inter_char_ms: u64) -> Re
 /// argument because XTest always delivers to the focused window; the caller
 /// focuses the target by clicking it first. `\n`/`\t` map to Return/Tab.
 pub fn send_type_text_xtest(text: &str) -> Result<()> {
+    send_type_text_xtest_checked(text, None).map(|_| ())
+}
+
+/// Use real keys only while the exact target already owns X11 focus. Never
+/// activate, raise, or restore a window. `false` means no key was sent, so the
+/// caller can still attempt its focus-free accessibility route.
+///
+/// Recheck on the injection connection before every character. This narrows,
+/// but does not eliminate, the XTest race with another client's focus request
+/// between the check and key delivery. Holding the X server for an entire text
+/// operation would freeze other clients, so this is not an atomic focus lease.
+/// Once a key was sent, loss of focus is an error with possibly partial delivery;
+/// the caller must not fall back or replay the text.
+pub fn try_type_text_xtest_already_focused(xid: u64, text: &str) -> Result<bool> {
+    let target = u32::try_from(xid).context("X11 target window exceeds 32 bits")?;
+    send_type_text_xtest_checked(text, Some(target))
+}
+
+fn x11_target_already_focused(
+    conn: &RustConnection,
+    root: Window,
+    active_atom: Atom,
+    target: Window,
+) -> Result<bool> {
+    if active_atom == x11rb::NONE || target == x11rb::NONE || target == root {
+        return Ok(false);
+    }
+    let active = conn
+        .get_property(false, root, active_atom, AtomEnum::WINDOW, 0, 1)?
+        .reply()?;
+    if active.type_ != u32::from(AtomEnum::WINDOW)
+        || active.value32().and_then(|mut values| values.next()) != Some(target)
+    {
+        return Ok(false);
+    }
+    let mut focused = conn.get_input_focus()?.reply()?.focus;
+    // Core focus may be in a child widget, but a sibling toplevel or modal is
+    // not within this exact target. Never use PID or stale AX focus as proof.
+    for _ in 0..64 {
+        if focused == target {
+            return Ok(true);
+        }
+        if focused == x11rb::NONE || focused == 1 || focused == root {
+            return Ok(false);
+        }
+        let parent = conn.query_tree(focused)?.reply()?.parent;
+        if parent == focused {
+            return Ok(false);
+        }
+        focused = parent;
+    }
+    Ok(false)
+}
+
+fn send_type_text_xtest_checked(text: &str, target: Option<Window>) -> Result<bool> {
     use x11rb::protocol::xtest::ConnectionExt as _;
-    let (conn, _) = connect_x11_for_input()?;
+    let (conn, screen) = connect_x11_for_input()?;
+    let root = conn.setup().roots[screen].root;
+    let active_atom = if target.is_some() {
+        conn.intern_atom(true, b"_NET_ACTIVE_WINDOW")?.reply()?.atom
+    } else {
+        x11rb::NONE
+    };
+    if let Some(target) = target {
+        if !x11_target_already_focused(&conn, root, active_atom, target).unwrap_or(false) {
+            return Ok(false);
+        }
+    }
     let mapping = conn.get_keyboard_mapping(8, 248)?.reply()?;
     // Shift keycode (modifier index 0) for shifted characters.
     let modmap = conn.get_modifier_mapping()?.reply()?;
@@ -2186,8 +2252,23 @@ pub fn send_type_text_xtest(text: &str) -> Result<()> {
         .get(..kpm)
         .and_then(|s| s.iter().copied().find(|&k| k != 0))
         .unwrap_or(50);
+    let mut sent_any = false;
     for ch in text.chars() {
         let (keycode, needs_shift, remapped) = text_keycode(&conn, &mapping, ch)?;
+        if let Some(target) = target {
+            if !x11_target_already_focused(&conn, root, active_atom, target).unwrap_or(false) {
+                if !sent_any {
+                    return Ok(false);
+                }
+                bail!(
+                    "X11 typing interrupted: exact target focus was lost or could not be verified; \
+                     text may be partially delivered and must not be automatically replayed"
+                );
+            }
+        }
+        // From this point an error has unknown/partial delivery. Never return
+        // the pre-input miss that allows the caller's background fallback.
+        sent_any = true;
         if needs_shift {
             conn.xtest_fake_input(KEY_PRESS_EVENT, shift_kc, 0, x11rb::NONE, 0, 0, 0)?;
         }
@@ -2212,7 +2293,7 @@ pub fn send_type_text_xtest(text: &str) -> Result<()> {
     // this short-lived connection drops (see send_key_xtest — keyboard XTEST
     // events queued on a connection that closes immediately can be lost).
     let _ = conn.get_input_focus()?.reply();
-    Ok(())
+    Ok(true)
 }
 
 /// Press a named key (with optional modifiers) into whatever window holds X

@@ -366,3 +366,29 @@ The fresh Terra agent attempt is OpenSky CI 34319911691 at SDK2c5f01a. It has
 not yet produced a new score. Real double-click coverage and the full canonical
 platform matrix remain pending; the PR remains draft. Subsequent documentation
 updates do not change the tested a950 executable.
+
+
+### Already-focused X11 typing fast path — candidate, not accepted
+
+The unindexed background typing ladder scans the accessibility tree to classify
+focus, then may scan it again to find an editable before refusing and allowing
+foreground input. A candidate now first checks the exact X11 active toplevel
+and core input-focus ancestry on the injection connection. If the target
+already owns both, it sends real keys without raising, activating or restoring
+any window. Indexed typing, terminals, native Wayland and the pre-input miss
+fallback retain their existing paths.
+
+Focus is checked before every character; no focus state is cached across
+calls. A miss before the first key permits the original accessibility fallback.
+A later miss returns an error describing possibly partial delivery; the SDK
+must not retry it. These checks are not an atomic focus lease: another X11
+client can change focus between a check and event delivery. The candidate does
+not hold the X server while typing, which would freeze other clients during
+long input. No no-leak guarantee is claimed under concurrent focus changes.
+
+Acceptance is pending on the exact candidate: saved Calc range/formula outcomes,
+foreground Unicode typing and keyboard-map restoration, a sibling document
+holding focus, an active modal distinct from the addressed document, and indexed
+input to the intended field. Record actual method timing alongside saved outcomes;
+format checks or a successful build are not new real-driver acceptance. This
+optimization is X11-specific; it makes no new Wayland/macOS/Windows claim.
