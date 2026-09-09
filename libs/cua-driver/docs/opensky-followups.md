@@ -225,3 +225,12 @@ This is a candidate, not accepted behavior: Linux compilation, unchanged
 SETUP-L02, current keyboard/dialog regressions, scrolled and merged-cell cases
 and Wayland window geometry still need validation. No macOS or Windows GUI
 behavior has been changed or certified by this Linux-only implementation.
+
+The first virtual-table candidate compiled and passed focused unit checks
+(CI 34294757380). SETUP-L02 completed in 35.929 s instead of about 130 s,
+with responsive 2,316-node walks and verified cleanup, but still failed: cells
+were named by coordinates and string cells displayed numeric Value=0. The
+existing renderer discarded Text whenever Name was nonempty. The next candidate
+keeps the cell coordinate as Name and its observed Text as the displayed value,
+including blank cells, so numeric Value=0 cannot hide a text header. Real saved
+cell text and snapshot acceptance still need verification.

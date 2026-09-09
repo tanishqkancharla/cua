@@ -1002,6 +1002,7 @@ async fn collect_visited_bounded<'a>(
         let mut actions: Vec<String> = Vec::new();
         let mut value: Option<String> = None;
         let mut text_content = String::new();
+        let mut observed_text = None;
         if has_action || has_value || has_text {
             if let Some(Ok(proxies)) = call(acc.proxies()).await {
                 if has_action {
@@ -1034,18 +1035,27 @@ async fn collect_visited_bounded<'a>(
                 // lives; `name` is usually empty for such widgets.
                 if has_text {
                     if let Some(Ok(tp)) = call(proxies.text()).await {
-                        let count = call(tp.character_count())
-                            .await
-                            .and_then(|r| r.ok())
-                            .unwrap_or(0);
-                        if count > 0 {
-                            let end = count.min(4096);
-                            if let Some(Ok(t)) = call(tp.get_text(0, end)).await {
-                                text_content = t;
+                        if let Some(Ok(count)) = call(tp.character_count()).await {
+                            if count == 0 {
+                                observed_text = Some(String::new());
+                            } else if count > 0 {
+                                if let Some(Ok(t)) = call(tp.get_text(0, count.min(4096))).await {
+                                    text_content = t.clone();
+                                    observed_text = Some(t);
+                                }
                             }
                         }
                     }
                 }
+            }
+        }
+
+        // Spreadsheet cell names identify coordinates (e.g. E1), while Text
+        // contains the displayed content. Preserve both. Value often reports
+        // zero for a string/empty cell and must not replace its actual text.
+        if role_lower == "table cell" {
+            if let Some(text) = observed_text {
+                value = if text.is_empty() { None } else { Some(text) };
             }
         }
 
