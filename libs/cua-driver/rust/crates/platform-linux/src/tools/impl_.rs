@@ -3016,6 +3016,17 @@ impl Tool for ClickTool {
                         return Ok("x11_xtest_fg");
                     }
                 }
+                // An AT-SPI miss is not evidence that a synthetic pointer can
+                // reach GTK. Headless X11 has no real background pointer, and
+                // GTK drops XSendEvent while the transport reports success.
+                // Refuse before fallback input so the caller can explicitly
+                // retry the exact pixel through the foreground XTest route.
+                if !fg
+                    && is_gtk_process(pid)
+                    && !crate::input::real_pointer_input_available()
+                {
+                    return Ok("background_unavailable");
+                }
                 if modifiers_for_task.is_empty() {
                     x11_pixel_click_no_focus_steal(
                         &cursor_id_for_task,

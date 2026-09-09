@@ -2287,9 +2287,9 @@ pub fn focus_element(pid: u32, idx: usize) -> Result<bool> {
 /// `doAction` does, without activating or raising the window — the same path the
 /// `element_index` click already uses, here driven by coordinates instead.
 ///
-/// Hit-testing uses `Component.GetExtents(CoordType::Window)` so the caller's
-/// window-local coordinates are compared directly against window-local widget
-/// bounds — no screen-origin guessing. The smallest-area containing node wins so
+/// Hit-testing uses the same reconstructed bounds as snapshots and indexed
+/// input. Raw toolkit Window extents can include a decoration offset that is
+/// absent from the captured client image. The smallest-area containing node wins so
 /// a click lands on the button, not its enclosing panel. Editable fields request
 /// foreground delivery before sending input: their activation action may submit
 /// a dialog instead of placing the caret. No hit falls back to native input.
@@ -2310,55 +2310,33 @@ pub fn perform_action_at_point(
                 Some((visited, Some(frame))) => (visited, frame),
                 _ => return Ok(None),
             };
-            let web_document_origin = web_document_origin_for_visited(&visited, pid)
-                .await
-                .unwrap_or((0, 0));
-
-            // Collect actionable nodes whose window-local bounds contain the point,
-            // then let `select_click_target` pick the innermost *real actuator* —
-            // preferring a button over its slightly-smaller inner label (GTK4 nests
-            // one inside every button; an area-only pick lands on the inert label
-            // and `do_action` silently no-ops). Pre-order keeps containers ahead of
-            // children, but the area/role split is what actually disambiguates.
-            let mut frames: Vec<(usize, i32, i32, u32, u32, bool)> = Vec::new();
-            for (i, v) in visited.iter().enumerate() {
-                if v.frame_ordinal != frame
-                    || (v.actions.is_empty() && !v.has_editable && v.role != "table cell")
-                    || !v.has_component
-                {
-                    continue;
-                }
-                let Some(Ok(proxies)) = call(v.acc.proxies()).await else {
-                    continue;
-                };
-                let Some(Ok(comp)) = call(proxies.component()).await else {
-                    continue;
-                };
-                let Some(Ok((x, y, w, h))) = call(comp.get_extents(CoordType::Window)).await else {
-                    continue;
-                };
-                if w <= 0 || h <= 0 {
-                    continue;
-                }
-                let (document_x, document_y) = if v.in_web_doc {
-                    web_document_origin
-                } else {
-                    (0, 0)
-                };
-                frames.push((
-                    i,
-                    x + document_x,
-                    y + document_y,
-                    w as u32,
-                    h as u32,
-                    is_passive_role(&v.role),
-                ));
-            }
-
-            let Some(idx) = select_click_target(&frames, win_x, win_y) else {
+            let Some((origin_x, origin_y)) = x11_window_origin(xid) else {
                 return Ok(None);
             };
-            let target = &visited[idx];
+            let Some(screen_x) = origin_x.checked_add(win_x) else {
+                return Ok(None);
+            };
+            let Some(screen_y) = origin_y.checked_add(win_y) else {
+                return Ok(None);
+            };
+            let action_nodes: Vec<&Visited> = visited.iter().filter(|v| is_indexable(v)).collect();
+            // Preserve the snapshot's application-wide indices and exact frame.
+            // Shared bounds account for GTK insets and renderer/frame rebasing;
+            // converting only the requested pixel keeps both sides in screen space.
+            let bounds = element_bounds_for_visited(&visited, pid, xid, Some(frame), None).await;
+            let mut frames: Vec<(usize, i32, i32, u32, u32, bool)> = Vec::new();
+            for (i, x, y, w, h) in bounds {
+                let v = action_nodes[i];
+                if v.actions.is_empty() && !v.has_editable && v.role != "table cell" {
+                    continue;
+                }
+                frames.push((i, x, y, w, h, is_passive_role(&v.role)));
+            }
+
+            let Some(idx) = select_click_target(&frames, screen_x, screen_y) else {
+                return Ok(None);
+            };
+            let target = action_nodes[idx];
             // EditableText's "activate" often submits its dialog. A pixel
             // click means placing a caret, not activating the entry. No action
             // has been sent: let the caller explicitly use real foreground input.

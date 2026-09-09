@@ -307,3 +307,25 @@ Combined test runtime was 96.07s before and 81.36s after. One sequential diagnos
 pair is not an agent benchmark. KEY-L01 and CLICK-L01 also passed on this exact
 binary in typing-regression-c2f9-01, with both app exits and keymaps verified.
 The full native desktop matrix and paired agent rerun remain pending.
+
+### DRV-L08: Calc screenshot clicks miss the name box and new-sheet control
+
+The unchanged public SDK with df79 reproduced both failures on the remote
+desktop in `calc-coordinate-before-03`: CALC-L03 saved an empty E2 after a
+name-box click and formula entry; CALC-L04 did not expose Sheet2 after clicking
+the visible plus button. Both app exits passed. This reproduces the agent arm
+22 symptoms without a model. Earlier missing-input and screenshot-size guard
+failures are setup-only evidence, not driver failures.
+
+X11 coordinate hit-testing used raw toolkit Window extents rather than the
+snapshot's shared frame conversion. An accessibility miss could then fall back
+to XSendEvent on GTK even without a real background pointer. The candidate uses
+the same exact-window bounds conversion as screenshots/indexed input, translates
+the requested pixel to screen coordinates, and retains application-wide indices.
+After an accessibility miss, GTK without a real background pointer refuses
+before input so callers can use the existing foreground XTest route.
+
+The saved-E2 and Sheet2 assertions are unchanged. Candidate compilation, both
+Calc reproductions, input regressions, and a fresh agent comparison are pending.
+The change is in X11 coordinate delivery; no new Wayland/macOS/Windows acceptance
+or full canonical desktop matrix is claimed.
