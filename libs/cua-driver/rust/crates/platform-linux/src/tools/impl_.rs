@@ -2584,14 +2584,15 @@ impl Tool for ClickTool {
                 element's role + label. Reach for `x, y` only when the target is a canvas / \
                 custom-drawn surface that doesn't appear in the AT-SPI tree.\n\n\
                 Provide either (window_id + x/y) or (pid + element_index). Routes via \
-                XSendEvent (no focus steal). element_index cache is scoped per (pid, \
+                focus-free accessibility/XSendEvent, or checked XTest for an already-focused \
+                exact X11 coordinate target (no activation). element_index cache is scoped per (pid, \
                 window_id) and is replaced by the next get_window_state of the same window — \
                 re-snapshot every turn before clicking.\n\n\
                 After a zoom call, pass from_zoom=true to auto-translate zoom-image coords \
                 back to full-window space.\n\n\
                 button: \"left\" (default), \"right\", or \"middle\". Defaults to left so the \
-                field is fully back-compat. X11: routes through XSendEvent ButtonPress/Release \
-                with the matching button code. Native Wayland: only left-button is supported \
+                field is fully back-compat. X11: uses the matching button code for \
+                ButtonPress/Release. Native Wayland: only left-button is supported \
                 via the virtual-pointer protocol — right/middle return an error rather than \
                 silently degrading to left. `modifier` holds ctrl/shift/alt/super for the \
                 click on X11. Native Wayland refuses modified pointer clicks until its input \
@@ -2978,6 +2979,25 @@ impl Tool for ClickTool {
                     crate::wayland::click_focused(output_x, output_y, count as u32, button)
                 })?;
                 return Ok("wayland_activate");
+            }
+            // An already-active exact X11 target can accept real pointer
+            // input without activation/restoration or an accessibility scan.
+            // The input helper also checks stacking/input shapes on the same
+            // connection and returns false only before sending any input.
+            // Errors may represent partial delivery: propagate, never replay.
+            if !crate::wayland::is_wayland() {
+                let modifier_refs: Vec<&str> =
+                    modifiers_for_task.iter().map(String::as_str).collect();
+                if crate::input::try_click_xtest_already_focused(
+                    xid,
+                    xi,
+                    yi,
+                    button,
+                    count,
+                    &modifier_refs,
+                )? {
+                    return Ok("x11_xtest_focused");
+                }
             }
             // X11 injection. Tiered no-focus-steal delivery (background):
             //   1. Plain left single-click → AT-SPI doAction at that point.

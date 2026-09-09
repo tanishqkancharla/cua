@@ -2414,6 +2414,137 @@ pub fn send_click_xtest_desktop(x: i32, y: i32, button: u8, count: usize) -> Res
     send_click_xtest_desktop_with_modifiers(x, y, button, count, &[])
 }
 
+/// Click only when the requested X11 client already owns keyboard focus and
+/// the visible input surface at the window-local point belongs to that client.
+/// `false` is a pre-input miss: no pointer or key event has been sent. After
+/// preparation begins, every failure is non-retryable, even if delivery is only
+/// possible rather than confirmed. Never activate/restore a window here.
+///
+/// Checks and injection share one connection, but other X clients can still
+/// change focus/stacking between requests. This is not an atomic input lease.
+pub fn try_click_xtest_already_focused(
+    xid: u64,
+    x: i32,
+    y: i32,
+    button: u8,
+    count: usize,
+    modifiers: &[&str],
+) -> Result<bool> {
+    let (conn, screen_num) = connect_x11_for_input()?;
+    let root = conn.setup().roots[screen_num].root;
+    let target = u32::try_from(xid).context("X11 target window exceeds 32 bits")?;
+    let active_atom = conn.intern_atom(true, b"_NET_ACTIVE_WINDOW")?.reply()?.atom;
+    let check = || -> Result<Option<(i32, i32)>> {
+        let geometry = conn.get_geometry(target)?.reply()?;
+        if x < 0 || y < 0 || x >= i32::from(geometry.width) || y >= i32::from(geometry.height) {
+            bail!("X11 click point is outside the requested client window");
+        }
+        if !x11_target_already_focused(&conn, root, active_atom, target)? {
+            return Ok(None);
+        }
+        let local_x =
+            i16::try_from(x).context("X11 click x exceeds the protocol coordinate range")?;
+        let local_y =
+            i16::try_from(y).context("X11 click y exceeds the protocol coordinate range")?;
+        let translated = conn
+            .translate_coordinates(target, root, local_x, local_y)?
+            .reply()?;
+        let (sx, sy) = (i32::from(translated.dst_x), i32::from(translated.dst_y));
+        if !translated.same_screen
+            || sx < 0
+            || sy < 0
+            || sx >= i32::from(conn.setup().roots[screen_num].width_in_pixels)
+            || sy >= i32::from(conn.setup().roots[screen_num].height_in_pixels)
+        {
+            bail!("X11 click point cannot be represented on the target screen");
+        }
+        if !x11_input_point_within_target(&conn, root, target, translated.dst_x, translated.dst_y)?
+        {
+            return Ok(None);
+        }
+        Ok(Some((sx, sy)))
+    };
+    let Some((sx, sy)) = check()? else {
+        return Ok(false);
+    };
+    send_click_xtest_on_connection(&conn, root, sx, sy, button, count, modifiers, || {
+        if check()? != Some((sx, sy)) {
+            bail!("exact target focus, geometry, or input surface changed");
+        }
+        Ok(())
+    })
+    .context("X11 click interrupted; pointer/key input may have been delivered and must not be automatically replayed")?;
+    Ok(true)
+}
+
+/// Walk the actual stacking order from the root toward the requested client.
+/// Checking only focus, PID, or the target's own descendants is insufficient:
+/// an always-on-top sibling can cover the pixel while keyboard focus stays put.
+/// Respect both bounding and input shapes so an input-transparent cursor
+/// overlay does not hide the app, and a shaped window's hole is not a hit.
+fn x11_input_point_within_target(
+    conn: &RustConnection,
+    root: Window,
+    target: Window,
+    root_x: i16,
+    root_y: i16,
+) -> Result<bool> {
+    use x11rb::protocol::shape::{ConnectionExt as _, SK};
+    let mut current = root;
+    for _ in 0..64 {
+        if current == target {
+            return Ok(true);
+        }
+        let tree = conn.query_tree(current)?.reply()?;
+        let mut hit = None;
+        for child in tree.children.into_iter().rev() {
+            if conn.get_window_attributes(child)?.reply()?.map_state != MapState::VIEWABLE {
+                continue;
+            }
+            let local = conn
+                .translate_coordinates(root, child, root_x, root_y)?
+                .reply()?;
+            if !local.same_screen {
+                continue;
+            }
+            // A client-defined shape can extend beyond the current window;
+            // the server clips its effective shape to the default border box.
+            let geometry = conn.get_geometry(child)?.reply()?;
+            let border = i32::from(geometry.border_width);
+            let (x, y) = (i32::from(local.dst_x), i32::from(local.dst_y));
+            if x < -border
+                || y < -border
+                || x >= i32::from(geometry.width) + border
+                || y >= i32::from(geometry.height) + border
+            {
+                continue;
+            }
+            let mut contains = true;
+            for kind in [SK::BOUNDING, SK::INPUT] {
+                let shape = conn.shape_get_rectangles(child, kind)?.reply()?;
+                if !shape.rectangles.iter().any(|rect| {
+                    let x = i32::from(local.dst_x);
+                    let y = i32::from(local.dst_y);
+                    x >= i32::from(rect.x)
+                        && y >= i32::from(rect.y)
+                        && x < i32::from(rect.x) + i32::from(rect.width)
+                        && y < i32::from(rect.y) + i32::from(rect.height)
+                }) {
+                    contains = false;
+                    break;
+                }
+            }
+            if contains {
+                hit = Some(child);
+                break;
+            }
+        }
+        let Some(child) = hit else { return Ok(false) };
+        current = child;
+    }
+    Ok(false)
+}
+
 /// Real XTest click with physical modifier down/up transitions around the
 /// pointer gesture. Used only after the caller selected foreground delivery.
 pub fn send_click_xtest_desktop_with_modifiers(
@@ -2423,15 +2554,28 @@ pub fn send_click_xtest_desktop_with_modifiers(
     count: usize,
     modifiers: &[&str],
 ) -> Result<()> {
-    use x11rb::protocol::xtest::ConnectionExt as _;
     let (conn, screen_num) = connect_x11_for_input()?;
     let root = conn.setup().roots[screen_num].root;
+    send_click_xtest_on_connection(&conn, root, x, y, button, count, modifiers, || Ok(()))
+}
+
+fn send_click_xtest_on_connection(
+    conn: &RustConnection,
+    root: Window,
+    x: i32,
+    y: i32,
+    button: u8,
+    count: usize,
+    modifiers: &[&str],
+    check: impl Fn() -> Result<()>,
+) -> Result<()> {
+    use x11rb::protocol::xtest::ConnectionExt as _;
     let mapping = conn.get_keyboard_mapping(8, 248)?.reply()?;
     let mut guards = Vec::new();
     let mut modifier_keycodes = Vec::new();
     for modifier in modifiers {
         let keysym = key_name_to_keysym(modifier)?;
-        let (keycode, guard) = keycode_for_keysym(&conn, &mapping, keysym, modifier)?;
+        let (keycode, guard) = keycode_for_keysym(conn, &mapping, keysym, modifier)?;
         if let Some(guard) = guard {
             guards.push(guard);
         }
@@ -2440,6 +2584,7 @@ pub fn send_click_xtest_desktop_with_modifiers(
     let mut pressed = Vec::new();
     let mut pointer_pressed = false;
     let gesture_result = (|| -> Result<()> {
+        check()?;
         for &keycode in &modifier_keycodes {
             conn.xtest_fake_input(KEY_PRESS_EVENT, keycode, 0, x11rb::NONE, 0, 0, 0)?;
             pressed.push(keycode);
@@ -2449,6 +2594,10 @@ pub fn send_click_xtest_desktop_with_modifiers(
         conn.xtest_fake_input(MOTION_NOTIFY_EVENT, 0, 0, root, x as i16, y as i16, 0)?;
         let count = count.max(1);
         for click_index in 0..count {
+            // A warp can trigger hover UI, and the first click can open a modal.
+            // Recheck before every press; after input begins an error never
+            // becomes the pre-input miss that permits a fallback/replay.
+            check()?;
             conn.xtest_fake_input(BUTTON_PRESS_EVENT, button, 0, root, x as i16, y as i16, 0)?;
             pointer_pressed = true;
             // Deliver the press before releasing it. A zero-duration batch can

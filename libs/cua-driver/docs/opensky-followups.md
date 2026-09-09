@@ -436,3 +436,23 @@ nonmodal sibling windows in the same process; FOCUS-L02 tests independent
 processes. The existing Tk fallback uses a global application name and does not
 honor caller PID/XID. Neither limitation is resolved by the ten passing checks.
 This documentation-only follow-up does not change the tested435 executable.
+
+
+### Already-focused X11 coordinate clicks — candidate, not accepted
+
+The public SDK agent trace spends most input time on coordinate clicks. The
+background ladder scans accessibility before falling back to real pointer input,
+even when the requested window already owns focus. The candidate first checks
+exact active/core focus, live client geometry, stacking and input shapes on the
+injection connection. Only an unobstructed point belonging to that target uses
+real XTest directly, with existing modifier cleanup, press hold and multi-click
+timing. It never activates/restores a window. A miss falls back only before input;
+a later failure reports possible input delivery and must not be replayed.
+
+Input-transparent overlays are skipped when checking the actual topmost input
+surface. Another client can still change focus/stacking between validation and
+input; this is not an atomic lease. Indexed clicks, native Wayland and the earlier
+Chromium background refusal keep their existing paths. Exact candidate compile,
+saved Calc/name-box/new-sheet/double-click workflows, dialog alignment and
+foreground/sibling/modal regression checks are pending. No speed or broad
+isolation acceptance is claimed from the source review.
