@@ -353,3 +353,16 @@ hold it for 50ms before release, retaining modifier/button cleanup on errors.
 Normal focus restoration remains unchanged. The saved-E2/Sheet2 public-SDK
 tests, prior input regressions and paired agent timing must validate this exact
 candidate before acceptance; the controls above do not substitute for them.
+
+Candidate a9501e0ca47b702b9fd44b8e9941164d9cbf2652 passed build/focused Rust
+checks in OpenSky CI 34318630951. Its exact binary SHA256
+27329643542ab30c5a9058ee140ee3bb69006e8f6af7e3f946a789d1861160d1
+then passed eight unchanged real SDK outcomes: both coordinate Calc workflows
+(98.06s), four existing input regressions (132.26s), and both existing indexed
+and scrolled-cell Calc workflows (124.13s). All eight app exits, all four
+keyboard-map restorations and container removal were verified. The evidence is
+`calc-coordinate-held-01`, `input-regression-a950-01`, `calc-indexed-a950-01`.
+The fresh Terra agent attempt is OpenSky CI 34319911691 at SDK2c5f01a. It has
+not yet produced a new score. Real double-click coverage and the full canonical
+platform matrix remain pending; the PR remains draft. Subsequent documentation
+updates do not change the tested a950 executable.
