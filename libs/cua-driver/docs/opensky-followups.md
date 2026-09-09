@@ -294,3 +294,16 @@ background capability checks, terminal handling, and Wayland routes retain
 their existing behavior. Linux compilation and the same real SDK saved-file,
 Unicode/selection, and keyboard-restoration checks must pass before this is
 accepted. No fresh paired-agent speedup or full desktop matrix is claimed.
+
+DRV-L07 candidate c2f9a2a60 compiled and passed focused Rust checks in OpenSky
+CI 34314822844. Exact binary f54210824189d942a0118a6285eabf7570082943f5b7bd92e47d776b815fc720
+passed the same TYPE-L01 and COORD-L01 tests in `type-profile-after-01`, with
+saved/visible outcomes, both app exits and both keyboard maps verified. Matching
+image, wrapper, SDK and test-source hashes isolate the changed driver. Foreground
+typing fell from 5.913s to 1.609s (30 characters) and 10.155s to 0.197s (selected
+16-character font name). Including the unchanged background attempt, the total
+typing durations fell from 10.222s to 5.911s and 20.169s to 10.310s respectively.
+Combined test runtime was 96.07s before and 81.36s after. One sequential diagnostic
+pair is not an agent benchmark. KEY-L01 and CLICK-L01 also passed on this exact
+binary in typing-regression-c2f9-01, with both app exits and keymaps verified.
+The full native desktop matrix and paired agent rerun remain pending.
