@@ -277,7 +277,16 @@ pub fn focused_is_editable(pid: u32) -> Result<Option<bool>> {
 }
 
 pub fn get_element_bounds(pid: u32, idx: usize) -> Result<(i32, i32, u32, u32)> {
-    native::get_element_bounds(pid, idx)
+    native::get_element_bounds(pid, idx, 0)
+}
+
+/// Resolve element geometry in the same exact-window space as its snapshot.
+pub fn get_element_bounds_in_window(
+    pid: u32,
+    idx: usize,
+    xid: u64,
+) -> Result<(i32, i32, u32, u32)> {
+    native::get_element_bounds(pid, idx, xid)
 }
 
 // ── Internal helpers ─────────────────────────────────────────────────────────

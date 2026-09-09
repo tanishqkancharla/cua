@@ -1348,7 +1348,7 @@ pub(super) fn walk_tree_bounded_with_timeout(
         let (markdown, nodes) = render(&visited, scoped_frame);
         let bounds = match before_snapshot_deadline(
             deadline,
-            element_bounds_for_visited(&visited, pid, xid),
+            element_bounds_for_visited(&visited, pid, xid, scoped_frame, None),
         )
         .await
         {
@@ -2614,60 +2614,40 @@ pub fn set_value(pid: u32, idx: usize, value: &str) -> Result<()> {
     )
 }
 
-pub fn get_element_bounds(pid: u32, idx: usize) -> Result<(i32, i32, u32, u32)> {
+pub fn get_element_bounds(pid: u32, idx: usize, xid: u64) -> Result<(i32, i32, u32, u32)> {
     bounded(
         async {
             let conn = shared_connection().await?;
-            let visited = collect_visited(conn, pid)
+            let xid = if xid == 0 && !crate::wayland::is_wayland() {
+                crate::x11::list_windows(Some(pid))
+                    .first()
+                    .map(|window| window.xid)
+                    .unwrap_or(0)
+            } else {
+                xid
+            };
+            let (visited, scoped_frame) = collect_visited_bounded(conn, pid, xid, None, None)
                 .await?
                 .ok_or_else(|| anyhow!("no AT-SPI application for pid {pid}"))?;
-            let web_document_origin = web_document_origin_for_visited(&visited, pid)
-                .await
-                .unwrap_or((0, 0));
-            let action_nodes: Vec<&Visited> = visited.iter().filter(|v| is_indexable(v)).collect();
-            let target = action_nodes
-                .get(idx)
+            let target = visited
+                .iter()
+                .filter(|node| is_indexable(node))
+                .nth(idx)
                 .ok_or_else(|| anyhow!("element {idx} not found"))?;
-            if !target.has_component {
-                return Err(anyhow!("element {idx} exposes no Component interface"));
+            if scoped_frame.is_some_and(|frame| target.frame_ordinal != frame) {
+                return Err(anyhow!("element {idx} does not belong to window {xid}"));
             }
-            let comp = target
-                .acc
-                .proxies()
+            // Use exactly the snapshot's coordinate conversion. In particular,
+            // Screen extents may still be relative to an accessible frame rather
+            // than the X11 client origin (including server-side decorations).
+            // Resolve just the requested index; a click must not query every
+            // component's bounds again on a large spreadsheet.
+            element_bounds_for_visited(&visited, pid, xid, Some(target.frame_ordinal), Some(idx))
                 .await
-                .map_err(|e| anyhow!("interface proxies unavailable: {e}"))?
-                .component()
-                .await
-                .map_err(|e| anyhow!("Component unavailable: {e}"))?;
-            // Prefer WINDOW coords + a deterministic screen offset — fixes GTK4,
-            // whose CoordType::Screen collapses every element to (0,0). Fall back to
-            // Screen on Wayland / when no X11 window resolves (offset is None).
-            match window_to_screen_offset(pid, 0, None) {
-                Some((ox, oy)) => {
-                    let (x, y, w, h) = comp
-                        .get_extents(CoordType::Window)
-                        .await
-                        .map_err(|e| anyhow!("getExtents failed: {e}"))?;
-                    let (document_x, document_y) = if target.in_web_doc {
-                        web_document_origin
-                    } else {
-                        (0, 0)
-                    };
-                    Ok((
-                        x + ox + document_x,
-                        y + oy + document_y,
-                        w.max(0) as u32,
-                        h.max(0) as u32,
-                    ))
-                }
-                None => {
-                    let (x, y, w, h) = comp
-                        .get_extents(CoordType::Screen)
-                        .await
-                        .map_err(|e| anyhow!("getExtents failed: {e}"))?;
-                    Ok((x, y, w.max(0) as u32, h.max(0) as u32))
-                }
-            }
+                .into_iter()
+                .next()
+                .map(|(_, x, y, width, height)| (x, y, width, height))
+                .ok_or_else(|| anyhow!("element {idx} has no usable Component bounds"))
         },
         || {
             Err(anyhow!(
@@ -2959,6 +2939,8 @@ async fn element_bounds_for_visited(
     visited: &[Visited<'_>],
     pid: u32,
     xid: u64,
+    frame_ordinal: Option<usize>,
+    element_index: Option<usize>,
 ) -> Vec<(usize, i32, i32, u32, u32)> {
     // Query WINDOW-relative extents and add a deterministic screen offset
     // (X11 window origin + GTK4 CSD inset). This fixes GTK4 — whose
@@ -2966,7 +2948,12 @@ async fn element_bounds_for_visited(
     // distinct per-widget WINDOW coords instead. On Wayland / when no X11
     // window resolves, `offset` is None and we keep the legacy Screen path
     // so non-X11 behaviour is unchanged.
-    let window_title = visited.iter().find_map(|node| {
+    let in_frame = |node: &&Visited<'_>| {
+        frame_ordinal
+            .map(|frame| node.frame_ordinal == frame)
+            .unwrap_or(true)
+    };
+    let window_title = visited.iter().filter(in_frame).find_map(|node| {
         matches!(
             node.role.to_ascii_lowercase().as_str(),
             "frame" | "window" | "dialog" | "alert" | "file chooser"
@@ -2988,7 +2975,7 @@ async fn element_bounds_for_visited(
     // path above remains authoritative when available.
     let screen_rebase = if offset.is_none() && !crate::wayland::is_wayland() && xid != 0 {
         let x11_origin = x11_window_origin(xid);
-        let frame = visited.iter().find(|node| {
+        let frame = visited.iter().filter(in_frame).find(|node| {
             node.has_component
                 && matches!(
                     node.role.to_ascii_lowercase().as_str(),
@@ -3021,7 +3008,7 @@ async fn element_bounds_for_visited(
     // before adding the screen offset. Native GTK reports (0,0), so this is a
     // no-op there.
     let window_frame_origin = if offset.is_some() {
-        let frame = visited.iter().find(|node| {
+        let frame = visited.iter().filter(in_frame).find(|node| {
             node.has_component
                 && matches!(
                     node.role.to_ascii_lowercase().as_str(),
@@ -3075,6 +3062,11 @@ async fn element_bounds_for_visited(
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
     let mut out = Vec::with_capacity(action_nodes.len());
     for (idx, node) in action_nodes.iter().enumerate() {
+        if element_index.is_some_and(|target| idx != target)
+            || frame_ordinal.is_some_and(|frame| node.frame_ordinal != frame)
+        {
+            continue;
+        }
         if std::time::Instant::now() >= deadline {
             dlog!(
                 "snapshot bounds: 20s budget exhausted at node {idx}; returning {} bound(s)",

@@ -1636,10 +1636,6 @@ fn resolve_element_local_coords(
     idx: usize,
     xid_hint: Option<u64>,
 ) -> anyhow::Result<(u64, f64, f64)> {
-    let (bx, by, bw, bh) = crate::atspi::get_element_bounds(pid, idx)?;
-    let screen_cx = bx as f64 + bw as f64 / 2.0;
-    let screen_cy = by as f64 + bh as f64 / 2.0;
-
     let xid = if let Some(x) = xid_hint {
         x
     } else if crate::wayland::wayland_input_enabled() {
@@ -1655,6 +1651,10 @@ fn resolve_element_local_coords(
             .map(|w| w.xid)
             .ok_or_else(|| anyhow::anyhow!("No windows for pid {pid}"))?
     };
+
+    let (bx, by, bw, bh) = crate::atspi::get_element_bounds_in_window(pid, idx, xid)?;
+    let screen_cx = bx as f64 + bw as f64 / 2.0;
+    let screen_cy = by as f64 + bh as f64 / 2.0;
 
     if crate::wayland::wayland_input_enabled() {
         let (window_x, window_y, window_width, window_height) =
@@ -1683,8 +1683,8 @@ fn resolve_element_local_coords(
     Ok((xid, local_x, local_y))
 }
 
-fn element_screen_center(pid: u32, idx: usize) -> anyhow::Result<(f64, f64)> {
-    let (bx, by, bw, bh) = crate::atspi::get_element_bounds(pid, idx)?;
+fn element_screen_center(pid: u32, idx: usize, xid: Option<u64>) -> anyhow::Result<(f64, f64)> {
+    let (bx, by, bw, bh) = crate::atspi::get_element_bounds_in_window(pid, idx, xid.unwrap_or(0))?;
     Ok((bx as f64 + bw as f64 / 2.0, by as f64 + bh as f64 / 2.0))
 }
 
@@ -2337,7 +2337,7 @@ fn explicit_keyboard_cursor_target(
     pixel_target: Option<(f64, f64)>,
 ) -> Option<(f64, f64)> {
     if let Some(element_index) = element_index {
-        let (sx, sy) = element_screen_center(pid, element_index).ok()?;
+        let (sx, sy) = element_screen_center(pid, element_index, Some(xid)).ok()?;
         return Some((sx, sy));
     }
 
@@ -2762,7 +2762,7 @@ impl Tool for ClickTool {
             // Previously perform_action ran inside this spawn_blocking, so the
             // app updated before the cursor visibly arrived.
             let (xid, sx, sy) = tokio::task::spawn_blocking(move || -> (u64, f64, f64) {
-                let (cx, cy) = element_screen_center(pid, idx).unwrap_or((0.0, 0.0));
+                let (cx, cy) = element_screen_center(pid, idx, xid_hint).unwrap_or((0.0, 0.0));
                 let xid = xid_hint
                     .or_else(|| {
                         crate::x11::list_windows(Some(pid))
@@ -2830,6 +2830,7 @@ impl Tool for ClickTool {
                 // clicks made those rows addressable but not selectable.
                 if delivery.is_foreground() && !crate::wayland::wayland_input_enabled() {
                     crate::input::with_x11_foreground(xid2, 80, || {
+                        let (sx, sy) = window_local_to_screen(xid2, lx, ly)?;
                         crate::input::send_click_xtest_desktop_with_modifiers(
                             sx.round() as i32,
                             sy.round() as i32,
@@ -5105,8 +5106,10 @@ impl Tool for DoubleClickTool {
             .await;
             return match result {
                 Ok(Ok((xid, lx, ly))) => {
-                    if let Ok(Ok((sx, sy))) =
-                        tokio::task::spawn_blocking(move || element_screen_center(pid, idx)).await
+                    if let Ok(Ok((sx, sy))) = tokio::task::spawn_blocking(move || {
+                        element_screen_center(pid, idx, xid_hint)
+                    })
+                    .await
                     {
                         crate::overlay::send_command_for(
                             cursor_id.clone(),
@@ -5331,8 +5334,10 @@ impl Tool for RightClickTool {
             .await;
             return match result {
                 Ok(Ok((xid, lx, ly))) => {
-                    if let Ok(Ok((sx, sy))) =
-                        tokio::task::spawn_blocking(move || element_screen_center(pid, idx)).await
+                    if let Ok(Ok((sx, sy))) = tokio::task::spawn_blocking(move || {
+                        element_screen_center(pid, idx, xid_hint)
+                    })
+                    .await
                     {
                         crate::overlay::send_command_for(
                             cursor_id.clone(),

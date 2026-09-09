@@ -243,3 +243,27 @@ clicks before any input, allowing the existing SDK typed-refusal retry to send
 a real foreground pointer click to the same target. Coordinate cell hits follow
 the same rule. Modified index clicks are classified without invoking an
 unmodified accessibility action. Acceptance remains pending.
+
+DRV-L06 exact-window geometry follow-up: candidate
+978fe0adf32f424599486d4dc7896967e56f4c57 built successfully in hosted run
+34307064623 (binary SHA256
+a2f8c4150bf707a57bb01204f4c714700e3d5193ac3169899c72cc718f856e30).
+Remote calc-candidate-03 passed SETUP-L02 in 35.000 s but CALC-L01 still
+failed: the saved workbook contains formula B2-C2 with cached value 75000 in
+E1 instead of requested E2. Both owned process groups verified exited; the
+remote Docker inventory was empty when artifacts were collected. Thus real
+pointer input improves on the prior G17 no-op but has not passed cell targeting.
+Snapshot diagnostics apply a SCREEN-to-X11 frame rebase of (0,17), while
+get_element_bounds does not share that conversion or an exact-window hint.
+This is the next geometry hypothesis to verify, not accepted driver behavior.
+Keep the unchanged saved-E2 assertion; share the coordinate conversion before
+rerunning the focused tests and existing input regressions. Local evidence:
+evals/runs/linux-office-setup/calc-candidate-03 in the OpenSky SDK checkout.
+
+DRV-L06 geometry candidate now shares snapshot bounds conversion with indexed
+input, keeps the exact target window, filters frame geometry without renumbering
+application-wide indices, and only queries bounds for the requested element.
+Foreground delivery translates the freshly resolved local point after focus,
+rather than reusing a best-effort overlay position. The saved-E2 regression is
+unchanged; Linux build and real Calc validation are pending. Other platform
+adapters are unchanged; Wayland behavior still needs its separate native lane.
