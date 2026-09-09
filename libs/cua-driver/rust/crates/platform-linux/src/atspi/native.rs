@@ -1005,48 +1005,64 @@ async fn collect_visited_bounded<'a>(
         let mut observed_text = None;
         if has_action || has_value || has_text {
             if let Some(Ok(proxies)) = call(acc.proxies()).await {
-                if has_action {
-                    if let Some(Ok(ap)) = call(proxies.action()).await {
-                        let n = call(ap.n_actions()).await.and_then(|r| r.ok()).unwrap_or(0);
-                        for i in 0..n {
-                            // Preserve the AT-SPI action index even when an
-                            // individual name lookup fails. `do_action` takes
-                            // this original index, so compacting the vector
-                            // could otherwise actuate a different action than
-                            // the name we selected.
-                            actions.push(
-                                call(ap.get_name(i))
-                                    .await
-                                    .and_then(|result| result.ok())
-                                    .unwrap_or_default(),
-                            );
-                        }
-                    }
-                }
-                if has_value {
-                    if let Some(Ok(vp)) = call(proxies.value()).await {
-                        value = call(vp.current_value())
-                            .await
-                            .and_then(|r| r.ok())
-                            .map(format_value);
-                    }
-                }
-                // Text content is where editable/entry text (the typed string)
-                // lives; `name` is usually empty for such widgets.
-                if has_text {
-                    if let Some(Ok(tp)) = call(proxies.text()).await {
-                        if let Some(Ok(count)) = call(tp.character_count()).await {
-                            if count == 0 {
-                                observed_text = Some(String::new());
-                            } else if count > 0 {
-                                if let Some(Ok(t)) = call(tp.get_text(0, count.min(4096))).await {
-                                    text_content = t.clone();
-                                    observed_text = Some(t);
+                // These interfaces expose independent metadata. Fetch them in
+                // parallel while keeping each interface's dependent calls and
+                // action-name slots ordered. The surrounding tree traversal
+                // remains sequential, so window identity and global indices do
+                // not change.
+                tokio::join!(
+                    async {
+                        if has_action {
+                            if let Some(Ok(ap)) = call(proxies.action()).await {
+                                let n =
+                                    call(ap.n_actions()).await.and_then(|r| r.ok()).unwrap_or(0);
+                                for i in 0..n {
+                                    // Preserve the AT-SPI action index even when an
+                                    // individual name lookup fails. `do_action` takes
+                                    // this original index, so compacting the vector
+                                    // could otherwise actuate a different action than
+                                    // the name we selected.
+                                    actions.push(
+                                        call(ap.get_name(i))
+                                            .await
+                                            .and_then(|result| result.ok())
+                                            .unwrap_or_default(),
+                                    );
                                 }
                             }
                         }
-                    }
-                }
+                    },
+                    async {
+                        if has_value {
+                            if let Some(Ok(vp)) = call(proxies.value()).await {
+                                value = call(vp.current_value())
+                                    .await
+                                    .and_then(|r| r.ok())
+                                    .map(format_value);
+                            }
+                        }
+                    },
+                    async {
+                        // Text content is where editable/entry text (the typed string)
+                        // lives; `name` is usually empty for such widgets.
+                        if has_text {
+                            if let Some(Ok(tp)) = call(proxies.text()).await {
+                                if let Some(Ok(count)) = call(tp.character_count()).await {
+                                    if count == 0 {
+                                        observed_text = Some(String::new());
+                                    } else if count > 0 {
+                                        if let Some(Ok(t)) =
+                                            call(tp.get_text(0, count.min(4096))).await
+                                        {
+                                            text_content = t.clone();
+                                            observed_text = Some(t);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                );
             }
         }
 

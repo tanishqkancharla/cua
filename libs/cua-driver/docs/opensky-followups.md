@@ -509,3 +509,20 @@ The three indexed click calls now take5.214/5.197/5.216s versus
 Recorded non-driver source/image hashes match; per-case comparisons come from
 different suite selections and single samples. This is supporting SDK evidence,
 not an agent benchmark or canonical cross-platform certification.
+
+### Concurrent independent node metadata reads — candidate
+
+On the exact486 executable, a representative full Calc observation spends
+5.396s of6.148s walking the2,316-node accessibility tree. Action, Value and Text
+metadata were read serially inside each visited node. The candidate overlaps
+those three independent interface reads while preserving their dependent calls,
+action-name slots, defaults, text cap and text-over-numeric value precedence.
+The tree traversal itself stays sequential, preserving global element numbering
+and exact frame/window correlation. No extra calls or cross-request cache are
+introduced, and child enumeration is unchanged.
+
+Formatting and source checks passed; exact Linux compilation, observation-field
+and index comparison, saved indexed-cell outcomes and modal/dialog regressions
+remain pending. Concurrent toolkit mutations may change relative observation
+timing; the existing first-stage role/name/state/children reads already overlap.
+This is a candidate, with no performance or parity improvement claimed yet.
