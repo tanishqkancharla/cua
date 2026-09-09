@@ -465,3 +465,15 @@ transport label, already used by focused typing; it does not bypass outcome
 validation or claim a verified click effect. Failed evidence is retained as
 focused-click-after-01. The unchanged four saved-file tests must be rerun on
 the corrected exact binary before any performance/acceptance claim.
+
+The exact4fb1e892e executable has now passed17 real SDK cases: four Calc
+coordinate/range/double-click cases, eight input/dialog/screenshot cases, three
+focus/isolation cases, and two fresh/scrolled indexed-cell cases. Artifacts:
+focused-click-after-02, click-dialog-4fb-01, click-focus-4fb-01,
+click-indexed-4fb-01. All20 owned app groups exited, eight keyboard maps match,
+focus temporary directories were removed, and all four containers are gone.
+Retrieved XLSX, DOCX and ODT saved outcomes were independently checked.
+BuildCI34400764844 produced SHA256
+3550951c28dd413893f39b2fb4e7c5c5cadb1256517800b8937bad8daab420ce.
+This is supporting Linux SDK acceptance; the canonical cross-platform matrix
+and a fresh agent benchmark remain pending. The SDK evaluation workflow selects this verified build.
