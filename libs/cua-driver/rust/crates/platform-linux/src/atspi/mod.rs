@@ -159,7 +159,17 @@ pub fn walk_tree_bounded(
 /// is true when the actuated node looked like a silent no-op (a passive
 /// display role, or no advertised action), so the caller can surface
 /// `effect: "suspected_noop"`.
-pub fn perform_action(pid: u32, idx: usize, allow_activation: bool) -> Result<(String, bool)> {
+pub fn perform_action(pid: u32, idx: usize) -> Result<(String, bool)> {
+    native::perform_action(pid, idx, true)
+}
+
+/// Click-specific classification preserves the existing action API used by
+/// browser setup and consent controls.
+pub fn perform_click_action(
+    pid: u32,
+    idx: usize,
+    allow_activation: bool,
+) -> Result<(String, bool)> {
     native::perform_action(pid, idx, allow_activation)
 }
 

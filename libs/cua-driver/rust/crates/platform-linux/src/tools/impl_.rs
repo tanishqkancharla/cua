@@ -2787,7 +2787,7 @@ impl Tool for ClickTool {
             // A table cell can ignore XSendEvent while reporting success.
             let allow_activation = modifiers.is_empty();
             let ax_result = tokio::task::spawn_blocking(move || {
-                crate::atspi::perform_action(pid, idx, allow_activation)
+                crate::atspi::perform_click_action(pid, idx, allow_activation)
             })
             .await;
             if matches!(&ax_result, Ok(Err(error)) if error.is::<crate::atspi::ElementClickNeedsForeground>())
