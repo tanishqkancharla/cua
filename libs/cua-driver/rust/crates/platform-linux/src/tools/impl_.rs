@@ -3021,10 +3021,7 @@ impl Tool for ClickTool {
                 // GTK drops XSendEvent while the transport reports success.
                 // Refuse before fallback input so the caller can explicitly
                 // retry the exact pixel through the foreground XTest route.
-                if !fg
-                    && is_gtk_process(pid)
-                    && !crate::input::real_pointer_input_available()
-                {
+                if !fg && is_gtk_process(pid) && !crate::input::real_pointer_input_available() {
                     return Ok("background_unavailable");
                 }
                 if modifiers_for_task.is_empty() {

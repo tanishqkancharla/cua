@@ -2337,10 +2337,18 @@ pub fn perform_action_at_point(
                 return Ok(None);
             };
             let target = action_nodes[idx];
+            dlog!(
+                "pixel ({win_x},{win_y}) window={xid} selected index={idx} role={:?} editable={} actions={:?}",
+                target.role, target.has_editable, target.actions
+            );
             // EditableText's "activate" often submits its dialog. A pixel
             // click means placing a caret, not activating the entry. No action
             // has been sent: let the caller explicitly use real foreground input.
-            if target.has_editable || target.role == "table cell" {
+            // Compound panels can export a "press" action even when the
+            // clicked entry inside them has no accessible EditableText node
+            // (LibreOffice's name box). Activating that container does not
+            // focus the visible field at the requested pixel.
+            if target.has_editable || matches!(target.role.as_str(), "table cell" | "panel") {
                 return Ok(Some(super::PixelAction::NeedsForeground));
             }
             let Some(chosen) = activation_index(&target.role, &target.actions) else {

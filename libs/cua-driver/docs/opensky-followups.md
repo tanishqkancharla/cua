@@ -325,7 +325,31 @@ the requested pixel to screen coordinates, and retains application-wide indices.
 After an accessibility miss, GTK without a real background pointer refuses
 before input so callers can use the existing foreground XTest route.
 
-The saved-E2 and Sheet2 assertions are unchanged. Candidate compilation, both
-Calc reproductions, input regressions, and a fresh agent comparison are pending.
+The saved-E2 and Sheet2 assertions are unchanged. Candidate db81cc461 compiled
+in build 34316016256, but both Calc reproductions still failed on exact binary
+ec5761dd43734a6636fc534849960545787032d5a67bb62958baa94e59b969c2
+(`calc-coordinate-after-01`). A subsequent observation diagnostic confirmed
+the name-box action chose accessibility delivery; the new-sheet foreground
+retry moved the real pointer to the correct translated screen coordinate
+(116,861) without producing Sheet2. Both app exits and container removal
+passed. The candidate is not accepted. Input regressions and a fresh agent
+comparison await a correction that passes these unchanged outcomes.
 The change is in X11 coordinate delivery; no new Wayland/macOS/Windows acceptance
 or full canonical desktop matrix is claimed.
+
+Further controlled diagnostics on the same image isolated two delivery issues.
+`calc-external-paced-01` bypassed SDK clicks with real paced mouse input and
+passed both saved outcomes. `calc-external-unpaced-01` used a single XTest
+connection with no press/release pause and left focus unchanged: the name-box
+workflow passed, but new-sheet creation failed. `calc-external-held-01` added
+only a flush and 50ms button hold to that XTest gesture and passed both outcomes.
+These are diagnostic controls, not SDK acceptance. All app groups exited.
+The read-only accessibility probe found the name box represented by a `panel`
+with a `press` action and no EditableText node at the clicked point.
+
+The next candidate requests foreground pixel delivery for such compound panels
+instead of actuating their container action. XTest clicks flush the press and
+hold it for 50ms before release, retaining modifier/button cleanup on errors.
+Normal focus restoration remains unchanged. The saved-E2/Sheet2 public-SDK
+tests, prior input regressions and paired agent timing must validate this exact
+candidate before acceptance; the controls above do not substitute for them.

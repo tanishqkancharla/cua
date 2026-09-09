@@ -33,6 +33,7 @@ use x11rb::rust_connection::RustConnection;
 
 const CLICK_DELAY_MS: u64 = 35;
 const DOUBLE_CLICK_DELAY_MS: u64 = 50;
+const XTEST_BUTTON_HOLD_MS: u64 = 50;
 const KEY_DELAY_MS: u64 = 10;
 
 #[derive(Clone, Debug)]
@@ -2356,6 +2357,7 @@ pub fn send_click_xtest_desktop_with_modifiers(
         modifier_keycodes.push(keycode);
     }
     let mut pressed = Vec::new();
+    let mut pointer_pressed = false;
     let gesture_result = (|| -> Result<()> {
         for &keycode in &modifier_keycodes {
             conn.xtest_fake_input(KEY_PRESS_EVENT, keycode, 0, x11rb::NONE, 0, 0, 0)?;
@@ -2367,7 +2369,14 @@ pub fn send_click_xtest_desktop_with_modifiers(
         let count = count.max(1);
         for click_index in 0..count {
             conn.xtest_fake_input(BUTTON_PRESS_EVENT, button, 0, root, x as i16, y as i16, 0)?;
+            pointer_pressed = true;
+            // Deliver the press before releasing it. A zero-duration batch can
+            // move the pointer over a native control without activating it
+            // (LibreOffice's insert-sheet button under Xvfb/Openbox).
+            conn.flush()?;
+            sleep(Duration::from_millis(XTEST_BUTTON_HOLD_MS));
             conn.xtest_fake_input(BUTTON_RELEASE_EVENT, button, 0, root, x as i16, y as i16, 0)?;
+            pointer_pressed = false;
             if click_index + 1 < count {
                 // Chromium needs the first pair to reach the server before the
                 // second pair. A zero-gap batch produces two click events but
@@ -2383,6 +2392,13 @@ pub fn send_click_xtest_desktop_with_modifiers(
     // including when a later pointer request fails. A failed gesture must not
     // leave the desktop with a logically stuck Ctrl/Shift/Alt/Super key.
     let mut release_result: Result<()> = Ok(());
+    if pointer_pressed {
+        if let Err(error) =
+            conn.xtest_fake_input(BUTTON_RELEASE_EVENT, button, 0, root, x as i16, y as i16, 0)
+        {
+            release_result = Err(error.into());
+        }
+    }
     for &keycode in pressed.iter().rev() {
         if let Err(error) =
             conn.xtest_fake_input(KEY_RELEASE_EVENT, keycode, 0, x11rb::NONE, 0, 0, 0)
