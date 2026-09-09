@@ -2040,7 +2040,7 @@ pub fn invoke_menu_path(pid: u32, path: &[String]) -> Result<()> {
     )
 }
 
-pub fn perform_action(pid: u32, idx: usize) -> Result<(String, bool)> {
+pub fn perform_action(pid: u32, idx: usize, allow_activation: bool) -> Result<(String, bool)> {
     bounded(
         async {
             let conn = shared_connection().await?;
@@ -2051,6 +2051,16 @@ pub fn perform_action(pid: u32, idx: usize) -> Result<(String, bool)> {
             let target = action_nodes.get(idx).ok_or_else(|| {
                 anyhow!("element {idx} not found (total: {})", action_nodes.len())
             })?;
+
+            // Calc accepts synthetic targeted clicks without selecting their
+            // cell. Refuse before input so callers can retain this exact target
+            // and explicitly use the real pointer route.
+            if target.role == "table cell" {
+                return Err(super::ElementClickNeedsForeground.into());
+            }
+            if !allow_activation {
+                return Err(anyhow!("modified click requires pointer delivery"));
+            }
 
             // Suspected no-op: actuating `do_action(0)` on a passive display role
             // (a `label`/`static`/`image` indexed only for its Value interface) or a
@@ -2313,7 +2323,7 @@ pub fn perform_action_at_point(
             let mut frames: Vec<(usize, i32, i32, u32, u32, bool)> = Vec::new();
             for (i, v) in visited.iter().enumerate() {
                 if v.frame_ordinal != frame
-                    || (v.actions.is_empty() && !v.has_editable)
+                    || (v.actions.is_empty() && !v.has_editable && v.role != "table cell")
                     || !v.has_component
                 {
                     continue;
@@ -2352,7 +2362,7 @@ pub fn perform_action_at_point(
             // EditableText's "activate" often submits its dialog. A pixel
             // click means placing a caret, not activating the entry. No action
             // has been sent: let the caller explicitly use real foreground input.
-            if target.has_editable {
+            if target.has_editable || target.role == "table cell" {
                 return Ok(Some(super::PixelAction::NeedsForeground));
             }
             let Some(chosen) = activation_index(&target.role, &target.actions) else {
@@ -2474,7 +2484,7 @@ pub fn perform_action_at_screen_point(
             // EditableText's "activate" often submits its dialog. A pixel
             // click means placing a caret, not activating the entry. No action
             // has been sent: let the caller explicitly use real foreground input.
-            if target.has_editable {
+            if target.has_editable || target.role == "table cell" {
                 return Ok(Some(super::PixelAction::NeedsForeground));
             }
             let Some(chosen) = activation_index(&target.role, &target.actions) else {

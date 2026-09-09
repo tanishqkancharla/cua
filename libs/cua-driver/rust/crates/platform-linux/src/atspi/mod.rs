@@ -159,8 +159,8 @@ pub fn walk_tree_bounded(
 /// is true when the actuated node looked like a silent no-op (a passive
 /// display role, or no advertised action), so the caller can surface
 /// `effect: "suspected_noop"`.
-pub fn perform_action(pid: u32, idx: usize) -> Result<(String, bool)> {
-    native::perform_action(pid, idx)
+pub fn perform_action(pid: u32, idx: usize, allow_activation: bool) -> Result<(String, bool)> {
+    native::perform_action(pid, idx, allow_activation)
 }
 
 /// Give an indexed AT-SPI element keyboard focus without activating its window.
@@ -433,3 +433,13 @@ fn filter_tree(markdown: &str, query: &str) -> String {
     r.push('\n');
     r
 }
+
+/// No input has been delivered; this cell needs a real pointer selection.
+#[derive(Debug)]
+pub struct ElementClickNeedsForeground;
+impl std::fmt::Display for ElementClickNeedsForeground {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("table cell selection requires real foreground pointer input")
+    }
+}
+impl std::error::Error for ElementClickNeedsForeground {}

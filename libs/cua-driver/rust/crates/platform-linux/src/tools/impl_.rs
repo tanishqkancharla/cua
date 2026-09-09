@@ -2783,24 +2783,30 @@ impl Tool for ClickTool {
             }
             reveal_pointer_action_for(&self.state, &cursor_id, sx, sy, true).await;
 
-            // Chromium can execute a genuine AT-SPI action without focus. Try
-            // that route before applying its background synthetic-input gate.
-            if modifiers.is_empty() {
-                let ax_result =
-                    tokio::task::spawn_blocking(move || crate::atspi::perform_action(pid, idx))
-                        .await;
-                if let Ok(Ok((_action, suspected_noop))) = ax_result {
-                    let mut structured = json!({
-                        "path": "ax",
-                        "verified": false,
-                        "effect": if suspected_noop { "suspected_noop" } else { "unverifiable" },
-                    });
-                    if suspected_noop {
-                        structured["escalation"] = non_ax_escalation();
-                    }
-                    return ToolResult::text(format!("Clicked element [{idx}] (pid {pid})."))
-                        .with_structured(structured);
+            // Classify before any pointer delivery, including modified clicks.
+            // A table cell can ignore XSendEvent while reporting success.
+            let allow_activation = modifiers.is_empty();
+            let ax_result = tokio::task::spawn_blocking(move || {
+                crate::atspi::perform_action(pid, idx, allow_activation)
+            })
+            .await;
+            if matches!(&ax_result, Ok(Err(error)) if error.is::<crate::atspi::ElementClickNeedsForeground>())
+                && !delivery.is_foreground()
+            {
+                return crate::input::delivery::background_unavailable_error(
+                    crate::input::delivery::BackgroundUnavailable::FocusedInputOnly,
+                );
+            }
+            if let Ok(Ok((_action, suspected_noop))) = ax_result {
+                let mut structured = json!({
+                    "path": "ax", "verified": false,
+                    "effect": if suspected_noop { "suspected_noop" } else { "unverifiable" },
+                });
+                if suspected_noop {
+                    structured["escalation"] = non_ax_escalation();
                 }
+                return ToolResult::text(format!("Clicked element [{idx}] (pid {pid})."))
+                    .with_structured(structured);
             }
             if let Some(refusal) = unavailable_chromium_background(pid, delivery) {
                 return refusal;

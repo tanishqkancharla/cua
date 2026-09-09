@@ -234,3 +234,12 @@ existing renderer discarded Text whenever Name was nonempty. The next candidate
 keeps the cell coordinate as Name and its observed Text as the displayed value,
 including blank cells, so numeric Value=0 cannot hide a text header. Real saved
 cell text and snapshot acceptance still need verification.
+
+The cell-text candidate cc2cf0d74 compiled and passed SETUP-L02 in 34.755 s.
+The new CALC-L01 outcome test then found the formula saved in previously active
+G17 instead of observed/clicked E2; both cleanups passed. Calc ignored the
+background XSendEvent click. The next candidate refuses table-cell background
+clicks before any input, allowing the existing SDK typed-refusal retry to send
+a real foreground pointer click to the same target. Coordinate cell hits follow
+the same rule. Modified index clicks are classified without invoking an
+unmodified accessibility action. Acceptance remains pending.
