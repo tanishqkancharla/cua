@@ -267,3 +267,12 @@ Foreground delivery translates the freshly resolved local point after focus,
 rather than reusing a best-effort overlay position. The saved-E2 regression is
 unchanged; Linux build and real Calc validation are pending. Other platform
 adapters are unchanged; Wayland behavior still needs its separate native lane.
+
+DRV-L06 verified Linux candidate df79e0cf1 (binary SHA256
+3d21cdb9d26f67210c6ba80aef5066bcd895128203c8545294dc928f323037c8):
+Calc read and saved E2 pass; newly observed E50 after Page Down saves correctly.
+All four existing TYPE/KEY/CLICK/COORD regressions also pass on that exact binary.
+Seven app cleanup receipts passed; all four input keymaps restored. An initial
+Writer setup failure was traced to the older image lacking a UTF-8 locale;
+unchanged tests passed with the locale already used by the full desktop image.
+Merged-cell and separate compositor/canonical desktop lanes remain unverified.
