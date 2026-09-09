@@ -493,3 +493,19 @@ errors, timeouts and negative doAction acknowledgments return errors without
 replay. Live proxies do not provide an atomic lease against concurrent app
 changes. Compilation, indexed/scrolled/range saved outcomes, real AX buttons,
 and cross-window rejection need validation before any evaluation pin change.
+
+Exact candidate4863e5bff passed build/focused Rust checks inCI34403392571, then
+12 real SDK cases: CALC-L01/02/05, FOCUS-L04, and eight input/dialog/screenshot
+cases. Artifacts indexed-resolution-486-01, indexed-window-after-01 and
+indexed-dialog-486-01 retain the source identity and saved outcomes. Binary
+SHA256ebf7f5426faf4c36431c4ea27f819dae6767742e54114ba8f971b3ac20f38968.
+All13 owned app groups exited; eight keymaps and focus temporary cleanup were
+verified, and the three containers are gone. Retrieved XLSX/DOCX/ODT contents
+were independently verified. Cross-window refusal also passed on the4fb
+baseline; it is regression evidence, not a newly reproduced defect.
+
+The three indexed click calls now take5.214/5.197/5.216s versus
+25.224/24.951/24.835s before. Each new driver RPC contains one2,316-node walk.
+Recorded non-driver source/image hashes match; per-case comparisons come from
+different suite selections and single samples. This is supporting SDK evidence,
+not an agent benchmark or canonical cross-platform certification.
