@@ -238,12 +238,23 @@ impl std::fmt::Display for EditableSelectionNeedsKeys {
 }
 impl std::error::Error for EditableSelectionNeedsKeys {}
 
+/// No mutation was attempted: the requested window cannot own this unindexed
+/// typing operation. Do not escalate to a different window or replay the text.
+#[derive(Debug)]
+pub struct TypingWindowUnavailable(pub String);
+impl std::fmt::Display for TypingWindowUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}; this attempt was refused before text input", self.0)
+    }
+}
+impl std::error::Error for TypingWindowUnavailable {}
+
 /// Try to type text into any editable field in the window via AT-SPI EditableText.
 /// This works for unfocused windows if the toolkit exposes EditableText (Qt6, some GTK).
 /// For Qt5, which doesn't expose widgets when unfocused, this will return Err.
 /// Returns Ok if an editable was found and text was set, Err otherwise.
-pub fn type_into_editable(pid: u32, text: &str) -> Result<()> {
-    native::type_into_editable(pid, text)
+pub fn type_into_editable(pid: u32, xid: u64, text: &str) -> Result<()> {
+    native::type_into_editable(pid, xid, text)
 }
 
 /// Type into the exact indexed editable from the caller's accessibility snapshot.
@@ -264,16 +275,16 @@ pub fn set_value(pid: u32, idx: usize, value: &str) -> Result<()> {
 /// if the toolkit exposes one, else the first editable element in the tree.
 /// Returns Ok(true) if text was inserted, Ok(false) if the app exposes no
 /// editable element (so the caller can fall back), Err on an AT-SPI failure.
-pub fn insert_text(pid: u32, text: &str) -> Result<bool> {
-    native::insert_text(pid, text)
+pub fn insert_text(pid: u32, xid: u64, text: &str) -> Result<bool> {
+    native::insert_text(pid, xid, text)
 }
 
 /// Classify what holds keyboard focus so `type_text` can target the focused
 /// widget (the thing just clicked) instead of the first editable anywhere:
 /// `Some(true)` = focused editable, `Some(false)` = focused non-editable input
 /// (spreadsheet cell, terminal, canvas), `None` = nothing focused / unreachable.
-pub fn focused_is_editable(pid: u32) -> Result<Option<bool>> {
-    native::focused_is_editable(pid)
+pub fn focused_is_editable(pid: u32, xid: u64) -> Result<Option<bool>> {
+    native::focused_is_editable(pid, xid)
 }
 
 pub fn get_element_bounds(pid: u32, idx: usize) -> Result<(i32, i32, u32, u32)> {

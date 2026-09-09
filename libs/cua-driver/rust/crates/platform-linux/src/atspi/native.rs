@@ -1652,15 +1652,68 @@ async fn write_through_editable_proxies(
     Ok(false)
 }
 
+/// Keep every unindexed typing fallback inside the exact requested window.
+/// The frame identity is resolved against the same seed list as this walk, then
+/// checked against native geometry even for a single published AT-SPI frame:
+/// a toolkit can publish only its active modal while the document still exists.
+async fn collect_typing_window<'a>(
+    conn: &'a AccessibilityConnection,
+    pid: u32,
+    xid: u64,
+) -> Result<Vec<Visited<'a>>> {
+    let (visited, frame) = collect_visited_bounded(conn, pid, xid, None, None)
+        .await?
+        .ok_or_else(|| anyhow!("no AT-SPI application for pid {pid}"))?;
+    let refusal = |reason: &str| {
+        anyhow::Error::from(super::TypingWindowUnavailable(format!(
+            "Cannot type into exact window {xid} of pid {pid}: {reason}"
+        )))
+    };
+    let frame = frame.ok_or_else(|| refusal("accessibility window identity is ambiguous"))?;
+    let window = crate::x11::list_windows(Some(pid))
+        .into_iter()
+        .find(|window| window.xid == xid)
+        .ok_or_else(|| refusal("the native window no longer exists"))?;
+    let root = visited
+        .iter()
+        .find(|node| node.frame_ordinal == frame && node.depth == 0)
+        .ok_or_else(|| refusal("the requested accessibility frame was not observed"))?;
+    let geometry = match call(root.acc.proxies()).await {
+        Some(Ok(proxies)) => match call(proxies.component()).await {
+            Some(Ok(component)) => call(component.get_extents(CoordType::Screen))
+                .await
+                .and_then(|reply| reply.ok()),
+            _ => None,
+        },
+        _ => None,
+    };
+    if geometry
+        .and_then(|geometry| frame_geometry_distance(geometry, &window))
+        .is_none_or(|distance| distance > FRAME_MATCH_TOLERANCE_PX)
+    {
+        return Err(refusal(
+            "the accessible frame does not match the native window",
+        ));
+    }
+    if visited
+        .iter()
+        .any(|node| node.focused && node.frame_ordinal != frame)
+    {
+        return Err(refusal("the application's focused widget belongs to another window; observe that window or activate the requested document"));
+    }
+    Ok(visited
+        .into_iter()
+        .filter(|node| node.frame_ordinal == frame)
+        .collect())
+}
+
 /// Write into the best editable exposed by the current AT-SPI tree without
 /// falling through to synthetic X11 input.
-pub fn type_into_editable(pid: u32, text: &str) -> Result<()> {
+pub fn type_into_editable(pid: u32, xid: u64, text: &str) -> Result<()> {
     bounded(
         async {
             let conn = shared_connection().await?;
-            let visited = collect_visited(conn, pid)
-                .await?
-                .ok_or_else(|| anyhow!("no AT-SPI application for pid {pid}"))?;
+            let visited = collect_typing_window(conn, pid, xid).await?;
             if write_into_editable(&visited, text).await? {
                 Ok(())
             } else {
@@ -1717,14 +1770,11 @@ pub fn type_into_editable_at(pid: u32, idx: usize, text: &str) -> Result<()> {
     )
 }
 
-pub fn insert_text(pid: u32, text: &str) -> Result<bool> {
+pub fn insert_text(pid: u32, xid: u64, text: &str) -> Result<bool> {
     bounded(
         async {
             let conn = shared_connection().await?;
-            let visited = match collect_visited(conn, pid).await? {
-                Some(v) => v,
-                None => return Ok(false),
-            };
+            let visited = collect_typing_window(conn, pid, xid).await?;
 
             dlog!(
                 "insert_text: {} node(s), {} editable, {} entry/text-role",
@@ -1772,11 +1822,7 @@ pub fn insert_text(pid: u32, text: &str) -> Result<bool> {
                             let cy = y + (h.max(0) / 2);
                             dlog!("GTK3 fallback: entry bounds ({x},{y} {w}x{h}), clicking center ({cx},{cy})");
 
-                            // Get the window XID for this app so we can send X11 events to it.
-                            let Some(xid) = entry_find_window_xid(pid).await else {
-                                dlog!("GTK3 fallback: could not find window XID");
-                                return Ok(false);
-                            };
+                            // Preserve the exact caller window for synthetic input too.
 
                             // Translate screen coords to window-local coords for XSendEvent.
                             let Some((wx, wy)) = screen_to_window_coords(xid, cx, cy) else {
@@ -1829,28 +1875,15 @@ pub fn insert_text(pid: u32, text: &str) -> Result<bool> {
 ///                   the focused widget instead.
 ///   `None`        — nothing is focused (or the app is unreachable): fall back to
 ///                   the focus-free "first editable" path for background typing.
-pub fn focused_is_editable(pid: u32) -> Result<Option<bool>> {
+pub fn focused_is_editable(pid: u32, xid: u64) -> Result<Option<bool>> {
     bounded(
         async {
             let conn = shared_connection().await?;
-            let visited = match collect_visited(conn, pid).await? {
-                Some(v) => v,
-                None => return Ok(None),
-            };
+            let visited = collect_typing_window(conn, pid, xid).await?;
             Ok(visited.iter().find(|v| v.focused).map(|v| v.has_editable))
         },
         || Ok(None),
     )
-}
-
-/// Find the window XID for a PID by listing its X11 windows.
-async fn entry_find_window_xid(pid: u32) -> Option<u64> {
-    use crate::x11::list_windows;
-
-    // List X11 windows for that PID and return the first one.
-    let windows = list_windows(Some(pid));
-    let xid = windows.first()?.xid;
-    Some(xid)
 }
 
 /// Translate screen coordinates to window-local coordinates.

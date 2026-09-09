@@ -3665,12 +3665,16 @@ impl Tool for TypeTextTool {
         // widget instead: terminals via pty injection, everything else via
         // XSendEvent to the focused window. A focused *editable* (Some(true)) or
         // nothing focused (None) falls through to the existing AT-SPI-first flow.
-        let focus_kind = tokio::task::spawn_blocking(move || {
-            crate::atspi::focused_is_editable(pid).ok().flatten()
-        })
-        .await
-        .ok()
-        .flatten();
+        let focus_kind =
+            match tokio::task::spawn_blocking(move || crate::atspi::focused_is_editable(pid, xid))
+                .await
+            {
+                Ok(Ok(kind)) => kind,
+                Ok(Err(error)) if error.is::<crate::atspi::TypingWindowUnavailable>() => {
+                    return ToolResult::error(error.to_string());
+                }
+                _ => None,
+            };
         if focus_kind == Some(false) {
             if !delivery.is_foreground() {
                 return crate::input::delivery::background_unavailable_error(
@@ -3707,11 +3711,15 @@ impl Tool for TypeTextTool {
 
         // Try AT-SPI EditableText first (focus-free, works for Qt6/GTK4).
         let text_clone = text.clone();
-        let atspi_result =
-            tokio::task::spawn_blocking(move || crate::atspi::type_into_editable(pid, &text_clone))
-                .await;
+        let atspi_result = tokio::task::spawn_blocking(move || {
+            crate::atspi::type_into_editable(pid, xid, &text_clone)
+        })
+        .await;
 
         match atspi_result {
+            Ok(Err(error)) if error.is::<crate::atspi::TypingWindowUnavailable>() => {
+                return ToolResult::error(error.to_string());
+            }
             Ok(Err(error)) if error.is::<crate::atspi::EditableSelectionNeedsKeys>() => {
                 return type_selection_with_keys(pid, xid, None, text, delivery.is_foreground())
                     .await;
@@ -3738,7 +3746,7 @@ impl Tool for TypeTextTool {
             std::thread::sleep(std::time::Duration::from_millis(100));
 
             // Try AT-SPI again now that widgets should be exposed
-            let result = crate::atspi::type_into_editable(pid, &text_clone2);
+            let result = crate::atspi::type_into_editable(pid, xid, &text_clone2);
 
             // Restore state with FocusOut
             crate::input::send_focus_out(xid)?;
@@ -3748,6 +3756,9 @@ impl Tool for TypeTextTool {
         .await;
 
         match qt5_result {
+            Ok(Err(error)) if error.is::<crate::atspi::TypingWindowUnavailable>() => {
+                return ToolResult::error(error.to_string());
+            }
             Ok(Ok(())) => {
                 return type_text_ax_result(pid, text_len, "via AT-SPI with focus workaround");
             }
@@ -3773,8 +3784,12 @@ impl Tool for TypeTextTool {
             // focused widget, so background XSendEvent typing doesn't land. Fill
             // the editable field via AT-SPI instead — focus-free and toolkit-
             // agnostic. Fall back to Tk send or XSendEvent when no a11y field is exposed.
-            if crate::atspi::insert_text(pid, &text).unwrap_or(false) {
-                return Ok("ax");
+            match crate::atspi::insert_text(pid, xid, &text) {
+                Ok(true) => return Ok("ax"),
+                Err(error) if error.is::<crate::atspi::TypingWindowUnavailable>() => {
+                    return Err(error)
+                }
+                _ => {}
             }
             // Tk apps: use Tk's `send` command (no AT-SPI bridge, so AT-SPI above
             // returned false). This is the Tk-specific override, like CDP for Chromium.

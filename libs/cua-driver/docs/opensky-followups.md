@@ -392,3 +392,28 @@ holding focus, an active modal distinct from the addressed document, and indexed
 input to the intended field. Record actual method timing alongside saved outcomes;
 format checks or a successful build are not new real-driver acceptance. This
 optimization is X11-specific; it makes no new Wayland/macOS/Windows claim.
+
+### Exact-window background typing — candidate, not accepted
+
+The real SDK `FOCUS-L03` regression found that typing through an exact document
+handle while its Find dialog was active appended the requested document text to
+the dialog's search field. Both the a950 control and the already-focused typing
+candidate reproduced `Keep this searchFORBIDDEN DOCUMENT INPUT`. This is an
+existing wrong-window mutation, not a harmless success receipt.
+
+The pending correction carries the requested XID through focused-widget
+classification, both EditableText attempts and the final AT-SPI fallback. Each
+walk correlates the requested native window with the same walk's frame seeds,
+validates the selected frame's native geometry even when AT-SPI publishes only
+one frame, and restricts candidate widgets to that frame. If the application's
+focused widget belongs to another frame or the window identity is ambiguous,
+a typed pre-input refusal terminates the ladder; it cannot fall through to the
+Qt focus workaround, another editable, or automatic foreground escalation.
+The synthetic GTK fallback also retains the caller's XID rather than selecting
+the application's first window. Indexed typing is unchanged.
+
+`FOCUS-L03` must pass unchanged on the exact correction, with its saved-document
+and modal-content assertions, alongside the foreground/sibling, range/formula,
+Unicode, indexed and existing input checks. Formatting or build success alone
+is not acceptance. The change affects the X11 unindexed background ladder;
+no new macOS/Windows/Wayland acceptance is claimed.
