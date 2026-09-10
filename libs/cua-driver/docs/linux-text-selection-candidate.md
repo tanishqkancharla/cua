@@ -91,3 +91,19 @@ unknown-count rejection, context disambiguation and unit-correct caret edges.
 Linux compilation and the repeated saved-document test remain required before
 claiming that this resolves the observed refusal. No guard or replay rule was
 removed.
+
+The real Writer formatting diagnostic exposed stale application-wide ordinals:
+selecting text enables menu actions (including Cut and Copy), shifting later
+indices. An old toolbar token could then actuate a different control. The
+selection operation now invalidates this runtime's snapshots for the entire PID
+at the first mutation request and again at completion, cancellation or unwind.
+A proven pre-input refusal leaves snapshots intact. Other PIDs and runtimes are
+unchanged. Consumers must observe again before using indexed controls; no input
+is replayed automatically. The low-level registry tests cover both boundaries,
+sibling windows, runtime isolation and unwind. Real guard acceptance is pending.
+
+This is a sequential-use guard, not an atomic transaction across all clients:
+it cannot revoke an action that already resolved a token, prevent a concurrent
+snapshot from registering after mutation completion, or detect all unrelated
+external UI changes. Other mutation operations still need their own equivalent
+freshness handling; this change is limited to the new selection operation.

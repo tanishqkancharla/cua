@@ -153,8 +153,14 @@ impl Tool for SelectTextTool {
                 "status":"partial","verified":false,"mutation_submitted":true,
                 "code":"selection_unverified","retry_safe":false
             })),
-            Err(error) => ToolResult::error(format!("select_text worker failed; mutation outcome unknown: {error}. Observe; do not replay."))
-                .with_structured(json!({"status":"partial","verified":false,"code":"selection_unverified","retry_safe":false})),
+            Err(error) => {
+                // Worker failure cannot prove a pre-input refusal. The native
+                // guard handles unwind after submission; this also covers an
+                // unknown worker boundary before a normal result was returned.
+                cua_driver_core::element_token::global().invalidate_pid_snapshots(pid as i32);
+                ToolResult::error(format!("select_text worker failed; mutation outcome unknown: {error}. Observe; do not replay."))
+                    .with_structured(json!({"status":"partial","verified":false,"code":"selection_unverified","retry_safe":false}))
+            },
         }
     }
 }

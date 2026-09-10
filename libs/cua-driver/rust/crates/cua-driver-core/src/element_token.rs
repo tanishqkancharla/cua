@@ -40,7 +40,8 @@
 //!   AX/UIA/AT-SPI walk lands in the per-platform element cache).
 //! - A snapshot is valid until either (a) the LRU evicts it, or (b) a
 //!   newer snapshot for the same `pid` pushes it past the LRU cap of
-//!   [`LRU_CAP_PER_PID`].
+//!   [`LRU_CAP_PER_PID`], or (c) a mutation explicitly invalidates snapshots
+//!   for that PID in its runtime scope.
 //! - Resolving a stale token returns the explicit error string
 //!   [`STALE_TOKEN_ERROR`] — consumers MUST treat that as "re-snapshot
 //!   and retry", never as "click failed".
@@ -94,6 +95,25 @@ struct SnapshotEntry {
 /// because the cap is tiny (8) and walks are linear either way.
 pub struct TokenRegistry {
     by_runtime_and_pid: Mutex<HashMap<(String, i32), Vec<SnapshotEntry>>>,
+}
+
+/// Invalidates tokens at both boundaries of a submitted mutation. The runtime
+/// is captured when armed, so unwind/drop on another scope cannot clear a
+/// different runtime's tokens. Arm only at the first mutation request, after
+/// all proven pre-input refusals. This is not a lock on concurrent actions or
+/// snapshot collection: a token already resolved cannot be revoked by it.
+#[must_use = "retain the guard until mutation and read-back finish"]
+pub struct SnapshotMutationGuard<'a> {
+    registry: &'a TokenRegistry,
+    runtime_scope: String,
+    pid: i32,
+}
+
+impl Drop for SnapshotMutationGuard<'_> {
+    fn drop(&mut self) {
+        self.registry
+            .invalidate_pid_snapshots_in_scope(&self.runtime_scope, self.pid);
+    }
 }
 
 impl TokenRegistry {
@@ -207,6 +227,37 @@ impl TokenRegistry {
             ));
         }
         Ok((entry.window_id, idx))
+    }
+
+    /// Invalidate every window snapshot for this PID in the current runtime.
+    /// Accessibility ordinals can be application-wide, so invalidating only
+    /// the selected window would still admit stale sibling-window indices.
+    /// Returns the number of snapshots removed. Other PIDs/scopes are retained.
+    pub fn invalidate_pid_snapshots(&self, pid: i32) -> usize {
+        self.invalidate_pid_snapshots_in_scope(&current_runtime_scope(), pid)
+    }
+
+    /// Invalidate before a submitted mutation and again on completion/unwind.
+    /// The second boundary also removes snapshots published while the native
+    /// request/read-back was in progress, including on partial/unknown results.
+    /// A snapshot that started during input but registers after guard drop is
+    /// outside this guard; callers still need to serialize dependent actions.
+    pub fn invalidate_pid_snapshots_for_mutation(&self, pid: i32) -> SnapshotMutationGuard<'_> {
+        let runtime_scope = current_runtime_scope();
+        self.invalidate_pid_snapshots_in_scope(&runtime_scope, pid);
+        SnapshotMutationGuard {
+            registry: self,
+            runtime_scope,
+            pid,
+        }
+    }
+
+    fn invalidate_pid_snapshots_in_scope(&self, runtime_scope: &str, pid: i32) -> usize {
+        self.by_runtime_and_pid
+            .lock()
+            .unwrap()
+            .remove(&(runtime_scope.to_owned(), pid))
+            .map_or(0, |snapshots| snapshots.len())
     }
 
     pub fn clear_runtime_scope(&self, runtime_scope: &str) -> usize {
@@ -467,6 +518,77 @@ mod tests {
 
     fn fresh_registry() -> TokenRegistry {
         TokenRegistry::new()
+    }
+
+    #[test]
+    fn pid_invalidation_clears_all_windows_but_preserves_other_pids_and_scopes() {
+        let reg = fresh_registry();
+        let first = reg.register_snapshot(100, 41, 2);
+        let sibling = reg.register_snapshot(100, 42, 2);
+        let other_pid = reg.register_snapshot(101, 41, 2);
+        let other_scope = crate::tool::with_runtime_scope("another-runtime".to_owned(), || {
+            reg.register_snapshot(100, 41, 2)
+        });
+        assert_eq!(reg.invalidate_pid_snapshots(999), 0);
+        assert_eq!(reg.resolve(100, &token_for(first, 1)), Ok((41, 1)));
+        assert_eq!(reg.invalidate_pid_snapshots(100), 2);
+        assert_eq!(reg.invalidate_pid_snapshots(100), 0);
+        for snapshot in [first, sibling] {
+            assert_eq!(
+                reg.resolve(100, &token_for(snapshot, 1)),
+                Err(STALE_TOKEN_ERROR.to_owned())
+            );
+        }
+        assert_eq!(reg.resolve(101, &token_for(other_pid, 1)), Ok((41, 1)));
+        crate::tool::with_runtime_scope("another-runtime".to_owned(), || {
+            assert_eq!(reg.resolve(100, &token_for(other_scope, 1)), Ok((41, 1)));
+        });
+        let fresh = reg.register_snapshot(100, 41, 2);
+        assert_eq!(reg.resolve(100, &token_for(fresh, 1)), Ok((41, 1)));
+    }
+
+    #[test]
+    fn mutation_guard_clears_entry_and_exit_snapshots_in_its_captured_scope() {
+        let reg = fresh_registry();
+        let original = reg.register_snapshot(100, 41, 2);
+        let other_scope = crate::tool::with_runtime_scope("drop-runtime".to_owned(), || {
+            reg.register_snapshot(100, 41, 2)
+        });
+        let guard = reg.invalidate_pid_snapshots_for_mutation(100);
+        assert_eq!(
+            reg.resolve(100, &token_for(original, 1)),
+            Err(STALE_TOKEN_ERROR.to_owned())
+        );
+        let during_mutation = reg.register_snapshot(100, 42, 2);
+        crate::tool::with_runtime_scope("drop-runtime".to_owned(), || drop(guard));
+        assert_eq!(
+            reg.resolve(100, &token_for(during_mutation, 1)),
+            Err(STALE_TOKEN_ERROR.to_owned())
+        );
+        crate::tool::with_runtime_scope("drop-runtime".to_owned(), || {
+            assert_eq!(reg.resolve(100, &token_for(other_scope, 1)), Ok((41, 1)));
+        });
+        let fresh = reg.register_snapshot(100, 41, 2);
+        assert_eq!(reg.resolve(100, &token_for(fresh, 1)), Ok((41, 1)));
+    }
+
+    #[test]
+    fn mutation_guard_invalidates_snapshots_on_unwind() {
+        let reg = fresh_registry();
+        let original = reg.register_snapshot(100, 41, 2);
+        let mut during_mutation = None;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = reg.invalidate_pid_snapshots_for_mutation(100);
+            during_mutation = Some(reg.register_snapshot(100, 41, 2));
+            panic!("selection worker outcome is unknown");
+        }));
+        assert!(result.is_err());
+        for snapshot in [original, during_mutation.unwrap()] {
+            assert_eq!(
+                reg.resolve(100, &token_for(snapshot, 1)),
+                Err(STALE_TOKEN_ERROR.to_owned())
+            );
+        }
     }
 
     #[test]

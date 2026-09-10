@@ -2320,6 +2320,12 @@ pub fn select_text(
             // proxy; no new transport, external command, or EditableText write.
             let range = matched.for_kind(request.kind);
             submitted.set(true);
+            // Native selection/caret changes can enable menu actions and shift
+            // application-wide indexable ordinals, including sibling windows.
+            // Invalidate only after all pre-input checks, then again on return,
+            // bounded timeout/cancellation, or unwind. Never reuse this token.
+            let _snapshot_mutation = cua_driver_core::element_token::global()
+                .invalidate_pid_snapshots_for_mutation(pid as i32);
             let accepted: bool = match request.kind {
                 SelectionKind::Text if selections == 0 => {
                     call(text.inner().call("AddSelection", &(range.start, range.end)))
