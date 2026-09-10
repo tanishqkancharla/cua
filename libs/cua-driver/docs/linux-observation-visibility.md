@@ -29,6 +29,20 @@ change; it does not claim macOS/Windows behavior changes or complete parity.
 
 ## Validation status
 
-Implementation and before/after acceptance are pending. The prior seven identity
-checks do not certify this change. Canonical desktop certification remains a
+Implementation retains Showing/Visible separately from ordinal eligibility, consumes
+hidden indices without emitting them, and reads both labelled-by and label-for
+relations. Related labels preserve captured Text content as a value, including read-only
+widgets. Snapshot bounds include only emitted controls, also when unscoped. Passive
+and hidden siblings retire stale parent ancestry. Unknown state is retained.
+
+VISIBLE-L01 fails on driver8ed at the hidden Maximum field assertion; app exit
+and empty remote container inventory are verified. The unchanged test then
+locates Entries by its public label, changes tabs, and checks all28saved choices
+plus preserved cell values. Candidate build and after acceptance are pending.
+The prior seven identity checks do not certify this change. Canonical desktop certification remains a
 separate gate before readiness or merge. Historical agent scores are preserved.
+
+The adapter also serves Linux Wayland observations; X11 desktop evidence does
+not certify compositor-specific Wayland behavior. Closed menu descendants will
+not appear until the toolkit reports them showing. Keyboard/menu-path operations
+retain their existing traversal; public menu navigation must be verified.

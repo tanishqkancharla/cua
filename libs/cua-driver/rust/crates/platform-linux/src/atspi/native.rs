@@ -19,7 +19,7 @@ use anyhow::{anyhow, Result};
 use atspi::connection::{AccessibilityConnection, P2P};
 use atspi::proxy::accessible::AccessibleProxy;
 use atspi::proxy::proxy_ext::ProxyExt;
-use atspi::{CoordType, Interface, State, StateSet};
+use atspi::{CoordType, Interface, RelationType, State, StateSet};
 
 use super::{AtspiIdentity, AtspiNode};
 
@@ -233,9 +233,13 @@ struct Visited<'a> {
     /// Display text: the accessible `name`, or — for editable/text widgets that
     /// expose no name — the Text-interface content (where typed text lives).
     name: String,
+    has_native_name: bool,
+    observed_text: Option<String>,
     value: Option<String>,
     checked: Option<bool>,
     enabled: Option<bool>,
+    showing: Option<bool>,
+    visible: Option<bool>,
     selected: Option<bool>,
     selectable: bool,
     actions: Vec<String>,
@@ -882,6 +886,8 @@ async fn collect_visited_bounded<'a>(
 
     let mut visited: Vec<Visited<'a>> = Vec::new();
     let mut identity_owners = std::collections::HashMap::new();
+    let mut labels: std::collections::HashMap<(String, String), Vec<String>> =
+        std::collections::HashMap::new();
     // Guard against pathological/looping trees. Defaults to 5 000 (the
     // historical hard-coded budget); callers can override via max_elements.
     let mut budget = max_elements.unwrap_or(5000usize);
@@ -1005,6 +1011,15 @@ async fn collect_visited_bounded<'a>(
             Some(Ok(n)) => n,
             _ => String::new(),
         };
+        let has_native_name = !name.trim().is_empty();
+        let showing = state_r
+            .as_ref()
+            .and_then(|r| r.as_ref().ok())
+            .map(|state| state.contains(State::Showing));
+        let visible = state_r
+            .as_ref()
+            .and_then(|r| r.as_ref().ok())
+            .map(|state| state.contains(State::Visible));
         let focused = matches!(state_r.as_ref(), Some(Ok(s)) if s.contains(State::Focused));
         let role_lower = role.to_ascii_lowercase();
         let checked = if role_lower.contains("check") {
@@ -1096,14 +1111,73 @@ async fn collect_visited_bounded<'a>(
         // contains the displayed content. Preserve both. Value often reports
         // zero for a string/empty cell and must not replace its actual text.
         if role_lower == "table cell" {
-            if let Some(text) = observed_text {
-                value = if text.is_empty() { None } else { Some(text) };
+            if let Some(text) = observed_text.as_ref() {
+                value = if text.is_empty() {
+                    None
+                } else {
+                    Some(text.clone())
+                };
             }
         }
 
         // Surface Text content as the display name when the widget has no name.
         if name.trim().is_empty() && !text_content.trim().is_empty() {
             name = text_content;
+        }
+
+        // GTK sometimes exports only one direction of the label relationship.
+        // Collect both, using object identity rather than sibling proximity.
+        // Only observed targets or reverse-label sources initiate discovery.
+        // Explicit LabelledBy may refer to a non-showing semantic label.
+        if is_observed(showing, visible)
+            && (!has_native_name || role_lower == "label")
+            && std::time::Instant::now() < deadline
+        {
+            if let Some(Ok(relations)) = call(acc.get_relation_set()).await {
+                for (kind, references) in relations {
+                    if kind != RelationType::LabelFor && kind != RelationType::LabelledBy {
+                        continue;
+                    }
+                    for reference in references.into_iter().take(8) {
+                        if std::time::Instant::now() >= deadline {
+                            break;
+                        }
+                        let Some(raw) = RawObjectRef::from_atspi(&reference) else {
+                            continue;
+                        };
+                        let Some(other) = identity_ref(conn, &raw, &mut identity_owners).await
+                        else {
+                            continue;
+                        };
+                        let binding = if kind == RelationType::LabelFor && !name.trim().is_empty() {
+                            Some(((other.name, other.path), name.clone()))
+                        } else if kind == RelationType::LabelledBy && !has_native_name {
+                            if let (Some(object), Some(Ok(label))) = (
+                                object_identity.as_ref(),
+                                call(accessible_for(conn, &other)).await,
+                            ) {
+                                call(label.name())
+                                    .await
+                                    .and_then(|r| r.ok())
+                                    .filter(|label| !label.trim().is_empty())
+                                    .map(|label| {
+                                        ((object.name.clone(), object.path.clone()), label)
+                                    })
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+                        if let Some((key, label)) = binding {
+                            let names = labels.entry(key).or_default();
+                            if !names.contains(&label) {
+                                names.push(label);
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // Children inherit web-document context, plus this node's own role.
@@ -1132,9 +1206,13 @@ async fn collect_visited_bounded<'a>(
             depth,
             role,
             name,
+            has_native_name,
+            observed_text,
             value,
             checked,
             enabled,
+            showing,
+            visible,
             selected,
             selectable,
             actions,
@@ -1156,6 +1234,24 @@ async fn collect_visited_bounded<'a>(
                 }),
             acc,
         });
+    }
+
+    for node in &mut visited {
+        if node.has_native_name {
+            continue;
+        }
+        if let Some(names) = node
+            .identity
+            .as_ref()
+            .and_then(|id| labels.get(&(id.bus_name.clone(), id.path.clone())))
+        {
+            // A related label names the field; preserve its actual Text
+            // content as a value, including read-only text widgets.
+            if let Some(text) = node.observed_text.as_ref().filter(|text| !text.is_empty()) {
+                node.value = Some(text.clone());
+            }
+            node.name = names.join(" ");
+        }
     }
 
     dlog!("walked pid {pid}: {} node(s)", visited.len());
@@ -1196,7 +1292,12 @@ fn render(visited: &[Visited<'_>], only_frame: Option<usize>) -> (String, Vec<At
             current_frame = Some(v.frame_ordinal);
             parent_at_depth.clear();
         }
-        let emit = only_frame.is_none_or(|frame| frame == v.frame_ordinal);
+        // Every visited sibling retires deeper ancestry, including passive or
+        // hidden containers. Otherwise a following field can inherit a prior
+        // sibling checkbox as its parent.
+        parent_at_depth.truncate(v.depth);
+        let emit = only_frame.is_none_or(|frame| frame == v.frame_ordinal)
+            && is_observed(v.showing, v.visible);
         let indent = "  ".repeat(v.depth);
         // Resolve parent: walk parent_at_depth from v.depth-1 down to 0.
         let parent_element_index = if v.depth == 0 {
@@ -1277,6 +1378,12 @@ fn render(visited: &[Visited<'_>], only_frame: Option<usize>) -> (String, Vec<At
 /// (e.g. `1.0`), so `value="..."` fields stay byte-compatible.
 fn format_value(v: f64) -> String {
     format!("{v:?}")
+}
+
+/// Unknown state is not evidence of invisibility. Keep the actuator index
+/// predicate unchanged: filtering presentation must never renumber targets.
+fn is_observed(showing: Option<bool>, visible: Option<bool>) -> bool {
+    showing != Some(false) && visible != Some(false)
 }
 
 /// Interpret the positive AT-SPI states that establish user operability.
@@ -1409,18 +1516,14 @@ pub(super) fn walk_tree_bounded_with_timeout(
                 Vec::new()
             }
         };
-        // Bounds are keyed by the application-wide element index, so drop the
-        // entries for windows this snapshot no longer shows.
-        let bounds = if scoped_frame.is_some() {
-            let emitted: std::collections::HashSet<usize> =
-                nodes.iter().filter_map(|node| node.element_index).collect();
-            bounds
-                .into_iter()
-                .filter(|(index, ..)| emitted.contains(index))
-                .collect()
-        } else {
-            bounds
-        };
+        // Bounds use application-wide indices; retain only controls emitted
+        // in this observation, including unscoped snapshots.
+        let emitted: std::collections::HashSet<usize> =
+            nodes.iter().filter_map(|node| node.element_index).collect();
+        let bounds = bounds
+            .into_iter()
+            .filter(|(index, ..)| emitted.contains(index))
+            .collect();
         Ok(Some(WalkedTree {
             markdown,
             nodes,
