@@ -2194,6 +2194,304 @@ pub fn resolve_indexed_click_target(pid: u32, idx: usize, xid: u64) -> Result<In
     )
 }
 
+
+/// Text selection never uses activation, pointer events, or keyboard replay.
+/// All errors after the first selection/caret request are marked uncertain,
+/// including negative replies and read-back failures: callers must observe.
+pub fn select_text(
+    request: &crate::text_selection::SelectionRequest,
+) -> std::result::Result<crate::text_selection::TextRange, crate::text_selection::SelectionFailure>
+{
+    use crate::text_selection::{matching_range, SelectionFailure, SelectionKind};
+    let submitted = std::cell::Cell::new(false);
+    let result = bounded(
+        async {
+            if crate::wayland::is_wayland() {
+                return Err(anyhow!("select_text currently requires X11 exact-window verification; native Wayland is unsupported"));
+            }
+            let pid = request.pid;
+            let xid = request.window_id;
+            if !crate::x11::window_belongs_to_pid(xid, pid) {
+                return Err(anyhow!(
+                    "select_text window no longer belongs to the requested process"
+                ));
+            }
+            validate_selection_snapshot(request)?;
+            let window_topology = selection_window_topology(pid);
+            let conn = shared_connection().await?;
+            let (visited, frame) = collect_visited_bounded(conn, pid, xid, None, None)
+                .await?
+                .ok_or_else(|| anyhow!("no AT-SPI application for selection"))?;
+            let frame = frame.ok_or_else(|| anyhow!("selection window identity is ambiguous"))?;
+            // Do not filter by frame before numbering: snapshot indices are
+            // application-wide, including other top-levels in this process.
+            let target = visited
+                .iter()
+                .filter(|node| is_indexable(node))
+                .nth(request.element_index)
+                .ok_or_else(|| anyhow!("selection element is no longer present"))?;
+            if target.frame_ordinal != frame {
+                return Err(anyhow!("selection element belongs to another window"));
+            }
+            verify_selection_window(&visited, pid, xid, frame, &window_topology).await?;
+            let proxies = target
+                .acc
+                .proxies()
+                .await
+                .map_err(|e| anyhow!("selection interfaces unavailable: {e}"))?;
+            let text = proxies
+                .text()
+                .await
+                .map_err(|e| anyhow!("element has no Text selection interface: {e}"))?;
+            let count = call(text.character_count())
+                .await
+                .ok_or_else(|| anyhow!("Text character count timed out"))??;
+            if !(0..=1_000_000).contains(&count) {
+                return Err(anyhow!(
+                    "Text character count exceeds selection inspection bound"
+                ));
+            }
+            let live = call(text.get_text(0, count))
+                .await
+                .ok_or_else(|| anyhow!("Text content read timed out"))??;
+            if live.chars().count() != count as usize {
+                return Err(anyhow!(
+                    "Text character count disagrees with live content; observe again"
+                ));
+            }
+            let range = matching_range(
+                &live,
+                &request.text,
+                request.prefix.as_deref(),
+                request.suffix.as_deref(),
+                request.kind,
+            )
+            .map_err(anyhow::Error::msg)?;
+            let selections = call(text.get_n_selections())
+                .await
+                .ok_or_else(|| anyhow!("selection count timed out"))??;
+            if !(0..=1).contains(&selections) {
+                return Err(anyhow!(
+                    "multiple or invalid existing selections are unsupported"
+                ));
+            }
+            let prior_focus = selection_focus()?;
+            // Recheck ownership, token, modality and text at the mutation seam.
+            // No re-enumeration or fallback may retarget the selected proxy.
+            verify_selection_window(&visited, pid, xid, frame, &window_topology).await?;
+            validate_selection_snapshot(request)?;
+            let latest = call(text.get_text(0, count))
+                .await
+                .ok_or_else(|| anyhow!("Text recheck timed out"))??;
+            if latest != live {
+                return Err(anyhow!(
+                    "element text changed during selection; observe again"
+                ));
+            }
+            let latest_count = call(text.character_count())
+                .await
+                .ok_or_else(|| anyhow!("Text character count recheck timed out"))??;
+            let latest_selections = call(text.get_n_selections())
+                .await
+                .ok_or_else(|| anyhow!("selection count recheck timed out"))??;
+            if latest_count != count
+                || latest_selections != selections
+                || selection_focus()? != prior_focus
+            {
+                return Err(anyhow!(
+                    "selection or desktop state changed before input; observe again"
+                ));
+            }
+            // Use the standard Text D-Bus method names through its existing
+            // proxy; no new transport, external command, or EditableText write.
+            submitted.set(true);
+            let accepted: bool = match request.kind {
+                SelectionKind::Text if selections == 0 => {
+                    call(text.inner().call("AddSelection", &(range.start, range.end)))
+                        .await
+                        .ok_or_else(|| anyhow!("AddSelection timed out"))??
+                }
+                SelectionKind::Text => call(
+                    text.inner()
+                        .call("SetSelection", &(0i32, range.start, range.end)),
+                )
+                .await
+                .ok_or_else(|| anyhow!("SetSelection timed out"))??,
+                SelectionKind::CursorBefore | SelectionKind::CursorAfter => {
+                    call(text.inner().call("SetCaretOffset", &(range.start,)))
+                        .await
+                        .ok_or_else(|| anyhow!("SetCaretOffset timed out"))??
+                }
+            };
+            if !accepted {
+                return Err(anyhow!("Text selection request was not accepted"));
+            }
+            let selected_count = call(text.get_n_selections())
+                .await
+                .ok_or_else(|| anyhow!("selection read-back timed out"))??;
+            let selected: Option<(i32, i32)> = if selected_count == 1 {
+                Some(
+                    call(text.inner().call("GetSelection", &(0i32,)))
+                        .await
+                        .ok_or_else(|| anyhow!("GetSelection read-back timed out"))??,
+                )
+            } else {
+                None
+            };
+            let matches = match request.kind {
+                SelectionKind::Text => selected == Some((range.start, range.end)),
+                SelectionKind::CursorBefore | SelectionKind::CursorAfter => {
+                    let caret = call(text.caret_offset())
+                        .await
+                        .ok_or_else(|| anyhow!("caret read-back timed out"))??;
+                    caret == range.start
+                        && (selected_count == 0 || selected == Some((range.start, range.start)))
+                }
+            };
+            if !matches {
+                return Err(anyhow!(
+                    "Text selection/caret read-back differs from the requested range"
+                ));
+            }
+            if selection_focus()? != prior_focus {
+                return Err(anyhow!(
+                    "Text selection changed desktop focus; inspect before continuing"
+                ));
+            }
+            let after = call(text.get_text(0, count))
+                .await
+                .ok_or_else(|| anyhow!("Text read-back timed out"))??;
+            let after_count = call(text.character_count())
+                .await
+                .ok_or_else(|| anyhow!("Text character count read-back timed out"))??;
+            if after != live || after_count != count {
+                return Err(anyhow!(
+                    "element text changed during selection; inspect before continuing"
+                ));
+            }
+            Ok(range)
+        },
+        || Err(anyhow!("select_text operation timed out")),
+    );
+    result.map_err(|error| SelectionFailure {
+        mutation_submitted: submitted.get(),
+        message: if submitted.get() {
+            format!("select_text result is uncertain after mutation: {error}. Observe before continuing; do not replay automatically.")
+        } else { format!("select_text refused before mutation: {error}") },
+    })
+}
+
+fn validate_selection_snapshot(request: &crate::text_selection::SelectionRequest) -> Result<()> {
+    use cua_driver_core::element_token::{resolve_element_args, ResolvedElement};
+    let pid = i32::try_from(request.pid).map_err(|_| anyhow!("invalid selection process id"))?;
+    let xid =
+        u32::try_from(request.window_id).map_err(|_| anyhow!("invalid selection window id"))?;
+    match resolve_element_args(
+        pid,
+        Some(request.element_index),
+        request.element_token.as_deref(),
+        request.snapshot_id.as_deref(),
+        Some(xid),
+        "select_text",
+    ) {
+        Ok(ResolvedElement::Element {
+            element_index,
+            window_id: Some(window_id),
+            ..
+        }) if element_index == request.element_index && window_id == xid => Ok(()),
+        _ => Err(anyhow!(
+            "selection snapshot is stale or its target no longer agrees; observe again"
+        )),
+    }
+}
+
+async fn verify_selection_window(
+    visited: &[Visited<'_>],
+    pid: u32,
+    xid: u64,
+    frame: usize,
+    window_topology: &[u64],
+) -> Result<()> {
+    if selection_window_topology(pid) != window_topology {
+        return Err(anyhow!(
+            "application window topology changed; observe again before selection"
+        ));
+    }
+    if !crate::x11::window_belongs_to_pid(xid, pid) {
+        return Err(anyhow!("selection window ownership changed"));
+    }
+    let window = crate::x11::list_windows(Some(pid))
+        .into_iter()
+        .find(|w| w.xid == xid)
+        .ok_or_else(|| anyhow!("selection window no longer exists"))?;
+    let root = visited
+        .iter()
+        .find(|n| n.frame_ordinal == frame && n.depth == 0)
+        .ok_or_else(|| anyhow!("selection frame was not observed"))?;
+    let proxies = root.acc.proxies().await?;
+    let component = proxies.component().await?;
+    let geometry = call(component.get_extents(CoordType::Screen))
+        .await
+        .ok_or_else(|| anyhow!("selection frame geometry timed out"))??;
+    if frame_geometry_distance(geometry, &window).is_none_or(|d| d > FRAME_MATCH_TOLERANCE_PX) {
+        return Err(anyhow!(
+            "selection accessibility frame differs from the native window"
+        ));
+    }
+    if visited
+        .iter()
+        .any(|n| n.focused && n.frame_ordinal != frame)
+    {
+        return Err(anyhow!(
+            "selection refused: another window in this application owns the focused widget"
+        ));
+    }
+    for other in visited
+        .iter()
+        .filter(|n| n.depth == 0 && n.frame_ordinal != frame)
+    {
+        let state = call(other.acc.get_state())
+            .await
+            .ok_or_else(|| anyhow!("selection modal-state check timed out"))??;
+        if state.contains(State::Modal) && state.contains(State::Showing) {
+            return Err(anyhow!(
+                "selection refused: another modal window is showing"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn selection_window_topology(pid: u32) -> Vec<u64> {
+    let mut windows: Vec<u64> = crate::x11::list_windows(Some(pid))
+        .into_iter()
+        .map(|window| window.xid)
+        .collect();
+    windows.sort_unstable();
+    windows
+}
+
+/// Read-only X11 focus snapshot. Selection must not activate another app or
+/// switch its focused widget; a toolkit that does so produces an uncertain result.
+fn selection_focus() -> Result<(u32, u32)> {
+    use x11rb::connection::Connection;
+    use x11rb::protocol::xproto::{AtomEnum, ConnectionExt};
+    let (conn, screen) = x11rb::rust_connection::RustConnection::connect(None)?;
+    let root = conn.setup().roots[screen].root;
+    let atom = conn
+        .intern_atom(false, b"_NET_ACTIVE_WINDOW")?
+        .reply()?
+        .atom;
+    let property = conn
+        .get_property(false, root, atom, AtomEnum::WINDOW, 0, 1)?
+        .reply()?;
+    let active = property
+        .value32()
+        .and_then(|mut values| values.next())
+        .ok_or_else(|| anyhow!("cannot verify active X11 window before selection"))?;
+    Ok((active, conn.get_input_focus()?.reply()?.focus))
+}
+
 async fn activate_visited(
     target: &Visited<'_>,
     idx: usize,

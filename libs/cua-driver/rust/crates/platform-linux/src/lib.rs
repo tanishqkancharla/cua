@@ -68,6 +68,9 @@ pub mod wayland;
 // Keeping it un-gated lets the unit tests run on any host.
 pub mod terminal;
 
+// Pure matching logic is testable without a Linux desktop.
+pub mod text_selection;
+
 #[cfg(target_os = "linux")]
 pub mod xauth;
 

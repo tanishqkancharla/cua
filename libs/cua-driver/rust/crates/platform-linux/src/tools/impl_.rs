@@ -8699,6 +8699,10 @@ pub fn build_registry_with_provider(
     r.register(Box::new(CloseWindowTool));
     let pid_window_candidates: WindowTargetCandidates = Arc::new(pid_window_target_candidates);
     r.register(pid_window_guarded(BringToFrontTool, &pid_window_candidates));
+    r.register(pid_window_guarded(
+        super::text_selection::SelectTextTool,
+        &pid_window_candidates,
+    ));
     r.register(Box::new(SetWindowFrameTool));
     r.register(Box::new(InvokeMenuTool));
     r.register(pid_window_guarded(
