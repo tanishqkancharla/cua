@@ -21,7 +21,7 @@ use atspi::proxy::accessible::AccessibleProxy;
 use atspi::proxy::proxy_ext::ProxyExt;
 use atspi::{CoordType, Interface, State, StateSet};
 
-use super::AtspiNode;
+use super::{AtspiIdentity, AtspiNode};
 
 /// Per-call D-Bus timeout: a single unresponsive accessible (common in large,
 /// lazily-built trees like Chromium's) must not stall the whole walk.
@@ -257,6 +257,7 @@ struct Visited<'a> {
     /// tree; this is what lets a caller that named an exact native window prove
     /// which of those windows a node actually lives in.
     frame_ordinal: usize,
+    identity: Option<AtspiIdentity>,
     acc: AccessibleProxy<'a>,
 }
 
@@ -343,6 +344,38 @@ impl RawObjectRef {
             path: oref.path_as_str().to_owned(),
         })
     }
+}
+
+/// Pin well-known names to their current unique owner. A missing owner is
+/// discovery-only: indexed clicks cannot use an unproven persistent identity.
+async fn identity_ref(
+    conn: &AccessibilityConnection,
+    raw: &RawObjectRef,
+    owners: &mut std::collections::HashMap<String, Option<String>>,
+) -> Option<RawObjectRef> {
+    let owner = if raw.name.starts_with(':') {
+        raw.name.clone()
+    } else if let Some(owner) = owners.get(&raw.name) {
+        owner.clone()?
+    } else {
+        let owner = async {
+            let bus = atspi::zbus::fdo::DBusProxy::new(conn.connection())
+                .await
+                .ok()?;
+            let name = atspi::zbus::names::BusName::try_from(raw.name.as_str()).ok()?;
+            call(bus.get_name_owner(name))
+                .await?
+                .ok()
+                .map(|name| name.to_string())
+        }
+        .await;
+        owners.insert(raw.name.clone(), owner.clone());
+        owner?
+    };
+    Some(RawObjectRef {
+        name: owner,
+        path: raw.path.clone(),
+    })
 }
 
 type WireRef = (String, atspi::zbus::zvariant::OwnedObjectPath);
@@ -848,6 +881,7 @@ async fn collect_visited_bounded<'a>(
         .collect();
 
     let mut visited: Vec<Visited<'a>> = Vec::new();
+    let mut identity_owners = std::collections::HashMap::new();
     // Guard against pathological/looping trees. Defaults to 5 000 (the
     // historical hard-coded budget); callers can override via max_elements.
     let mut budget = max_elements.unwrap_or(5000usize);
@@ -889,7 +923,15 @@ async fn collect_visited_bounded<'a>(
         // otherwise the loop never returns to the deadline check at the top and
         // the walk stalls past OP_TIMEOUT for callers without an outer guard
         // (snapshot bounds, insert_text). That was the residual #1936 hang.
-        let acc = match call(accessible_for(conn, &oref)).await {
+        let object_identity = identity_ref(conn, &oref, &mut identity_owners).await;
+        let frame_identity = identity_ref(conn, &seeds[frame_ordinal], &mut identity_owners).await;
+        // Use the pinned owner for metadata and the retained actuation proxy.
+        let acc = match call(accessible_for(
+            conn,
+            object_identity.as_ref().unwrap_or(&oref),
+        ))
+        .await
+        {
             Some(Ok(a)) => a,
             Some(Err(error)) => {
                 dlog!("  accessible_for failed: {error:#}");
@@ -1104,6 +1146,14 @@ async fn collect_visited_bounded<'a>(
             in_web_doc,
             on_web_process_bus: is_web_process_bus(&oref.name),
             frame_ordinal,
+            identity: object_identity
+                .zip(frame_identity)
+                .map(|(object, frame)| AtspiIdentity {
+                    bus_name: object.name,
+                    path: object.path,
+                    frame_bus_name: frame.name,
+                    frame_path: frame.path,
+                }),
             acc,
         });
     }
@@ -1191,6 +1241,7 @@ fn render(visited: &[Visited<'_>], only_frame: Option<usize>) -> (String, Vec<At
                 }),
                 actions: v.actions.clone(),
                 element_key: idx as u64,
+                identity: v.identity.clone(),
                 depth: v.depth,
                 parent_element_index,
                 in_web_content: v.in_web_doc,
@@ -2081,12 +2132,51 @@ pub struct IndexedClickTarget {
     pid: u32,
     xid: u64,
     index: usize,
+    bounds_index: usize,
     target_position: usize,
     frame_ordinal: usize,
     visited: Vec<Visited<'static>>,
 }
 
 impl IndexedClickTarget {
+    /// Final pre-input liveness check on the retained proxy. A defunct or
+    /// disabled object must never fall back to another object's coordinates.
+    pub fn verify_live(&self) -> Result<()> {
+        if !crate::x11::window_belongs_to_pid(self.xid, self.pid) {
+            return Err(anyhow!(
+                "{}: window no longer belongs to process",
+                cua_driver_core::element_token::STALE_TOKEN_ERROR
+            ));
+        }
+        bounded(
+            async {
+                let target = &self.visited[self.target_position];
+                let state = call(target.acc.get_state())
+                    .await
+                    .and_then(|reply| reply.ok())
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "{}: observed object no longer responds",
+                            cua_driver_core::element_token::STALE_TOKEN_ERROR
+                        )
+                    })?;
+                if state.contains(State::Defunct) || !is_enabled_state(&state) {
+                    return Err(anyhow!(
+                        "{}: observed object is defunct or disabled",
+                        cua_driver_core::element_token::STALE_TOKEN_ERROR
+                    ));
+                }
+                Ok(())
+            },
+            || {
+                Err(anyhow!(
+                    "{}: object liveness check timed out",
+                    cua_driver_core::element_token::STALE_TOKEN_ERROR
+                ))
+            },
+        )
+    }
+
     pub fn needs_foreground_pointer(&self) -> bool {
         let target = &self.visited[self.target_position];
         target.has_editable || target.role == "table cell"
@@ -2102,7 +2192,7 @@ impl IndexedClickTarget {
                     self.pid,
                     self.xid,
                     Some(self.frame_ordinal),
-                    Some(self.index),
+                    Some(self.bounds_index),
                 )
                 .await
                 .into_iter()
@@ -2152,9 +2242,15 @@ impl IndexedClickTarget {
     }
 }
 
-/// Resolve exactly once, retaining application-wide index ordering while
-/// requiring the selected element to belong to the explicitly named X11 window.
-pub fn resolve_indexed_click_target(pid: u32, idx: usize, xid: u64) -> Result<IndexedClickTarget> {
+/// Resolve the snapshot's stable object identity exactly once, requiring its
+/// original frame to belong to the explicitly named live X11 window. Ordinal
+/// changes do not retarget the click; disappearance fails before input.
+pub fn resolve_indexed_click_target(
+    pid: u32,
+    idx: usize,
+    xid: u64,
+    identity: &AtspiIdentity,
+) -> Result<IndexedClickTarget> {
     if xid == 0 {
         return Err(anyhow!(
             "indexed click resolution requires an exact X11 window"
@@ -2169,22 +2265,44 @@ pub fn resolve_indexed_click_target(pid: u32, idx: usize, xid: u64) -> Result<In
             let frame_ordinal = scoped_frame.ok_or_else(|| {
                 anyhow!("cannot correlate window {xid} to an AT-SPI frame for pid {pid}")
             })?;
-            // Snapshot indices are application-wide even when only one frame
-            // is emitted. Filtering to the frame first would reinterpret them.
-            let target_position = visited
+            if !crate::x11::window_belongs_to_pid(xid, pid) {
+                return Err(anyhow!(
+                    "{}: window no longer belongs to process",
+                    cua_driver_core::element_token::STALE_TOKEN_ERROR
+                ));
+            }
+            // The observed ordinal is only a snapshot address, never a live
+            // selector. Match the exact object and its original owning frame.
+            let mut matches = visited
                 .iter()
                 .enumerate()
-                .filter(|(_, node)| is_indexable(node))
-                .nth(idx)
-                .map(|(position, _)| position)
-                .ok_or_else(|| anyhow!("element {idx} not found"))?;
-            if visited[target_position].frame_ordinal != frame_ordinal {
-                return Err(anyhow!("element {idx} does not belong to window {xid}"));
+                .filter(|(_, node)| node.identity.as_ref() == Some(identity));
+            let (target_position, target) = matches.next().ok_or_else(|| {
+                anyhow!(
+                    "{}: observed AT-SPI object is no longer present",
+                    cua_driver_core::element_token::STALE_TOKEN_ERROR
+                )
+            })?;
+            if matches.next().is_some()
+                || target.frame_ordinal != frame_ordinal
+                || !is_indexable(target)
+            {
+                return Err(anyhow!(
+                    "{}: observed object is ambiguous, disabled or outside the target window",
+                    cua_driver_core::element_token::STALE_TOKEN_ERROR
+                ));
             }
+            // Geometry's existing helper takes a CURRENT application-wide
+            // ordinal. Derive it from the already matched retained object.
+            let live_index = visited[..target_position]
+                .iter()
+                .filter(|node| is_indexable(node))
+                .count();
             Ok(IndexedClickTarget {
                 pid,
                 xid,
                 index: idx,
+                bounds_index: live_index,
                 target_position,
                 frame_ordinal,
                 visited,
@@ -2193,7 +2311,6 @@ pub fn resolve_indexed_click_target(pid: u32, idx: usize, xid: u64) -> Result<In
         || Err(anyhow!("indexed click resolution timed out for pid {pid}")),
     )
 }
-
 
 /// Text selection never uses activation, pointer events, or keyboard replay.
 /// All errors after the first selection/caret request are marked uncertain,
