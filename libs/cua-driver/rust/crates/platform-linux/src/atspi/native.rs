@@ -2489,7 +2489,8 @@ fn selection_focus() -> Result<(u32, u32)> {
         .value32()
         .and_then(|mut values| values.next())
         .ok_or_else(|| anyhow!("cannot verify active X11 window before selection"))?;
-    Ok((active, conn.get_input_focus()?.reply()?.focus))
+    let focus = conn.get_input_focus()?.reply()?.focus;
+    Ok((active, focus))
 }
 
 async fn activate_visited(
