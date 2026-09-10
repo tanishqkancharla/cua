@@ -2646,7 +2646,7 @@ impl ClickTool {
                         &modifier_refs,
                     )? {
                         "xtest"
-                    } else if !delivery.is_foreground() && target.is_table_cell() {
+                    } else if !delivery.is_foreground() && target.needs_foreground_pointer() {
                         return Ok(crate::input::delivery::background_unavailable_error(
                             crate::input::delivery::BackgroundUnavailable::FocusedInputOnly,
                         ));

@@ -464,12 +464,12 @@ fn filter_tree(markdown: &str, query: &str) -> String {
     r
 }
 
-/// No input has been delivered; this cell needs a real pointer selection.
+/// No input has been delivered; this control needs a real pointer click.
 #[derive(Debug)]
 pub struct ElementClickNeedsForeground;
 impl std::fmt::Display for ElementClickNeedsForeground {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("table cell selection requires real foreground pointer input")
+        f.write_str("editable text or table cell selection requires real foreground pointer input")
     }
 }
 impl std::error::Error for ElementClickNeedsForeground {}
