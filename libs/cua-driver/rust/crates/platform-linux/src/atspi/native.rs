@@ -2186,8 +2186,9 @@ pub struct IndexedClickTarget {
 }
 
 impl IndexedClickTarget {
-    pub fn is_table_cell(&self) -> bool {
-        self.visited[self.target_position].role == "table cell"
+    pub fn needs_foreground_pointer(&self) -> bool {
+        let target = &self.visited[self.target_position];
+        target.has_editable || target.role == "table cell"
     }
 
     /// Refresh Component extents through the retained proxies. No tree walk is
@@ -2222,7 +2223,7 @@ impl IndexedClickTarget {
     /// failures) must not trigger a second pointer mutation.
     pub fn perform_action(&self, allow_activation: bool) -> Result<(String, bool)> {
         let target = &self.visited[self.target_position];
-        if self.is_table_cell() {
+        if self.needs_foreground_pointer() {
             return Err(super::ElementClickNeedsForeground.into());
         }
         if !allow_activation {
@@ -2297,10 +2298,11 @@ async fn activate_visited(
     idx: usize,
     allow_activation: bool,
 ) -> Result<(String, bool)> {
-    // Calc accepts synthetic targeted clicks without selecting their
-    // cell. Refuse before input so callers can retain this exact target
-    // and explicitly use the real pointer route.
-    if target.role == "table cell" {
+    // EditableText's activate can submit its dialog instead of placing a
+    // caret. Calc also accepts targeted clicks without selecting the cell.
+    // Refuse before input, as the coordinate path does, so callers can use
+    // the real pointer on this exact target without replaying an AX action.
+    if target.has_editable || target.role == "table cell" {
         return Err(super::ElementClickNeedsForeground.into());
     }
     if !allow_activation {
