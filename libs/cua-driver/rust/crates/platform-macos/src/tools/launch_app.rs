@@ -16,7 +16,9 @@ fn def() -> &'static ToolDef {
         description:
             "Launch a macOS app in the background — the target does NOT come to the foreground.\n\n\
              Provide either `bundle_id` (preferred — unambiguous, e.g. `com.apple.calculator`) \
-             or `name` (e.g. \"Calculator\"). If both are given, bundle_id wins.\n\n\
+             or `name` (e.g. \"Calculator\"). If both are given, bundle_id wins.\n\
+             Use `launch_path` for an exact absolute .app bundle path when several copies share a bundle ID. \
+             Do not combine launch_path with bundle_id or name.\n\n\
              Optional `urls` are handed to the app as open targets — for Finder, pass a folder \
              path to open a backgrounded Finder window there.\n\n\
              Browser DevTools setup belongs to `browser_prepare`, which can prove that a \
@@ -43,6 +45,10 @@ fn def() -> &'static ToolDef {
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
+                "launch_path": {
+                    "type": "string",
+                    "description": "Exact absolute path to a macOS .app bundle. Mutually exclusive with bundle_id and name."
+                },
                 "bundle_id": {
                     "type": "string",
                     "description": "App bundle identifier, e.g. com.apple.calculator. Preferred over name."
@@ -88,7 +94,16 @@ impl Tool for LaunchAppTool {
     async fn invoke(&self, args: Value) -> ToolResult {
         use cua_driver_core::tool_args::ArgsExt;
         let bundle_id = args.opt_str("bundle_id");
-        let name = args.opt_str("name");
+        let launch_path = args.opt_str("launch_path");
+        if let Some(path) = &launch_path {
+            if bundle_id.is_some() || args.opt_str("name").is_some() {
+                return ToolResult::error("launch_path cannot be combined with bundle_id or name");
+            }
+            if !std::path::Path::new(path).is_absolute() {
+                return ToolResult::error("launch_path must be an absolute .app bundle path");
+            }
+        }
+        let name = launch_path.or_else(|| args.opt_str("name"));
         let mut response_bundle_id = bundle_id.clone();
         let response_requested_name = name.clone();
         let urls: Vec<String> = args
@@ -121,7 +136,7 @@ impl Tool for LaunchAppTool {
 
         if bundle_id.is_none() && name.is_none() {
             return ToolResult::error(
-                "Provide either bundle_id or name to identify the app to launch.",
+                "Provide launch_path, bundle_id or name to identify the app to launch.",
             );
         }
         if bundle_id.as_deref().is_some_and(is_cua_driver_bundle_id) {
@@ -479,6 +494,7 @@ impl Tool for LaunchAppTool {
                     "pid": pid,
                     "bundle_id": bid,
                     "name": app_name,
+                    "launch_path": app_info.as_ref().and_then(|app| app.launch_path.as_ref()),
                     "windows": windows_json,
                     "launch_state": launch_state(true, true, !windows.is_empty()),
                 });

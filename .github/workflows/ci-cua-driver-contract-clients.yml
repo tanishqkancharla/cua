@@ -179,7 +179,7 @@ jobs:
   verify:
     name: Generated contract and SDK bindings
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: dtolnay/rust-toolchain@stable
@@ -214,9 +214,36 @@ jobs:
         working-directory: libs/cua-driver/rust
         run: cargo run --locked -p cua-driver-contract --bin cua-contract-gen -- all --check
 
-      - name: Verify generated UniFFI bindings
+      - name: Generate UniFFI bindings for review
+        id: generate-uniffi
         working-directory: libs/cua-driver
-        run: node scripts/generate-uniffi-bindings.mjs --check
+        run: |
+          node scripts/generate-uniffi-bindings.mjs
+          git rev-parse HEAD > uniffi-source-commit.txt
+
+      - name: Verify generated UniFFI bindings are committed
+        working-directory: libs/cua-driver
+        run: |
+          git diff --exit-code -- python/src/cua_driver/_native.py python/src/cua_driver/_native_contract.py \
+            python/.cua-driver-uniffi-generated-files typescript/src/native typescript/.cua-driver-uniffi-generated-files
+          test -z "$(git ls-files --others --exclude-standard -- python/src/cua_driver/_native.py python/src/cua_driver/_native_contract.py \
+            python/.cua-driver-uniffi-generated-files typescript/src/native typescript/.cua-driver-uniffi-generated-files)"
+
+      - name: Retain generated UniFFI bindings
+        if: ${{ !cancelled() && steps.generate-uniffi.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: opensky-uniffi-bindings-${{ github.event.pull_request.head.sha || github.sha }}
+          include-hidden-files: true
+          retention-days: 7
+          if-no-files-found: error
+          path: |
+            libs/cua-driver/uniffi-source-commit.txt
+            libs/cua-driver/python/.cua-driver-uniffi-generated-files
+            libs/cua-driver/python/src/cua_driver/_native.py
+            libs/cua-driver/python/src/cua_driver/_native_contract.py
+            libs/cua-driver/typescript/.cua-driver-uniffi-generated-files
+            libs/cua-driver/typescript/src/native
 
       - name: Verify generated public C ABI header
         working-directory: libs/cua-driver/rust
@@ -274,6 +301,10 @@ jobs:
             cua_driver_operation_release_v1; do
             grep -Eq "[[:space:]]${symbol}$" /tmp/cua-driver-abi-symbols.txt
           done
+
+      - name: Build real driver for Python SDK lifecycle coverage
+        working-directory: libs/cua-driver/rust
+        run: cargo build --locked -p cua-driver
 
       - name: Test Python UniFFI loader
         working-directory: libs/cua-driver/python

@@ -1,15 +1,16 @@
 {
-  "serverName": "cua-driver",
+  "serverName": "opensky-driver",
   "outputSchemaCountByPlatform": {
-    "darwin": 32,
-    "linux": 36,
-    "win32": 32
+    "darwin": 34,
+    "linux": 38,
+    "win32": 34
   },
   "baseTools": [
     "bring_to_front",
     "browser_click",
     "browser_dialog",
     "browser_download",
+    "browser_key",
     "browser_navigate",
     "browser_pointer",
     "browser_prepare",
@@ -20,6 +21,7 @@
     "click",
     "clipboard_read",
     "clipboard_write",
+    "close_window",
     "double_click",
     "drag",
     "end_session",

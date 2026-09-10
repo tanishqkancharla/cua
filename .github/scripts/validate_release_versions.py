@@ -135,20 +135,26 @@ def lume_versions(root: Path) -> tuple[str, dict[str, str]]:
     }
 
 
-def validate(root: Path, product: str) -> None:
+def validate(root: Path, product: str, *, driver_installation: str = "release") -> None:
+    if driver_installation not in {"source", "release"}:
+        raise VersionError(f"unknown driver installation mode: {driver_installation}")
     manifest = json.loads((root / ".release-please-manifest.json").read_text())
     if product in {"all", "driver"}:
         expected, values = driver_versions(root)
         values[".release-please-manifest.json"] = str(manifest["libs/cua-driver"])
         require_equal("Cua Driver", expected, values)
-        installers = driver_installer_versions(root)
-        installer_version = next(iter(installers.values()))
-        require_equal("Cua Driver baked installers", installer_version, installers)
-        if stable_version_tuple(installer_version) > stable_version_tuple(expected):
-            raise VersionError(
-                f"Cua Driver baked installers advertise {installer_version}, "
-                f"ahead of source release {expected}"
-            )
+        # OpenSky installs this checkout's build. It has no published download
+        # version to compare. Preserve the explicit release mode for historical
+        # release tooling; every source/package version check above still runs.
+        if driver_installation == "release":
+            installers = driver_installer_versions(root)
+            installer_version = next(iter(installers.values()))
+            require_equal("Cua Driver baked installers", installer_version, installers)
+            if stable_version_tuple(installer_version) > stable_version_tuple(expected):
+                raise VersionError(
+                    f"Cua Driver baked installers advertise {installer_version}, "
+                    f"ahead of source release {expected}"
+                )
     if product in {"all", "lume"}:
         expected, values = lume_versions(root)
         values[".release-please-manifest.json"] = str(manifest["libs/lume"])
@@ -159,13 +165,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo-root", type=Path, default=Path.cwd())
     parser.add_argument("--product", choices=("all", "driver", "lume"), default="all")
+    parser.add_argument("--driver-installation", choices=("source", "release"), default="release",
+                        help="source checks build/package versions; release also checks baked download installer versions")
     args = parser.parse_args(argv)
     try:
-        validate(args.repo_root.resolve(), args.product)
+        validate(args.repo_root.resolve(), args.product, driver_installation=args.driver_installation)
     except (KeyError, OSError, VersionError, ValueError) as error:
         print(f"release version error: {error}", file=sys.stderr)
         return 1
-    print(f"release versions agree for {args.product}")
+    print(f"release versions agree for {args.product} (driver installation: {args.driver_installation})")
     return 0
 
 

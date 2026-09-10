@@ -209,7 +209,8 @@ impl Tool for ListAppsTool {
                 files in $XDG_DATA_HOME/applications and each $XDG_DATA_DIRS entry's \
                 applications/ subdir. Entries with `NoDisplay=true` or `Hidden=true` are \
                 filtered. A `.desktop` file whose launcher matches a running process \
-                (by basename) is merged into a single entry with `running: true`.\n\n\
+                (by window identity, then executable basename) is merged with `running: true`. \
+                A no-argument suite launcher also shares its component's running process.\n\n\
                 Use this for \"is X installed?\" as well as \"is X running?\". For per-window \
                 state — visibility, geometry, titles — call list_windows instead."
                     .into(),
@@ -225,6 +226,21 @@ impl Tool for ListAppsTool {
         let apps = tokio::task::spawn_blocking(|| -> Vec<serde_json::Value> {
             let procs = crate::proc_fs::list_processes();
             let installed = crate::installed_apps::list_installed_apps();
+            // Desktop launchers often exec a differently named child. Resolve
+            // window identity once, using the same X11/Wayland adapter as the
+            // public window tools, before falling back to process basenames.
+            let mut window_classes: std::collections::HashMap<u32, Vec<String>> =
+                std::collections::HashMap::new();
+            for window in crate::wayland::list_windows_dispatch(None) {
+                if let (Some(pid), Some((instance, class))) =
+                    (window.pid, crate::wayland::wm_class_dispatch(window.xid))
+                {
+                    window_classes
+                        .entry(pid)
+                        .or_default()
+                        .extend([instance, class]);
+                }
+            }
 
             // Match running processes to installed apps by executable
             // basename (Exec=firefox %u → "firefox"; cmdline /usr/bin/firefox
@@ -255,44 +271,59 @@ impl Tool for ListAppsTool {
                     continue;
                 }
                 let candidates = by_exe.get(&basename).map(|v| v.as_slice()).unwrap_or(&[]);
-                let merged = disambiguate_installed_match(candidates, &installed, key_source);
-                if let Some(idx) = merged {
-                    consumed.insert(idx);
+                let mut matches = window_installed_matches(
+                    window_classes.get(&p.pid).map(Vec::as_slice).unwrap_or(&[]),
+                    &installed,
+                );
+                if matches.is_empty() {
+                    matches.extend(disambiguate_installed_match(
+                        candidates, &installed, key_source,
+                    ));
                 }
-                let (name, bundle_id, launch_path, kind, last_used) = match merged {
-                    Some(idx) => {
-                        let a = &installed[idx];
-                        (
-                            a.name.clone(),
-                            Some(a.bundle_id.clone()),
-                            Some(a.launch_path.clone()),
-                            Some("desktop".to_owned()),
-                            a.last_used.clone(),
-                        )
-                    }
-                    None => (
-                        if !p.name.is_empty() {
-                            p.name.clone()
-                        } else {
-                            basename.clone()
-                        },
-                        None,
-                        None,
-                        None,
-                        None,
-                    ),
+                let matches: Vec<Option<usize>> = if matches.is_empty() {
+                    vec![None]
+                } else {
+                    matches.into_iter().map(Some).collect()
                 };
-                out.push(json!({
-                    "pid":         p.pid,
-                    "bundle_id":   bundle_id,
-                    "name":        name,
-                    "running":     true,
-                    "active":      false,
-                    "kind":        kind,
-                    "launch_path": launch_path,
-                    "last_used":   last_used,
-                    "windows":     Vec::<serde_json::Value>::new(),
-                }));
+                for merged in matches {
+                    if let Some(idx) = merged {
+                        consumed.insert(idx);
+                    }
+                    let (name, bundle_id, launch_path, kind, last_used) = match merged {
+                        Some(idx) => {
+                            let a = &installed[idx];
+                            (
+                                a.name.clone(),
+                                Some(a.bundle_id.clone()),
+                                Some(a.launch_path.clone()),
+                                Some("desktop".to_owned()),
+                                a.last_used.clone(),
+                            )
+                        }
+                        None => (
+                            if !p.name.is_empty() {
+                                p.name.clone()
+                            } else {
+                                basename.clone()
+                            },
+                            None,
+                            None,
+                            None,
+                            None,
+                        ),
+                    };
+                    out.push(json!({
+                        "pid":         p.pid,
+                        "bundle_id":   bundle_id,
+                        "name":        name,
+                        "running":     true,
+                        "active":      false,
+                        "kind":        kind,
+                        "launch_path": launch_path,
+                        "last_used":   last_used,
+                        "windows":     Vec::<serde_json::Value>::new(),
+                    }));
+                }
             }
             for (i, app) in installed.iter().enumerate() {
                 if consumed.contains(&i) {
@@ -386,6 +417,45 @@ fn disambiguate_installed_match(
                 .cmp(installed[b].last_used.as_deref().unwrap_or(""))
         })
         .or_else(|| candidates.first().copied())
+}
+
+/// XDG StartupWMClass identifies windows even when Exec is a shell wrapper.
+/// Native Wayland app IDs may instead equal the desktop file ID. A no-argument
+/// suite launcher sharing the exact executable with a matched component also
+/// represents that running suite; unrelated components/profiles remain stopped.
+fn window_installed_matches(
+    classes: &[String],
+    installed: &[crate::installed_apps::InstalledApp],
+) -> Vec<usize> {
+    let mut matches: Vec<usize> = installed
+        .iter()
+        .enumerate()
+        .filter_map(|(i, app)| {
+            classes
+                .iter()
+                .any(|class| {
+                    !class.is_empty()
+                        && (app.startup_wm_class.as_ref() == Some(class) || app.bundle_id == *class)
+                })
+                .then_some(i)
+        })
+        .collect();
+    let component_executables: Vec<&str> = matches
+        .iter()
+        .filter_map(|&i| installed[i].launch_path.split_whitespace().next())
+        .collect();
+    for (i, app) in installed.iter().enumerate() {
+        let mut command = app.launch_path.split_whitespace();
+        if let Some(executable) = command.next() {
+            if command.next().is_none()
+                && component_executables.contains(&executable)
+                && !matches.contains(&i)
+            {
+                matches.push(i);
+            }
+        }
+    }
+    matches
 }
 
 /// Return the lowercase basename of an executable token, stripping any
@@ -839,8 +909,11 @@ impl Tool for GetWindowStateTool {
                     // its existing integer `element_index`. The integer
                     // surface stays unchanged — the token is additive.
                     let snapshot_id = (!observation_only).then(|| {
-                        cua_driver_core::element_token::global()
-                            .register_snapshot(pid as i32, xid as u32, count)
+                        cua_driver_core::element_token::global().register_snapshot_indices(
+                            pid as i32,
+                            xid as u32,
+                            tr.nodes.iter().filter_map(|node| node.element_index),
+                        )
                     });
 
                     // Structured `elements` array: one entry per actionable node.
@@ -1209,6 +1282,7 @@ mod launch_app_tests {
             name: name.to_owned(),
             bundle_id: bundle_id.to_owned(),
             launch_path: launch_path.to_owned(),
+            startup_wm_class: None,
             last_used: None,
         }
     }
@@ -1228,6 +1302,43 @@ mod launch_app_tests {
                 "thunar-settings",
             ),
         ]
+    }
+
+    #[test]
+    fn window_installed_matches_wrapper_component_and_suite_without_other_components() {
+        let mut writer = app("Example Writer", "example-writer", "example --writer");
+        writer.startup_wm_class = Some("ExampleWriterWindow".into());
+        let apps = vec![
+            app("Example", "example-center", "example"),
+            writer,
+            app("Example Calc", "example-calc", "example --calc"),
+            app("Other installation", "other-example", "/opt/other/example"),
+        ];
+        assert_eq!(
+            window_installed_matches(&["ExampleWriterWindow".into()], &apps),
+            vec![1, 0]
+        );
+        assert!(window_installed_matches(&["unknown".into()], &apps).is_empty());
+        assert!(window_installed_matches(&[], &apps).is_empty());
+    }
+
+    #[test]
+    fn window_installed_matches_native_app_ids_and_multiple_component_windows() {
+        let apps = vec![
+            app("Writer", "org.example.Writer", "example --writer"),
+            app("Calc", "org.example.Calc", "example --calc"),
+        ];
+        assert_eq!(
+            window_installed_matches(&["org.example.Writer".into()], &apps),
+            vec![0]
+        );
+        assert_eq!(
+            window_installed_matches(
+                &["org.example.Writer".into(), "org.example.Calc".into()],
+                &apps
+            ),
+            vec![0, 1]
+        );
     }
 
     /// Process state letter from `/proc/<pid>/stat`, or `None` once the entry
@@ -1525,10 +1636,6 @@ fn resolve_element_local_coords(
     idx: usize,
     xid_hint: Option<u64>,
 ) -> anyhow::Result<(u64, f64, f64)> {
-    let (bx, by, bw, bh) = crate::atspi::get_element_bounds(pid, idx)?;
-    let screen_cx = bx as f64 + bw as f64 / 2.0;
-    let screen_cy = by as f64 + bh as f64 / 2.0;
-
     let xid = if let Some(x) = xid_hint {
         x
     } else if crate::wayland::wayland_input_enabled() {
@@ -1544,6 +1651,10 @@ fn resolve_element_local_coords(
             .map(|w| w.xid)
             .ok_or_else(|| anyhow::anyhow!("No windows for pid {pid}"))?
     };
+
+    let (bx, by, bw, bh) = crate::atspi::get_element_bounds_in_window(pid, idx, xid)?;
+    let screen_cx = bx as f64 + bw as f64 / 2.0;
+    let screen_cy = by as f64 + bh as f64 / 2.0;
 
     if crate::wayland::wayland_input_enabled() {
         let (window_x, window_y, window_width, window_height) =
@@ -1572,8 +1683,8 @@ fn resolve_element_local_coords(
     Ok((xid, local_x, local_y))
 }
 
-fn element_screen_center(pid: u32, idx: usize) -> anyhow::Result<(f64, f64)> {
-    let (bx, by, bw, bh) = crate::atspi::get_element_bounds(pid, idx)?;
+fn element_screen_center(pid: u32, idx: usize, xid: Option<u64>) -> anyhow::Result<(f64, f64)> {
+    let (bx, by, bw, bh) = crate::atspi::get_element_bounds_in_window(pid, idx, xid.unwrap_or(0))?;
     Ok((bx as f64 + bw as f64 / 2.0, by as f64 + bh as f64 / 2.0))
 }
 
@@ -1633,8 +1744,9 @@ fn non_ax_escalation() -> Value {
 /// caller confirms through a separate observation) and
 /// carries a `foreground` escalation, because the field IS in the AT-SPI tree —
 /// it's a delivery/focus problem, not a missing element. The foreground rung
-/// itself (`key_events_fg`) is already the last resort, so it emits no
-/// escalation. Mirrors the macOS `type_text` contract.
+/// itself (`key_events_fg`), or real keys sent to an already-focused X11
+/// target (`xtest`), is already the last resort, so it emits no escalation.
+/// Mirrors the macOS `type_text` contract.
 fn type_text_structured(path: &str, characters: usize, verified: bool) -> Value {
     let mut s = json!({
         "path": path,
@@ -1642,7 +1754,7 @@ fn type_text_structured(path: &str, characters: usize, verified: bool) -> Value 
         "verified": verified,
         "effect": if verified { "confirmed" } else { "unverifiable" },
     });
-    if !verified && path != "key_events_fg" {
+    if !verified && !matches!(path, "key_events_fg" | "xtest") {
         s["escalation"] = json!({
             "recommended": "foreground",
             "reason": "background insert could not be confirmed — re-call with \
@@ -2226,7 +2338,7 @@ fn explicit_keyboard_cursor_target(
     pixel_target: Option<(f64, f64)>,
 ) -> Option<(f64, f64)> {
     if let Some(element_index) = element_index {
-        let (sx, sy) = element_screen_center(pid, element_index).ok()?;
+        let (sx, sy) = element_screen_center(pid, element_index, Some(xid)).ok()?;
         return Some((sx, sy));
     }
 
@@ -2461,6 +2573,133 @@ pub struct ClickTool {
 }
 static CLICK_DEF: std::sync::OnceLock<ToolDef> = std::sync::OnceLock::new();
 
+impl ClickTool {
+    /// Resolve one live, exact-window element per X11 request. Keep the proxy
+    /// through classification and delivery; never reselect an index after input.
+    async fn click_indexed_x11(
+        &self,
+        pid: u32,
+        idx: usize,
+        xid_hint: Option<u64>,
+        button: u8,
+        count: usize,
+        modifiers: Vec<String>,
+        delivery: crate::input::delivery::DeliveryMode,
+        cursor_id: String,
+    ) -> ToolResult {
+        let resolved = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+            let xid = xid_hint
+                .or_else(|| crate::x11::list_windows(Some(pid)).first().map(|w| w.xid))
+                .filter(|xid| *xid != 0)
+                .ok_or_else(|| anyhow::anyhow!("No exact X11 window for pid {pid}"))?;
+            let target = crate::atspi::resolve_indexed_click_target(pid, idx, xid)?;
+            let center = target
+                .screen_bounds()
+                .ok()
+                .map(|(x, y, w, h)| (x as f64 + w as f64 / 2.0, y as f64 + h as f64 / 2.0));
+            Ok((xid, target, center))
+        })
+        .await;
+        let (xid, target, center) = match resolved {
+            Ok(Ok(target)) => target,
+            Ok(Err(error)) => {
+                return ToolResult::error(format!("AT-SPI element resolution failed: {error}"))
+            }
+            Err(error) => return ToolResult::error(format!("Task error: {error}")),
+        };
+        if let Some((sx, sy)) = center {
+            crate::overlay::send_command_for(
+                cursor_id.clone(),
+                cursor_overlay::OverlayCommand::PinAbove(xid),
+            );
+            reveal_pointer_action_for(&self.state, &cursor_id, sx, sy, true).await;
+        }
+        let result = tokio::task::spawn_blocking(move || -> anyhow::Result<ToolResult> {
+            let action = target.perform_action(modifiers.is_empty() && button == 1 && count == 1);
+            let (path, suspected_noop) = match action {
+                Ok((_, suspected_noop)) => ("ax", suspected_noop),
+                Err(error)
+                    if error.is::<crate::atspi::ClickActionUnavailable>()
+                        || error.is::<crate::atspi::ElementClickNeedsForeground>() =>
+                {
+                    if let Some(refusal) = unavailable_chromium_background(pid, delivery) {
+                        return Ok(refusal);
+                    }
+                    // Refresh Component geometry from this same accessible after
+                    // the cursor glide, without another application-tree walk.
+                    let local_center = || -> anyhow::Result<(f64, f64)> {
+                        let (x, y, w, h) = target.screen_bounds()?;
+                        let (ox, oy) = window_local_to_screen(xid, 0.0, 0.0)?;
+                        Ok((
+                            x as f64 + w as f64 / 2.0 - ox,
+                            y as f64 + h as f64 / 2.0 - oy,
+                        ))
+                    };
+                    let modifier_refs: Vec<&str> = modifiers.iter().map(String::as_str).collect();
+                    let (lx, ly) = local_center()?;
+                    let path = if crate::input::try_click_xtest_already_focused(
+                        xid,
+                        lx.round() as i32,
+                        ly.round() as i32,
+                        button,
+                        count,
+                        &modifier_refs,
+                    )? {
+                        "xtest"
+                    } else if !delivery.is_foreground() && target.needs_foreground_pointer() {
+                        return Ok(crate::input::delivery::background_unavailable_error(
+                            crate::input::delivery::BackgroundUnavailable::FocusedInputOnly,
+                        ));
+                    } else if delivery.is_foreground() {
+                        crate::input::with_x11_foreground(xid, 80, || {
+                            let (lx, ly) = local_center()?;
+                            let (sx, sy) = window_local_to_screen(xid, lx, ly)?;
+                            crate::input::send_click_xtest_desktop_with_modifiers(
+                                sx.round() as i32,
+                                sy.round() as i32,
+                                button,
+                                count,
+                                &modifier_refs,
+                            )
+                        })?;
+                        "x11_xtest_fg"
+                    } else {
+                        crate::input::send_click_with_modifiers(
+                            xid,
+                            lx.round() as i32,
+                            ly.round() as i32,
+                            count,
+                            button,
+                            &modifier_refs,
+                        )?;
+                        "x11_pixel"
+                    };
+                    (path, false)
+                }
+                // Uncertain AX failures must never replay through pointer input.
+                Err(error) => return Err(error),
+            };
+            let mut structured = json!({
+                "path": path, "verified": false,
+                "effect": if suspected_noop { "suspected_noop" } else { "unverifiable" },
+            });
+            if suspected_noop {
+                structured["escalation"] = non_ax_escalation();
+            }
+            Ok(
+                ToolResult::text(format!("Clicked element [{idx}] (pid {pid})."))
+                    .with_structured(structured),
+            )
+        })
+        .await;
+        match result {
+            Ok(Ok(result)) => result,
+            Ok(Err(error)) => ToolResult::error(format!("AT-SPI element click failed: {error}")),
+            Err(error) => ToolResult::error(format!("Task error: {error}")),
+        }
+    }
+}
+
 #[async_trait]
 impl Tool for ClickTool {
     fn def(&self) -> &ToolDef {
@@ -2472,14 +2711,15 @@ impl Tool for ClickTool {
                 element's role + label. Reach for `x, y` only when the target is a canvas / \
                 custom-drawn surface that doesn't appear in the AT-SPI tree.\n\n\
                 Provide either (window_id + x/y) or (pid + element_index). Routes via \
-                XSendEvent (no focus steal). element_index cache is scoped per (pid, \
+                focus-free accessibility/XSendEvent, or checked XTest for an already-focused \
+                exact X11 coordinate target (no activation). element_index cache is scoped per (pid, \
                 window_id) and is replaced by the next get_window_state of the same window — \
                 re-snapshot every turn before clicking.\n\n\
                 After a zoom call, pass from_zoom=true to auto-translate zoom-image coords \
                 back to full-window space.\n\n\
                 button: \"left\" (default), \"right\", or \"middle\". Defaults to left so the \
-                field is fully back-compat. X11: routes through XSendEvent ButtonPress/Release \
-                with the matching button code. Native Wayland: only left-button is supported \
+                field is fully back-compat. X11: uses the matching button code for \
+                ButtonPress/Release. Native Wayland: only left-button is supported \
                 via the virtual-pointer protocol — right/middle return an error rather than \
                 silently degrading to left. `modifier` holds ctrl/shift/alt/super for the \
                 click on X11. Native Wayland refuses modified pointer clicks until its input \
@@ -2644,6 +2884,20 @@ impl Tool for ClickTool {
         };
 
         if let Some(idx) = elem_idx_resolved {
+            if !crate::wayland::is_wayland() {
+                return self
+                    .click_indexed_x11(
+                        pid,
+                        idx,
+                        window_id_resolved,
+                        button,
+                        count,
+                        modifiers,
+                        delivery,
+                        cursor_id,
+                    )
+                    .await;
+            }
             let xid_hint = window_id_resolved;
             // Resolve the element's screen center + its window FIRST, so the
             // agent cursor glides to the target *before* the click fires —
@@ -2651,7 +2905,7 @@ impl Tool for ClickTool {
             // Previously perform_action ran inside this spawn_blocking, so the
             // app updated before the cursor visibly arrived.
             let (xid, sx, sy) = tokio::task::spawn_blocking(move || -> (u64, f64, f64) {
-                let (cx, cy) = element_screen_center(pid, idx).unwrap_or((0.0, 0.0));
+                let (cx, cy) = element_screen_center(pid, idx, xid_hint).unwrap_or((0.0, 0.0));
                 let xid = xid_hint
                     .or_else(|| {
                         crate::x11::list_windows(Some(pid))
@@ -2672,24 +2926,30 @@ impl Tool for ClickTool {
             }
             reveal_pointer_action_for(&self.state, &cursor_id, sx, sy, true).await;
 
-            // Chromium can execute a genuine AT-SPI action without focus. Try
-            // that route before applying its background synthetic-input gate.
-            if modifiers.is_empty() {
-                let ax_result =
-                    tokio::task::spawn_blocking(move || crate::atspi::perform_action(pid, idx))
-                        .await;
-                if let Ok(Ok((_action, suspected_noop))) = ax_result {
-                    let mut structured = json!({
-                        "path": "ax",
-                        "verified": false,
-                        "effect": if suspected_noop { "suspected_noop" } else { "unverifiable" },
-                    });
-                    if suspected_noop {
-                        structured["escalation"] = non_ax_escalation();
-                    }
-                    return ToolResult::text(format!("Clicked element [{idx}] (pid {pid})."))
-                        .with_structured(structured);
+            // Classify before any pointer delivery, including modified clicks.
+            // A table cell can ignore XSendEvent while reporting success.
+            let allow_activation = modifiers.is_empty();
+            let ax_result = tokio::task::spawn_blocking(move || {
+                crate::atspi::perform_click_action(pid, idx, allow_activation)
+            })
+            .await;
+            if matches!(&ax_result, Ok(Err(error)) if error.is::<crate::atspi::ElementClickNeedsForeground>())
+                && !delivery.is_foreground()
+            {
+                return crate::input::delivery::background_unavailable_error(
+                    crate::input::delivery::BackgroundUnavailable::FocusedInputOnly,
+                );
+            }
+            if let Ok(Ok((_action, suspected_noop))) = ax_result {
+                let mut structured = json!({
+                    "path": "ax", "verified": false,
+                    "effect": if suspected_noop { "suspected_noop" } else { "unverifiable" },
+                });
+                if suspected_noop {
+                    structured["escalation"] = non_ax_escalation();
                 }
+                return ToolResult::text(format!("Clicked element [{idx}] (pid {pid})."))
+                    .with_structured(structured);
             }
             if let Some(refusal) = unavailable_chromium_background(pid, delivery) {
                 return refusal;
@@ -2713,6 +2973,7 @@ impl Tool for ClickTool {
                 // clicks made those rows addressable but not selectable.
                 if delivery.is_foreground() && !crate::wayland::wayland_input_enabled() {
                     crate::input::with_x11_foreground(xid2, 80, || {
+                        let (sx, sy) = window_local_to_screen(xid2, lx, ly)?;
                         crate::input::send_click_xtest_desktop_with_modifiers(
                             sx.round() as i32,
                             sy.round() as i32,
@@ -2834,10 +3095,15 @@ impl Tool for ClickTool {
                 // working. (x,y) are screen coords here, matching the frames in
                 // `get_window_state`. Miss → fall through to the injection paths.
                 if !delivery.is_foreground() && button == 1 && count == 1 {
-                    if let Ok(Some(_)) =
-                        crate::atspi::perform_action_at_screen_point(pid, xid, output_x, output_y)
+                    match crate::atspi::perform_action_at_screen_point(pid, xid, output_x, output_y)
                     {
-                        return Ok("wayland_atspi");
+                        Ok(Some(crate::atspi::PixelAction::Performed)) => {
+                            return Ok("wayland_atspi")
+                        }
+                        Ok(Some(crate::atspi::PixelAction::NeedsForeground)) => {
+                            return Ok("background_unavailable")
+                        }
+                        _ => {}
                     }
                 }
                 if crate::wayland::is_inject_mode() {
@@ -2855,6 +3121,27 @@ impl Tool for ClickTool {
                 })?;
                 return Ok("wayland_activate");
             }
+            // An already-active exact X11 target can accept real pointer
+            // input without activation/restoration or an accessibility scan.
+            // The input helper also checks stacking/input shapes on the same
+            // connection and returns false only before sending any input.
+            // Errors may represent partial delivery: propagate, never replay.
+            if !crate::wayland::is_wayland() {
+                let modifier_refs: Vec<&str> =
+                    modifiers_for_task.iter().map(String::as_str).collect();
+                if crate::input::try_click_xtest_already_focused(
+                    xid,
+                    xi,
+                    yi,
+                    button,
+                    count,
+                    &modifier_refs,
+                )? {
+                    // Reuse the registered XTest transport name so the common
+                    // action publisher can construct its execution record.
+                    return Ok("xtest");
+                }
+            }
             // X11 injection. Tiered no-focus-steal delivery (background):
             //   1. Plain left single-click → AT-SPI doAction at that point.
             //   2. Right / middle / double click → real MPX uinput pointer + XI2
@@ -2864,8 +3151,12 @@ impl Tool for ClickTool {
             // click (the agent's escalation when background didn't land).
             let inject = |fg: bool| -> anyhow::Result<&'static str> {
                 if !fg && button == 1 && count == 1 && modifiers_for_task.is_empty() {
-                    if let Ok(Some(_)) = crate::atspi::perform_action_at_point(pid, xi, yi) {
-                        return Ok("x11_atspi");
+                    match crate::atspi::perform_action_at_point(pid, xid, xi, yi) {
+                        Ok(Some(crate::atspi::PixelAction::Performed)) => return Ok("x11_atspi"),
+                        Ok(Some(crate::atspi::PixelAction::NeedsForeground)) => {
+                            return Ok("background_unavailable")
+                        }
+                        _ => {}
                     }
                 }
                 if fg {
@@ -2888,6 +3179,14 @@ impl Tool for ClickTool {
                         )?;
                         return Ok("x11_xtest_fg");
                     }
+                }
+                // An AT-SPI miss is not evidence that a synthetic pointer can
+                // reach GTK. Headless X11 has no real background pointer, and
+                // GTK drops XSendEvent while the transport reports success.
+                // Refuse before fallback input so the caller can explicitly
+                // retry the exact pixel through the foreground XTest route.
+                if !fg && is_gtk_process(pid) && !crate::input::real_pointer_input_available() {
+                    return Ok("background_unavailable");
                 }
                 if modifiers_for_task.is_empty() {
                     x11_pixel_click_no_focus_steal(
@@ -2940,6 +3239,51 @@ impl Tool for ClickTool {
             Ok(Err(e)) => linux_input_error(e),
             Err(e) => ToolResult::error(format!("Task error: {e}")),
         }
+    }
+}
+
+/// Replace a selected range with genuine key input; never delete first and
+/// retry an uncertain partial insertion. Background refusal precedes all input.
+async fn type_selection_with_keys(
+    pid: u32,
+    xid: u64,
+    element_index: Option<usize>,
+    text: String,
+    foreground: bool,
+) -> ToolResult {
+    if !foreground {
+        return crate::input::delivery::background_unavailable_error(
+            crate::input::delivery::BackgroundUnavailable::FocusedInputOnly,
+        );
+    }
+    let text_len = text.chars().count();
+    let result = tokio::task::spawn_blocking(move || {
+        let inject = || -> anyhow::Result<()> {
+            if let Some(index) = element_index {
+                if !crate::atspi::focus_element(pid, index)? {
+                    anyhow::bail!("Could not focus selected element {index}; no text was sent");
+                }
+            }
+            if crate::wayland::wayland_input_enabled() {
+                crate::wayland::type_text_focused(&text)
+            } else {
+                crate::input::send_type_text_xtest(&text)
+            }
+        };
+        if crate::wayland::wayland_input_enabled() {
+            crate::wayland::with_target_foreground(pid, xid, inject)
+        } else {
+            crate::input::with_x11_foreground(xid, 80, inject)
+        }
+    })
+    .await;
+    match result {
+        Ok(Ok(())) => ToolResult::text(format!(
+            "Typed {text_len} character(s) into the selected range."
+        ))
+        .with_structured(type_text_structured("key_events_fg", text_len, false)),
+        Ok(Err(error)) => linux_input_error(error),
+        Err(error) => ToolResult::error(format!("Task error: {error}")),
     }
 }
 
@@ -3306,6 +3650,16 @@ impl Tool for TypeTextTool {
                 Ok(Ok(())) => {
                     return type_text_ax_result(pid, text_len, "via targeted AT-SPI");
                 }
+                Ok(Err(error)) if error.is::<crate::atspi::EditableSelectionNeedsKeys>() => {
+                    return type_selection_with_keys(
+                        pid,
+                        xid,
+                        Some(idx),
+                        text,
+                        delivery.is_foreground(),
+                    )
+                    .await;
+                }
                 Ok(Err(_)) | Err(_)
                     if !delivery.is_foreground() && crate::wayland::wayland_input_enabled() =>
                 {
@@ -3403,11 +3757,16 @@ impl Tool for TypeTextTool {
                 Err(e) => ToolResult::error(format!("Task error: {e}")),
             };
         }
-        // Foreground means the caller explicitly permits activation. Chromium
-        // and WebKitGTK can acknowledge an accessibility write without
-        // producing the renderer input event, so web embedders use real XTest
-        // key events. Native toolkits keep their verifiable AT-SPI path below.
-        if delivery.is_foreground() && (is_chromium_embedder(pid) || is_webkitgtk_embedder(pid)) {
+        // Unindexed foreground typing addresses the current keyboard focus,
+        // just as a human typing would. Searching the entire application for an
+        // editable both repeats the background attempt's work and can choose a
+        // different field. Keep native element-addressed writes on their AT-SPI
+        // path; web embedders need real key events even when element-addressed.
+        if delivery.is_foreground()
+            && (resolved_elem_idx.is_none()
+                || is_chromium_embedder(pid)
+                || is_webkitgtk_embedder(pid))
+        {
             let text_f = text.clone();
             let idx = resolved_elem_idx;
             let result = tokio::task::spawn_blocking(move || {
@@ -3437,6 +3796,30 @@ impl Tool for TypeTextTool {
             };
         }
 
+        // An unindexed request addresses the target's current keyboard focus.
+        // If that exact X11 window already owns both active and core focus,
+        // use real keys without any activation instead of walking the whole
+        // accessibility tree. A pre-input miss keeps the focus-free ladder;
+        // errors may have delivered input and must never fall through.
+        if resolved_elem_idx.is_none() {
+            let text_f = text.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                crate::input::try_type_text_xtest_already_focused(xid, &text_f)
+            })
+            .await;
+            match result {
+                Ok(Ok(true)) => {
+                    return ToolResult::text(format!(
+                        "Typed {text_len} character(s) into the already-focused X11 window."
+                    ))
+                    .with_structured(type_text_structured("xtest", text_len, false));
+                }
+                Ok(Ok(false)) => {}
+                Ok(Err(error)) => return ToolResult::error(error.to_string()),
+                Err(error) => return ToolResult::error(format!("Task error: {error}")),
+            }
+        }
+
         // Prefer the focused widget — the element the user just clicked. If a
         // NON-editable input holds keyboard focus (a spreadsheet cell, a
         // terminal, a canvas), the focus-free AT-SPI editable search below would
@@ -3445,12 +3828,16 @@ impl Tool for TypeTextTool {
         // widget instead: terminals via pty injection, everything else via
         // XSendEvent to the focused window. A focused *editable* (Some(true)) or
         // nothing focused (None) falls through to the existing AT-SPI-first flow.
-        let focus_kind = tokio::task::spawn_blocking(move || {
-            crate::atspi::focused_is_editable(pid).ok().flatten()
-        })
-        .await
-        .ok()
-        .flatten();
+        let focus_kind =
+            match tokio::task::spawn_blocking(move || crate::atspi::focused_is_editable(pid, xid))
+                .await
+            {
+                Ok(Ok(kind)) => kind,
+                Ok(Err(error)) if error.is::<crate::atspi::TypingWindowUnavailable>() => {
+                    return ToolResult::error(error.to_string());
+                }
+                _ => None,
+            };
         if focus_kind == Some(false) {
             if !delivery.is_foreground() {
                 return crate::input::delivery::background_unavailable_error(
@@ -3487,11 +3874,19 @@ impl Tool for TypeTextTool {
 
         // Try AT-SPI EditableText first (focus-free, works for Qt6/GTK4).
         let text_clone = text.clone();
-        let atspi_result =
-            tokio::task::spawn_blocking(move || crate::atspi::type_into_editable(pid, &text_clone))
-                .await;
+        let atspi_result = tokio::task::spawn_blocking(move || {
+            crate::atspi::type_into_editable(pid, xid, &text_clone)
+        })
+        .await;
 
         match atspi_result {
+            Ok(Err(error)) if error.is::<crate::atspi::TypingWindowUnavailable>() => {
+                return ToolResult::error(error.to_string());
+            }
+            Ok(Err(error)) if error.is::<crate::atspi::EditableSelectionNeedsKeys>() => {
+                return type_selection_with_keys(pid, xid, None, text, delivery.is_foreground())
+                    .await;
+            }
             Ok(Ok(())) => {
                 // AT-SPI succeeded — focus-free typing worked (Qt6, GTK4, etc.)!
                 // Electron/Chromium can echo this write without the renderer
@@ -3514,7 +3909,7 @@ impl Tool for TypeTextTool {
             std::thread::sleep(std::time::Duration::from_millis(100));
 
             // Try AT-SPI again now that widgets should be exposed
-            let result = crate::atspi::type_into_editable(pid, &text_clone2);
+            let result = crate::atspi::type_into_editable(pid, xid, &text_clone2);
 
             // Restore state with FocusOut
             crate::input::send_focus_out(xid)?;
@@ -3524,6 +3919,9 @@ impl Tool for TypeTextTool {
         .await;
 
         match qt5_result {
+            Ok(Err(error)) if error.is::<crate::atspi::TypingWindowUnavailable>() => {
+                return ToolResult::error(error.to_string());
+            }
             Ok(Ok(())) => {
                 return type_text_ax_result(pid, text_len, "via AT-SPI with focus workaround");
             }
@@ -3549,8 +3947,12 @@ impl Tool for TypeTextTool {
             // focused widget, so background XSendEvent typing doesn't land. Fill
             // the editable field via AT-SPI instead — focus-free and toolkit-
             // agnostic. Fall back to Tk send or XSendEvent when no a11y field is exposed.
-            if crate::atspi::insert_text(pid, &text).unwrap_or(false) {
-                return Ok("ax");
+            match crate::atspi::insert_text(pid, xid, &text) {
+                Ok(true) => return Ok("ax"),
+                Err(error) if error.is::<crate::atspi::TypingWindowUnavailable>() => {
+                    return Err(error)
+                }
+                _ => {}
             }
             // Tk apps: use Tk's `send` command (no AT-SPI bridge, so AT-SPI above
             // returned false). This is the Tk-specific override, like CDP for Chromium.
@@ -3959,19 +4361,41 @@ impl Tool for PressKeyTool {
 // ── hotkey ────────────────────────────────────────────────────────────────────
 
 fn is_modifier(k: &str) -> bool {
-    matches!(
-        k.to_lowercase().as_str(),
-        "ctrl"
-            | "control"
-            | "shift"
-            | "alt"
-            | "super"
-            | "meta"
-            | "cmd"
-            | "command"
-            | "win"
-            | "windows"
-    )
+    canonical_modifier(k).is_some()
+}
+
+fn canonical_modifier(key: &str) -> Option<&'static str> {
+    match key.to_ascii_lowercase().as_str() {
+        "ctrl" | "control" => Some("ctrl"),
+        "shift" => Some("shift"),
+        "alt" | "option" => Some("alt"),
+        "super" | "meta" | "cmd" | "command" | "win" | "windows" => Some("super"),
+        _ => None,
+    }
+}
+
+fn normalize_hotkey_key(key: &str) -> String {
+    canonical_modifier(key).unwrap_or(key).to_owned()
+}
+
+#[cfg(test)]
+mod hotkey_alias_tests {
+    use super::{is_modifier, normalize_hotkey_key};
+
+    #[test]
+    fn public_option_chord_preserves_alt_instead_of_typing_a_plain_letter() {
+        let keys: Vec<_> = ["option", "o"].map(normalize_hotkey_key).into();
+        assert_eq!(keys, ["alt", "o"]);
+        assert!(is_modifier(&keys[0]));
+        assert!(!is_modifier(&keys[1]));
+    }
+
+    #[test]
+    fn public_command_aliases_use_the_linux_super_modifier() {
+        for alias in ["CMD", "command", "meta", "windows", "win", "super"] {
+            assert_eq!(normalize_hotkey_key(alias), "super");
+        }
+    }
 }
 
 pub struct HotkeyTool {
@@ -4013,7 +4437,11 @@ impl Tool for HotkeyTool {
                 Ok(input) => input,
                 Err(result) => return result,
             };
-            let keys = input.keys;
+            let keys: Vec<String> = input
+                .keys
+                .iter()
+                .map(|key| normalize_hotkey_key(key))
+                .collect();
             if keys.len() < 2 {
                 return ToolResult::error("hotkey.keys must contain at least two keys.")
                     .with_structured(json!({ "code": "invalid_arguments" }));
@@ -4099,7 +4527,7 @@ impl Tool for HotkeyTool {
         let (key, mods) = if let Some(arr) = args.get("keys").and_then(|v| v.as_array()) {
             let keys: Vec<String> = arr
                 .iter()
-                .filter_map(|v| v.as_str().map(str::to_owned))
+                .filter_map(|v| v.as_str().map(normalize_hotkey_key))
                 .collect();
             let modifiers: Vec<String> = keys.iter().filter(|k| is_modifier(k)).cloned().collect();
             let non_mods: Vec<String> = keys.iter().filter(|k| !is_modifier(k)).cloned().collect();
@@ -4108,7 +4536,11 @@ impl Tool for HotkeyTool {
             }
             (non_mods.last().unwrap().clone(), modifiers)
         } else if let Some(k) = args.opt_str("key") {
-            let mods: Vec<String> = args.str_array("modifiers");
+            let mods: Vec<String> = args
+                .str_array("modifiers")
+                .iter()
+                .map(|key| normalize_hotkey_key(key))
+                .collect();
             (k, mods)
         } else {
             return ToolResult::error(
@@ -4890,8 +5322,10 @@ impl Tool for DoubleClickTool {
             .await;
             return match result {
                 Ok(Ok((xid, lx, ly))) => {
-                    if let Ok(Ok((sx, sy))) =
-                        tokio::task::spawn_blocking(move || element_screen_center(pid, idx)).await
+                    if let Ok(Ok((sx, sy))) = tokio::task::spawn_blocking(move || {
+                        element_screen_center(pid, idx, xid_hint)
+                    })
+                    .await
                     {
                         crate::overlay::send_command_for(
                             cursor_id.clone(),
@@ -5116,8 +5550,10 @@ impl Tool for RightClickTool {
             .await;
             return match result {
                 Ok(Ok((xid, lx, ly))) => {
-                    if let Ok(Ok((sx, sy))) =
-                        tokio::task::spawn_blocking(move || element_screen_center(pid, idx)).await
+                    if let Ok(Ok((sx, sy))) = tokio::task::spawn_blocking(move || {
+                        element_screen_center(pid, idx, xid_hint)
+                    })
+                    .await
                     {
                         crate::overlay::send_command_for(
                             cursor_id.clone(),

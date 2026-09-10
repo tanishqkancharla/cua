@@ -1,4 +1,9 @@
-"""Regression tests for cua-driver-rs release and PyPI wiring."""
+"""Release/PyPI wiring and explicitly named retained upstream download checks.
+
+OpenSky's public installers build source through install-local. Download version,
+channel, migration and UAC checks below target the retained upstream installer,
+not the source wrapper; they do not certify the OpenSky installation workflow.
+"""
 
 import json
 from pathlib import Path
@@ -325,7 +330,7 @@ class TestCuaDriverReleaseWiring(unittest.TestCase):
         self.assertIn("-F force=false", workflow)
         self.assertIn("[skip ci]", workflow)
 
-    def test_release_installers_preserve_legacy_telemetry_state_before_cleanup(self) -> None:
+    def test_retained_upstream_release_installers_preserve_legacy_telemetry_state_before_cleanup(self) -> None:
         installer = self.read("libs/cua-driver/scripts/_install-rust.sh")
         cleanup = installer.index('rm -rf "$LEGACY_HOME_DIR"')
         self.assertLess(
@@ -337,7 +342,7 @@ class TestCuaDriverReleaseWiring(unittest.TestCase):
             cleanup,
         )
 
-        powershell = self.read("libs/cua-driver/scripts/install.ps1")
+        powershell = self.read("libs/cua-driver/scripts/_upstream-install.ps1")
         cleanup = powershell.index("Remove-Item -LiteralPath $LegacyHomeDir -Recurse -Force")
         self.assertLess(
             powershell.index(
@@ -350,19 +355,19 @@ class TestCuaDriverReleaseWiring(unittest.TestCase):
             cleanup,
         )
 
-    def test_release_installers_bound_cursor_theme_compatibility(self) -> None:
+    def test_retained_upstream_release_installers_bound_cursor_theme_compatibility(self) -> None:
         shell = self.read("libs/cua-driver/scripts/_install-rust.sh")
         self.assertIn('CURSOR_THEME_REQUIRED_FROM="0.12.7"', shell)
         self.assertIn('"$VERSION" "$CURSOR_THEME_REQUIRED_FROM"', shell)
 
-        powershell = self.read("libs/cua-driver/scripts/install.ps1")
+        powershell = self.read("libs/cua-driver/scripts/_upstream-install.ps1")
         self.assertIn('$CursorThemeRequiredFrom = [version]"0.12.7"', powershell)
         self.assertIn("[version]$version -ge $CursorThemeRequiredFrom", powershell)
 
-    def test_windows_installer_elevates_autostart_binary_without_command_string(
+    def test_retained_upstream_windows_installer_elevates_autostart_binary_without_command_string(
         self,
     ) -> None:
-        powershell = self.read("libs/cua-driver/scripts/install.ps1")
+        powershell = self.read("libs/cua-driver/scripts/_upstream-install.ps1")
         block = powershell.split(
             "function Register-CuaDriverAutostart {", maxsplit=1
         )[1].split(
@@ -384,40 +389,34 @@ class TestCuaDriverReleaseWiring(unittest.TestCase):
         installer = self.read("libs/cua-driver/scripts/_install-local-rust.sh")
 
         self.assertIn(
-            'HOME_DIR="${CUA_DRIVER_LOCAL_HOME:-$HOME/.cua-driver-local}"',
+            'HOME_DIR="${CUA_DRIVER_LOCAL_HOME:-$HOME/.opensky-driver}"',
             installer,
         )
         self.assertNotIn("LEGACY_HOME_DIR", installer)
         self.assertNotIn(".cua-driver-rs", installer)
         self.assertNotIn('rm -rf "$HOME/.cua-driver"', installer)
 
-    def test_local_install_hints_name_the_local_permission_identity(self) -> None:
+    def test_local_install_hints_name_the_opensky_permission_identity(self) -> None:
         installer = self.read("libs/cua-driver/scripts/_install-local-rust.sh")
         shared_hints = self.read("libs/cua-driver/scripts/post-install-hints.txt")
 
-        self.assertIn('permission prompts say \\"Cua Driver Local\\"', installer)
-        self.assertNotIn('permission prompts say \\"Cua Driver\\"', installer)
-        self.assertIn("launches the installed", shared_hints)
-        self.assertNotIn("launches CuaDriver", shared_hints)
+        self.assertIn('permission prompts say \\"OpenSky Driver\\"', installer)
+        self.assertIn("grant to OpenSky Driver", shared_hints)
+        self.assertIn("{{BINARY}} permissions grant", shared_hints)
 
-    def test_post_install_hints_include_muse_stdio_mcp_config(self) -> None:
+    def test_post_install_hints_link_the_opensky_sdk_and_source(self) -> None:
         shared_hints = self.read("libs/cua-driver/scripts/post-install-hints.txt")
 
-        self.assertIn("Muse Code (macOS / Linux", shared_hints)
-        self.assertIn("$XDG_CONFIG_HOME/muse/settings.json", shared_hints)
-        self.assertIn('"mcp_servers": {', shared_hints)
-        self.assertIn('"transport": "stdio"', shared_hints)
-        self.assertIn('"command": "{{BINARY}}"', shared_hints)
-        self.assertIn('"args": ["mcp"]', shared_hints)
-        self.assertIn("MCP servers load at startup", shared_hints)
+        self.assertIn("https://github.com/tanishqkancharla/opensky", shared_hints)
+        self.assertIn("https://github.com/tanishqkancharla/cua", shared_hints)
+        self.assertIn("{{BINARY}} skills install", shared_hints)
 
-    def test_post_install_hints_use_canonical_capability_manifest_flags(self) -> None:
+    def test_post_install_hints_show_product_identity_and_sdk_diagnostics(self) -> None:
         shared_hints = self.read("libs/cua-driver/scripts/post-install-hints.txt")
 
-        self.assertIn("--capability-manifest", shared_hints)
-        self.assertIn("--approve-capability-manifest", shared_hints)
-        self.assertNotIn("--session-policy", shared_hints)
-        self.assertNotIn("--approve-session-policy", shared_hints)
+        self.assertIn("{{BINARY}} --version", shared_hints)
+        self.assertIn("{{BINARY}} --opensky-driver-identity", shared_hints)
+        self.assertIn("opensky doctor", shared_hints)
 
     def test_agent_sdk_examples_use_implicit_sessions_and_per_call_targets(self) -> None:
         example_dir = REPO_ROOT / "libs/cua-driver/examples/agent-sdks"
@@ -453,17 +452,17 @@ class TestCuaDriverReleaseWiring(unittest.TestCase):
         )
         self.assertNotIn("printf '%s' \"$CUA_LOCAL_SIGN_CN\"; return", signing)
 
-    def test_release_installers_persist_channel_before_binary_swap(self) -> None:
+    def test_retained_upstream_release_installers_persist_channel_before_binary_swap(self) -> None:
         shell = self.read("libs/cua-driver/scripts/_install-rust.sh")
         hint = shell.index('> "$HOME_DIR/.telemetry_install_channel"')
         self.assertLess(hint, shell.index('ditto "$SRC_APP" "$APP_DEST"'))
         self.assertLess(hint, shell.index('mv -Tf "$TMP_LINK" "$CURRENT_LINK"'))
 
-        powershell = self.read("libs/cua-driver/scripts/install.ps1")
+        powershell = self.read("libs/cua-driver/scripts/_upstream-install.ps1")
         hint = powershell.index("Set-Content -LiteralPath $telemetryHintPath")
         self.assertLess(hint, powershell.index("Ensure-Junction $CurrentDir    $versionedDir"))
 
-    def test_release_installers_gate_channel_hint_on_effective_consent(self) -> None:
+    def test_retained_upstream_release_installers_gate_channel_hint_on_effective_consent(self) -> None:
         shell = self.read("libs/cua-driver/scripts/_install-rust.sh")
         self.assertIn(
             "for telemetry_env_name in CUA_DRIVER_RS_TELEMETRY_ENABLED CUA_TELEMETRY_ENABLED",
@@ -473,7 +472,7 @@ class TestCuaDriverReleaseWiring(unittest.TestCase):
         self.assertIn('"telemetry_enabled"', shell)
         self.assertIn('[[ "$TELEMETRY_HINT_ENABLED" == "1" ]]', shell)
 
-        powershell = self.read("libs/cua-driver/scripts/install.ps1")
+        powershell = self.read("libs/cua-driver/scripts/_upstream-install.ps1")
         self.assertIn(
             "@('CUA_DRIVER_RS_TELEMETRY_ENABLED', 'CUA_TELEMETRY_ENABLED')",
             powershell,
@@ -707,10 +706,10 @@ class TestCuaDriverReleaseWiring(unittest.TestCase):
         self.assertEqual(
             len(expected["baseTools"]), len(set(expected["baseTools"]))
         )
-        self.assertEqual(len(expected["baseTools"]), 56)
+        self.assertEqual(len(expected["baseTools"]), 58)
         self.assertEqual(
             expected["outputSchemaCountByPlatform"],
-            {"darwin": 32, "linux": 36, "win32": 32},
+            {"darwin": 34, "linux": 38, "win32": 34},
         )
         self.assertEqual(
             expected["platformTools"],

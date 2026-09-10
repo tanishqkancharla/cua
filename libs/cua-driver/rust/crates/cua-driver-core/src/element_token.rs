@@ -48,7 +48,7 @@
 //! The LRU is **per runtime and pid**, not global. Two snapshots in different
 //! lanes never collide even when their numeric counters match.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
 use std::sync::OnceLock;
@@ -71,7 +71,7 @@ pub const STALE_TOKEN_ERROR: &str =
     "element_token is stale; call get_window_state again to refresh";
 
 /// One valid snapshot retained in the per-pid LRU.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct SnapshotEntry {
     /// Monotonic, process-global id assigned by [`mint_snapshot_id`].
     snapshot_id: u32,
@@ -83,6 +83,7 @@ struct SnapshotEntry {
     /// resolver rejects out-of-range tokens up-front instead of waiting
     /// for the per-platform cache to NPE.
     max_element_index: usize,
+    element_indices: HashSet<usize>,
 }
 
 /// Process-global token registry. Thread-safe; tools resolve from any
@@ -115,6 +116,20 @@ impl TokenRegistry {
     /// in its lane, the oldest is evicted and any token that referenced
     /// it becomes stale — that's the contract.
     pub fn register_snapshot(&self, pid: i32, window_id: u32, element_count: usize) -> u32 {
+        self.register_snapshot_indices(pid, window_id, 0..element_count)
+    }
+
+    /// Register the exact indices emitted for one window. Some providers use
+    /// application-wide indices, so a dialog's three controls need not be 0..3.
+    /// Retain membership rather than admitting other windows' unobserved indices.
+    pub fn register_snapshot_indices(
+        &self,
+        pid: i32,
+        window_id: u32,
+        indices: impl IntoIterator<Item = usize>,
+    ) -> u32 {
+        let element_indices: HashSet<usize> = indices.into_iter().collect();
+        let max_element_index = element_indices.iter().copied().max().unwrap_or(0);
         // Keep the full 32-bit counter. Truncating to 16 bits repeats an id
         // every 65,536 process-global snapshots. A long-lived daemon can then
         // mint an id that still exists in another runtime/pid lane, allowing a
@@ -131,7 +146,8 @@ impl TokenRegistry {
         lane.push(SnapshotEntry {
             snapshot_id: id,
             window_id,
-            max_element_index: element_count.saturating_sub(1),
+            max_element_index,
+            element_indices,
         });
         // Evict oldest. The loop guards against pre-existing over-cap
         // state from a previous version of the binary; in steady state
@@ -183,6 +199,11 @@ impl TokenRegistry {
             return Err(format!(
                 "element_token element_index {idx} out of range (snapshot had {} elements)",
                 entry.max_element_index + 1
+            ));
+        }
+        if !entry.element_indices.contains(&idx) {
+            return Err(format!(
+                "element_token element_index {idx} is not present in this window snapshot"
             ));
         }
         Ok((entry.window_id, idx))
@@ -446,6 +467,28 @@ mod tests {
 
     fn fresh_registry() -> TokenRegistry {
         TokenRegistry::new()
+    }
+
+    #[test]
+    fn sparse_window_indices_resolve_only_observed_controls() {
+        let reg = fresh_registry();
+        let snapshot = reg.register_snapshot_indices(100, 42, [1193, 1194, 1195]);
+        assert_eq!(reg.resolve(100, &token_for(snapshot, 1195)), Ok((42, 1195)));
+        assert!(reg.resolve(100, &token_for(snapshot, 0)).is_err());
+        assert!(reg.resolve(100, &token_for(snapshot, 1192)).is_err());
+        assert!(reg.resolve(100, &token_for(snapshot, 1196)).is_err());
+        reg.register_snapshot_indices(100, 42, [1193, 1194, 1195]);
+        assert_eq!(
+            reg.resolve(100, &token_for(snapshot, 1195)),
+            Err(STALE_TOKEN_ERROR.to_owned())
+        );
+    }
+
+    #[test]
+    fn empty_window_snapshot_does_not_authorize_index_zero() {
+        let reg = fresh_registry();
+        let snapshot = reg.register_snapshot(100, 42, 0);
+        assert!(reg.resolve(100, &token_for(snapshot, 0)).is_err());
     }
 
     #[test]

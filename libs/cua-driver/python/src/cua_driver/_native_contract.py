@@ -2145,6 +2145,131 @@ class _UniffiFfiConverterTypeClipboardWriteOutput(_UniffiConverterRustBuffer):
         _UniffiFfiConverterBoolean.write(value.content_redacted_from_telemetry, buf)
 
 @dataclass
+class CloseWindowInput:
+    """
+    Exact top-level window to close cooperatively through the operating
+    system's accessibility/window-management API.
+"""
+    def __init__(self, *, pid:int, window_id:int, session:typing.Optional[str]):
+        self.pid = pid
+        self.window_id = window_id
+        self.session = session
+
+
+
+
+    def __str__(self):
+        return "CloseWindowInput(pid={}, window_id={}, session={})".format(self.pid, self.window_id, self.session)
+    def __eq__(self, other):
+        if self.pid != other.pid:
+            return False
+        if self.window_id != other.window_id:
+            return False
+        if self.session != other.session:
+            return False
+        return True
+
+class _UniffiFfiConverterTypeCloseWindowInput(_UniffiConverterRustBuffer):
+    @staticmethod
+    def read(buf):
+        return CloseWindowInput(
+            pid=_UniffiFfiConverterUInt32.read(buf),
+            window_id=_UniffiFfiConverterUInt64.read(buf),
+            session=_UniffiFfiConverterOptionalString.read(buf),
+        )
+
+    @staticmethod
+    def check_lower(value):
+        _UniffiFfiConverterUInt32.check_lower(value.pid)
+        _UniffiFfiConverterUInt64.check_lower(value.window_id)
+        _UniffiFfiConverterOptionalString.check_lower(value.session)
+
+    @staticmethod
+    def write(value, buf):
+        _UniffiFfiConverterUInt32.write(value.pid, buf)
+        _UniffiFfiConverterUInt64.write(value.window_id, buf)
+        _UniffiFfiConverterOptionalString.write(value.session, buf)
+
+
+
+
+
+
+class CloseWindowStatus(enum.Enum):
+
+    CLOSED = 0
+
+
+
+class _UniffiFfiConverterTypeCloseWindowStatus(_UniffiConverterRustBuffer):
+    @staticmethod
+    def read(buf):
+        variant = buf.read_i32()
+        if variant == 1:
+            return CloseWindowStatus.CLOSED
+        raise InternalError("Raw enum value doesn't match any cases")
+
+    @staticmethod
+    def check_lower(value):
+        if value == CloseWindowStatus.CLOSED:
+            return
+        raise ValueError(value)
+
+    @staticmethod
+    def write(value, buf):
+        if value == CloseWindowStatus.CLOSED:
+            buf.write_i32(1)
+
+
+
+@dataclass
+class CloseWindowOutput:
+    """
+    Successful result of an exact cooperative window close. Refused, missing,
+    disabled, ambiguous, no-op, and confirmation-required outcomes use the
+    standard typed refusal envelope instead.
+"""
+    def __init__(self, *, status:CloseWindowStatus, pid:int, window_id:int):
+        self.status = status
+        self.pid = pid
+        self.window_id = window_id
+
+
+
+
+    def __str__(self):
+        return "CloseWindowOutput(status={}, pid={}, window_id={})".format(self.status, self.pid, self.window_id)
+    def __eq__(self, other):
+        if self.status != other.status:
+            return False
+        if self.pid != other.pid:
+            return False
+        if self.window_id != other.window_id:
+            return False
+        return True
+
+class _UniffiFfiConverterTypeCloseWindowOutput(_UniffiConverterRustBuffer):
+    @staticmethod
+    def read(buf):
+        return CloseWindowOutput(
+            status=_UniffiFfiConverterTypeCloseWindowStatus.read(buf),
+            pid=_UniffiFfiConverterUInt32.read(buf),
+            window_id=_UniffiFfiConverterUInt64.read(buf),
+        )
+
+    @staticmethod
+    def check_lower(value):
+        _UniffiFfiConverterTypeCloseWindowStatus.check_lower(value.status)
+        _UniffiFfiConverterUInt32.check_lower(value.pid)
+        _UniffiFfiConverterUInt64.check_lower(value.window_id)
+
+    @staticmethod
+    def write(value, buf):
+        _UniffiFfiConverterTypeCloseWindowStatus.write(value.status, buf)
+        _UniffiFfiConverterUInt32.write(value.pid, buf)
+        _UniffiFfiConverterUInt64.write(value.window_id, buf)
+
+@dataclass
 class CursorMotionOutput:
     def __init__(self, *, start_handle:float, end_handle:float, arc_size:float, arc_flow:float, spring:float, glide_duration_ms:float, dwell_after_click_ms:float, idle_hide_ms:float, turn_radius:float):
         self.start_handle = start_handle
@@ -5317,6 +5442,7 @@ __all__ = [
     "ActionTarget",
     "DesktopScope",
     "ClickButton",
+    "CloseWindowStatus",
     "CursorReducedMotion",
     "CursorAction",
     "EscalationReason",
@@ -5340,6 +5466,8 @@ __all__ = [
     "ClipboardReadOutput",
     "ClipboardWriteInput",
     "ClipboardWriteOutput",
+    "CloseWindowInput",
+    "CloseWindowOutput",
     "CursorMotionOutput",
     "CursorPointOutput",
     "CursorThemeOutput",

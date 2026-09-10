@@ -22,6 +22,8 @@ pub struct InstalledApp {
     /// Path the launcher would run — the unexpanded first token of `Exec=`
     /// (field codes like `%U`, `%f` stripped). Pass to `launch_app(launch_path=...)`.
     pub launch_path: String,
+    /// XDG window identity, independent of a wrapper's executable name.
+    pub startup_wm_class: Option<String>,
     /// RFC3339 timestamp from the `.desktop` file's filesystem mtime, or
     /// `None` if the metadata could not be read.
     pub last_used: Option<String>,
@@ -153,6 +155,7 @@ fn parse_desktop_file(path: &Path, bundle_id: &str) -> Option<InstalledApp> {
         name,
         bundle_id,
         launch_path,
+        startup_wm_class: string_key(&entry, "StartupWMClass").filter(|s| !s.is_empty()),
         last_used,
     })
 }
@@ -302,6 +305,7 @@ NoDisplay=true
 Type=Application
 Name=Demo App
 Exec=/opt/demo/bin/demo %U
+StartupWMClass=DemoWindow
 ";
         let dir = std::env::temp_dir().join(format!("cua-driver-rs-test-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
@@ -311,6 +315,7 @@ Exec=/opt/demo/bin/demo %U
         assert_eq!(parsed.name, "Demo App");
         assert_eq!(parsed.launch_path, "/opt/demo/bin/demo");
         assert_eq!(parsed.bundle_id, "demo-app");
+        assert_eq!(parsed.startup_wm_class.as_deref(), Some("DemoWindow"));
         let _ = std::fs::remove_file(&path);
     }
 

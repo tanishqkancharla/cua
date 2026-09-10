@@ -1,8 +1,16 @@
-# Cua Driver 0.12.6 compatibility fixtures
+# OpenSky Driver compatibility fixtures
 
 These fixtures lock selected stable public contract fields from the
 `cua-driver-rs-v0.12.6` release tag at commit
 `9eb1f481b8a12cd6ffda2ad5af21653a9e5aa9e5`.
+
+This fork intentionally changes the CLI help command and MCP server identity
+to `opensky-driver`, as requested for OpenSky's own driver. Only those two
+identity fields in the upstream baseline are adapted; the protocol envelope,
+required tools, argument shapes, package signatures and compatibility apps
+remain locked. This is a named fork contract, not a claim that the original
+Cua Driver identity is unchanged. The pinned-client discovery manifest also
+includes the fork's additive `browser_key` and `close_window` tools.
 
 The snapshots were derived from the release-tagged package sources, generated
 bindings, `cua-driver --help`, `cua-driver manifest`, and MCP JSON-RPC responses.

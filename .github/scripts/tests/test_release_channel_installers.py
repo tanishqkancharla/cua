@@ -96,10 +96,10 @@ def test_lume_api_filter_is_exact_draft_aware_and_channel_scoped():
     assert '"draft"[[:space:]]*:[[:space:]]*false' in body
 
 
-def test_installers_make_channel_persistent_but_keep_exact_pins_one_shot():
+def test_lume_and_retained_upstream_driver_persist_channel_with_one_shot_pins():
     lume = LUME_INSTALLER.read_text()
     driver = (ROOT / "libs/cua-driver/scripts/_install-rust.sh").read_text()
-    windows = (ROOT / "libs/cua-driver/scripts/install.ps1").read_text(encoding="utf-8-sig")
+    windows = (ROOT / "libs/cua-driver/scripts/_upstream-install.ps1").read_text(encoding="utf-8-sig")
 
     assert 'RELEASE_CHANNEL_PATH="$LUME_HOME/release-channel"' in lume
     assert 'if [ "$LUME_CHANNEL_EXPLICIT" = true ]' in lume
@@ -128,8 +128,8 @@ def test_driver_download_uses_the_resolved_tag_not_the_stable_prefix():
     assert "releases/download/${TAG_PREFIX}" not in body
 
 
-def test_windows_driver_has_disjoint_exact_pin_grammars():
-    source = (ROOT / "libs/cua-driver/scripts/install.ps1").read_text(encoding="utf-8-sig")
+def test_retained_upstream_windows_driver_has_disjoint_exact_pin_grammars():
+    source = (ROOT / "libs/cua-driver/scripts/_upstream-install.ps1").read_text(encoding="utf-8-sig")
     assert '$NightlyTagPrefix = "nightly-cua-driver-rs-v"' in source
     stable = re.search(
         r"\^\(\?:cua-driver-rs-v\|v\)\?\(\[0-9\]\+.*?\$", source

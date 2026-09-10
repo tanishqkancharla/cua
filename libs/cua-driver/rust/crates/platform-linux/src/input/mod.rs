@@ -33,6 +33,7 @@ use x11rb::rust_connection::RustConnection;
 
 const CLICK_DELAY_MS: u64 = 35;
 const DOUBLE_CLICK_DELAY_MS: u64 = 50;
+const XTEST_BUTTON_HOLD_MS: u64 = 50;
 const KEY_DELAY_MS: u64 = 10;
 
 #[derive(Clone, Debug)]
@@ -2108,9 +2109,7 @@ pub fn send_type_text_with_delay(xid: u64, text: &str, inter_char_ms: u64) -> Re
         // Resolve the keycode and whether Shift must be held — without it,
         // uppercase and shifted symbols would otherwise type their unshifted
         // form (e.g. "A" arriving as "a").
-        let Some((keycode, needs_shift)) = char_to_keycode_shift(&mapping, ch as u32) else {
-            continue;
-        };
+        let (keycode, needs_shift, remapped) = text_keycode(&conn, &mapping, ch)?;
         let state = if needs_shift {
             KeyButMask::SHIFT
         } else {
@@ -2152,6 +2151,15 @@ pub fn send_type_text_with_delay(xid: u64, text: &str, inter_char_ms: u64) -> Re
         sleep(Duration::from_millis(KEY_DELAY_MS));
         conn.send_event(false, window, EventMask::KEY_RELEASE, &release)?;
         conn.flush()?;
+        if remapped.is_some() {
+            // A flush only sends bytes. Confirm the server processed this
+            // character before the guard restores its temporary key mapping.
+            conn.get_input_focus()?.reply()?;
+            // Server delivery does not mean the client has translated the
+            // keycode yet. Keep this mapping stable while the app processes
+            // it; immediately reusing the spare code turned é into the later —.
+            sleep(Duration::from_millis(200));
+        }
         if inter_char_ms > 0 {
             sleep(Duration::from_millis(inter_char_ms));
         }
@@ -2167,8 +2175,74 @@ pub fn send_type_text_with_delay(xid: u64, text: &str, inter_char_ms: u64) -> Re
 /// argument because XTest always delivers to the focused window; the caller
 /// focuses the target by clicking it first. `\n`/`\t` map to Return/Tab.
 pub fn send_type_text_xtest(text: &str) -> Result<()> {
+    send_type_text_xtest_checked(text, None).map(|_| ())
+}
+
+/// Use real keys only while the exact target already owns X11 focus. Never
+/// activate, raise, or restore a window. `false` means no key was sent, so the
+/// caller can still attempt its focus-free accessibility route.
+///
+/// Recheck on the injection connection before every character. This narrows,
+/// but does not eliminate, the XTest race with another client's focus request
+/// between the check and key delivery. Holding the X server for an entire text
+/// operation would freeze other clients, so this is not an atomic focus lease.
+/// Once a key was sent, loss of focus is an error with possibly partial delivery;
+/// the caller must not fall back or replay the text.
+pub fn try_type_text_xtest_already_focused(xid: u64, text: &str) -> Result<bool> {
+    let target = u32::try_from(xid).context("X11 target window exceeds 32 bits")?;
+    send_type_text_xtest_checked(text, Some(target))
+}
+
+fn x11_target_already_focused(
+    conn: &RustConnection,
+    root: Window,
+    active_atom: Atom,
+    target: Window,
+) -> Result<bool> {
+    if active_atom == x11rb::NONE || target == x11rb::NONE || target == root {
+        return Ok(false);
+    }
+    let active = conn
+        .get_property(false, root, active_atom, AtomEnum::WINDOW, 0, 1)?
+        .reply()?;
+    if active.type_ != u32::from(AtomEnum::WINDOW)
+        || active.value32().and_then(|mut values| values.next()) != Some(target)
+    {
+        return Ok(false);
+    }
+    let mut focused = conn.get_input_focus()?.reply()?.focus;
+    // Core focus may be in a child widget, but a sibling toplevel or modal is
+    // not within this exact target. Never use PID or stale AX focus as proof.
+    for _ in 0..64 {
+        if focused == target {
+            return Ok(true);
+        }
+        if focused == x11rb::NONE || focused == 1 || focused == root {
+            return Ok(false);
+        }
+        let parent = conn.query_tree(focused)?.reply()?.parent;
+        if parent == focused {
+            return Ok(false);
+        }
+        focused = parent;
+    }
+    Ok(false)
+}
+
+fn send_type_text_xtest_checked(text: &str, target: Option<Window>) -> Result<bool> {
     use x11rb::protocol::xtest::ConnectionExt as _;
-    let (conn, _) = connect_x11_for_input()?;
+    let (conn, screen) = connect_x11_for_input()?;
+    let root = conn.setup().roots[screen].root;
+    let active_atom = if target.is_some() {
+        conn.intern_atom(true, b"_NET_ACTIVE_WINDOW")?.reply()?.atom
+    } else {
+        x11rb::NONE
+    };
+    if let Some(target) = target {
+        if !x11_target_already_focused(&conn, root, active_atom, target).unwrap_or(false) {
+            return Ok(false);
+        }
+    }
     let mapping = conn.get_keyboard_mapping(8, 248)?.reply()?;
     // Shift keycode (modifier index 0) for shifted characters.
     let modmap = conn.get_modifier_mapping()?.reply()?;
@@ -2178,15 +2252,23 @@ pub fn send_type_text_xtest(text: &str) -> Result<()> {
         .get(..kpm)
         .and_then(|s| s.iter().copied().find(|&k| k != 0))
         .unwrap_or(50);
+    let mut sent_any = false;
     for ch in text.chars() {
-        let cp = match ch {
-            '\n' => 0xff0d, // XK_Return
-            '\t' => 0xff09, // XK_Tab
-            c => c as u32,
-        };
-        let Some((keycode, needs_shift)) = char_to_keycode_shift(&mapping, cp) else {
-            continue;
-        };
+        let (keycode, needs_shift, remapped) = text_keycode(&conn, &mapping, ch)?;
+        if let Some(target) = target {
+            if !x11_target_already_focused(&conn, root, active_atom, target).unwrap_or(false) {
+                if !sent_any {
+                    return Ok(false);
+                }
+                bail!(
+                    "X11 typing interrupted: exact target focus was lost or could not be verified; \
+                     text may be partially delivered and must not be automatically replayed"
+                );
+            }
+        }
+        // From this point an error has unknown/partial delivery. Never return
+        // the pre-input miss that allows the caller's background fallback.
+        sent_any = true;
         if needs_shift {
             conn.xtest_fake_input(KEY_PRESS_EVENT, shift_kc, 0, x11rb::NONE, 0, 0, 0)?;
         }
@@ -2196,13 +2278,22 @@ pub fn send_type_text_xtest(text: &str) -> Result<()> {
             conn.xtest_fake_input(KEY_RELEASE_EVENT, shift_kc, 0, x11rb::NONE, 0, 0, 0)?;
         }
         conn.flush()?;
+        if remapped.is_some() {
+            // The final round-trip below runs after per-character guards drop.
+            // Each temporary binding needs its own delivery barrier first.
+            conn.get_input_focus()?.reply()?;
+            // Server delivery does not mean the client has translated the
+            // keycode yet. Keep this mapping stable while the app processes
+            // it; immediately reusing the spare code turned é into the later —.
+            sleep(Duration::from_millis(200));
+        }
         sleep(Duration::from_millis(KEY_DELAY_MS));
     }
     // Round-trip so the server delivers the final character's key events before
     // this short-lived connection drops (see send_key_xtest — keyboard XTEST
     // events queued on a connection that closes immediately can be lost).
     let _ = conn.get_input_focus()?.reply();
-    Ok(())
+    Ok(true)
 }
 
 /// Press a named key (with optional modifiers) into whatever window holds X
@@ -2323,6 +2414,137 @@ pub fn send_click_xtest_desktop(x: i32, y: i32, button: u8, count: usize) -> Res
     send_click_xtest_desktop_with_modifiers(x, y, button, count, &[])
 }
 
+/// Click only when the requested X11 client already owns keyboard focus and
+/// the visible input surface at the window-local point belongs to that client.
+/// `false` is a pre-input miss: no pointer or key event has been sent. After
+/// preparation begins, every failure is non-retryable, even if delivery is only
+/// possible rather than confirmed. Never activate/restore a window here.
+///
+/// Checks and injection share one connection, but other X clients can still
+/// change focus/stacking between requests. This is not an atomic input lease.
+pub fn try_click_xtest_already_focused(
+    xid: u64,
+    x: i32,
+    y: i32,
+    button: u8,
+    count: usize,
+    modifiers: &[&str],
+) -> Result<bool> {
+    let (conn, screen_num) = connect_x11_for_input()?;
+    let root = conn.setup().roots[screen_num].root;
+    let target = u32::try_from(xid).context("X11 target window exceeds 32 bits")?;
+    let active_atom = conn.intern_atom(true, b"_NET_ACTIVE_WINDOW")?.reply()?.atom;
+    let check = || -> Result<Option<(i32, i32)>> {
+        let geometry = conn.get_geometry(target)?.reply()?;
+        if x < 0 || y < 0 || x >= i32::from(geometry.width) || y >= i32::from(geometry.height) {
+            bail!("X11 click point is outside the requested client window");
+        }
+        if !x11_target_already_focused(&conn, root, active_atom, target)? {
+            return Ok(None);
+        }
+        let local_x =
+            i16::try_from(x).context("X11 click x exceeds the protocol coordinate range")?;
+        let local_y =
+            i16::try_from(y).context("X11 click y exceeds the protocol coordinate range")?;
+        let translated = conn
+            .translate_coordinates(target, root, local_x, local_y)?
+            .reply()?;
+        let (sx, sy) = (i32::from(translated.dst_x), i32::from(translated.dst_y));
+        if !translated.same_screen
+            || sx < 0
+            || sy < 0
+            || sx >= i32::from(conn.setup().roots[screen_num].width_in_pixels)
+            || sy >= i32::from(conn.setup().roots[screen_num].height_in_pixels)
+        {
+            bail!("X11 click point cannot be represented on the target screen");
+        }
+        if !x11_input_point_within_target(&conn, root, target, translated.dst_x, translated.dst_y)?
+        {
+            return Ok(None);
+        }
+        Ok(Some((sx, sy)))
+    };
+    let Some((sx, sy)) = check()? else {
+        return Ok(false);
+    };
+    send_click_xtest_on_connection(&conn, root, sx, sy, button, count, modifiers, || {
+        if check()? != Some((sx, sy)) {
+            bail!("exact target focus, geometry, or input surface changed");
+        }
+        Ok(())
+    })
+    .context("X11 click interrupted; pointer/key input may have been delivered and must not be automatically replayed")?;
+    Ok(true)
+}
+
+/// Walk the actual stacking order from the root toward the requested client.
+/// Checking only focus, PID, or the target's own descendants is insufficient:
+/// an always-on-top sibling can cover the pixel while keyboard focus stays put.
+/// Respect both bounding and input shapes so an input-transparent cursor
+/// overlay does not hide the app, and a shaped window's hole is not a hit.
+fn x11_input_point_within_target(
+    conn: &RustConnection,
+    root: Window,
+    target: Window,
+    root_x: i16,
+    root_y: i16,
+) -> Result<bool> {
+    use x11rb::protocol::shape::{ConnectionExt as _, SK};
+    let mut current = root;
+    for _ in 0..64 {
+        if current == target {
+            return Ok(true);
+        }
+        let tree = conn.query_tree(current)?.reply()?;
+        let mut hit = None;
+        for child in tree.children.into_iter().rev() {
+            if conn.get_window_attributes(child)?.reply()?.map_state != MapState::VIEWABLE {
+                continue;
+            }
+            let local = conn
+                .translate_coordinates(root, child, root_x, root_y)?
+                .reply()?;
+            if !local.same_screen {
+                continue;
+            }
+            // A client-defined shape can extend beyond the current window;
+            // the server clips its effective shape to the default border box.
+            let geometry = conn.get_geometry(child)?.reply()?;
+            let border = i32::from(geometry.border_width);
+            let (x, y) = (i32::from(local.dst_x), i32::from(local.dst_y));
+            if x < -border
+                || y < -border
+                || x >= i32::from(geometry.width) + border
+                || y >= i32::from(geometry.height) + border
+            {
+                continue;
+            }
+            let mut contains = true;
+            for kind in [SK::BOUNDING, SK::INPUT] {
+                let shape = conn.shape_get_rectangles(child, kind)?.reply()?;
+                if !shape.rectangles.iter().any(|rect| {
+                    let x = i32::from(local.dst_x);
+                    let y = i32::from(local.dst_y);
+                    x >= i32::from(rect.x)
+                        && y >= i32::from(rect.y)
+                        && x < i32::from(rect.x) + i32::from(rect.width)
+                        && y < i32::from(rect.y) + i32::from(rect.height)
+                }) {
+                    contains = false;
+                    break;
+                }
+            }
+            if contains {
+                hit = Some(child);
+                break;
+            }
+        }
+        let Some(child) = hit else { return Ok(false) };
+        current = child;
+    }
+    Ok(false)
+}
+
 /// Real XTest click with physical modifier down/up transitions around the
 /// pointer gesture. Used only after the caller selected foreground delivery.
 pub fn send_click_xtest_desktop_with_modifiers(
@@ -2332,22 +2554,37 @@ pub fn send_click_xtest_desktop_with_modifiers(
     count: usize,
     modifiers: &[&str],
 ) -> Result<()> {
-    use x11rb::protocol::xtest::ConnectionExt as _;
     let (conn, screen_num) = connect_x11_for_input()?;
     let root = conn.setup().roots[screen_num].root;
+    send_click_xtest_on_connection(&conn, root, x, y, button, count, modifiers, || Ok(()))
+}
+
+fn send_click_xtest_on_connection(
+    conn: &RustConnection,
+    root: Window,
+    x: i32,
+    y: i32,
+    button: u8,
+    count: usize,
+    modifiers: &[&str],
+    check: impl Fn() -> Result<()>,
+) -> Result<()> {
+    use x11rb::protocol::xtest::ConnectionExt as _;
     let mapping = conn.get_keyboard_mapping(8, 248)?.reply()?;
     let mut guards = Vec::new();
     let mut modifier_keycodes = Vec::new();
     for modifier in modifiers {
         let keysym = key_name_to_keysym(modifier)?;
-        let (keycode, guard) = keycode_for_keysym(&conn, &mapping, keysym, modifier)?;
+        let (keycode, guard) = keycode_for_keysym(conn, &mapping, keysym, modifier)?;
         if let Some(guard) = guard {
             guards.push(guard);
         }
         modifier_keycodes.push(keycode);
     }
     let mut pressed = Vec::new();
+    let mut pointer_pressed = false;
     let gesture_result = (|| -> Result<()> {
+        check()?;
         for &keycode in &modifier_keycodes {
             conn.xtest_fake_input(KEY_PRESS_EVENT, keycode, 0, x11rb::NONE, 0, 0, 0)?;
             pressed.push(keycode);
@@ -2357,8 +2594,19 @@ pub fn send_click_xtest_desktop_with_modifiers(
         conn.xtest_fake_input(MOTION_NOTIFY_EVENT, 0, 0, root, x as i16, y as i16, 0)?;
         let count = count.max(1);
         for click_index in 0..count {
+            // A warp can trigger hover UI, and the first click can open a modal.
+            // Recheck before every press; after input begins an error never
+            // becomes the pre-input miss that permits a fallback/replay.
+            check()?;
             conn.xtest_fake_input(BUTTON_PRESS_EVENT, button, 0, root, x as i16, y as i16, 0)?;
+            pointer_pressed = true;
+            // Deliver the press before releasing it. A zero-duration batch can
+            // move the pointer over a native control without activating it
+            // (LibreOffice's insert-sheet button under Xvfb/Openbox).
+            conn.flush()?;
+            sleep(Duration::from_millis(XTEST_BUTTON_HOLD_MS));
             conn.xtest_fake_input(BUTTON_RELEASE_EVENT, button, 0, root, x as i16, y as i16, 0)?;
+            pointer_pressed = false;
             if click_index + 1 < count {
                 // Chromium needs the first pair to reach the server before the
                 // second pair. A zero-gap batch produces two click events but
@@ -2374,6 +2622,13 @@ pub fn send_click_xtest_desktop_with_modifiers(
     // including when a later pointer request fails. A failed gesture must not
     // leave the desktop with a logically stuck Ctrl/Shift/Alt/Super key.
     let mut release_result: Result<()> = Ok(());
+    if pointer_pressed {
+        if let Err(error) =
+            conn.xtest_fake_input(BUTTON_RELEASE_EVENT, button, 0, root, x as i16, y as i16, 0)
+        {
+            release_result = Err(error.into());
+        }
+    }
     for &keycode in pressed.iter().rev() {
         if let Err(error) =
             conn.xtest_fake_input(KEY_RELEASE_EVENT, keycode, 0, x11rb::NONE, 0, 0, 0)
@@ -2690,6 +2945,34 @@ fn key_name_to_keysym(key: &str) -> Result<u32> {
     Ok(keysym)
 }
 
+// X11 protocol appendix A: Latin-1 keysyms equal their codepoints; other
+// Unicode characters use the 0x01000000 offset. Keep Return/Tab as keys.
+fn text_keysym(ch: char) -> u32 {
+    match ch {
+        '\n' | '\r' => 0xff0d,
+        '\t' => 0xff09,
+        ch if (ch as u32) < 0x100 => ch as u32,
+        ch => 0x01000000 | ch as u32,
+    }
+}
+
+fn text_keycode<'a>(
+    conn: &'a RustConnection,
+    mapping: &GetKeyboardMappingReply,
+    ch: char,
+) -> Result<(u8, bool, Option<RemappedKeycode<'a>>)> {
+    let keysym = text_keysym(ch);
+    if let Some((code, shift)) = char_to_keycode_shift(mapping, keysym) {
+        return Ok((code, shift, None));
+    }
+    // A standard US layout has no direct key for most Unicode characters.
+    // Borrow an unused keycode and retain its restoration guard through event
+    // delivery. Never report success after silently omitting a character.
+    let guard = remap_spare_keycode(conn, mapping, keysym)
+        .with_context(|| format!("Cannot type character {ch:?} (U+{:04X})", ch as u32))?;
+    Ok((guard.keycode, false, Some(guard)))
+}
+
 /// A keycode we have *temporarily* rebound to host a keysym that is absent from
 /// the current X keyboard map (sparse/headless keymaps such as a minimal
 /// Xwayland). On drop it reinstates the keycode's original keysyms so the
@@ -2754,6 +3037,10 @@ fn remap_spare_keycode<'a>(
     // Round-trip so the server has installed the new mapping before we emit the
     // key event against it.
     let _ = conn.get_input_focus()?.reply();
+    // GTK/Xlib consumers refresh cached keymaps on MappingNotify. The server
+    // round-trip alone does not wait for those clients to handle that event.
+    // Keep the binding stable briefly before its first injected key press.
+    sleep(Duration::from_millis(50));
 
     Ok(RemappedKeycode {
         conn,
@@ -2914,6 +3201,21 @@ mod path_tests {
         EVDEV_UINPUT_NAME_MAX_BYTES, UINPUT_POINTER_SUFFIX,
     };
     use x11rb::protocol::xproto::KeyButMask;
+
+    #[test]
+    fn text_keysyms_cover_latin1_unicode_and_control_keys() {
+        for (character, expected) in [
+            ('A', 0x41),
+            ('é', 0xe9),
+            ('—', 0x01002014),
+            ('中', 0x01004e2d),
+            ('😀', 0x0101f600),
+            ('\n', 0xff0d),
+            ('\t', 0xff09),
+        ] {
+            assert_eq!(super::text_keysym(character), expected);
+        }
+    }
 
     #[test]
     fn click_modifier_state_combines_canonical_names_and_aliases() {

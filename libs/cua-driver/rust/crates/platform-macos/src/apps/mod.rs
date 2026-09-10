@@ -44,6 +44,27 @@ pub fn list_running_apps() -> Vec<AppInfo> {
     list_running_apps_native()
 }
 
+/// Service AppKit's application lifecycle notifications without creating UI.
+/// NSWorkspace.runningApplications and NSRunningApplication properties only
+/// refresh while the main run loop runs in a common mode. Joining the server
+/// thread instead leaves launch/quit discovery frozen when overlays are off.
+pub fn run_main_loop() {
+    use objc2::runtime::AnyObject;
+    use objc2::{class, msg_send};
+
+    let _mtm = objc2_foundation::MainThreadMarker::new()
+        .expect("run_main_loop must be called from the main thread");
+    unsafe {
+        let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
+        // Accessory policy keeps the daemon out of the Dock and app switcher.
+        // NSApplication installs and services AppKit's lifecycle event sources;
+        // a bare CFRunLoopRun can return immediately when no source is ready.
+        let _: bool = msg_send![app, setActivationPolicy: 1i64];
+        let _: () = msg_send![app, finishLaunching];
+        let _: () = msg_send![app, run];
+    }
+}
+
 fn list_running_apps_native() -> Vec<AppInfo> {
     use objc2_app_kit::{NSApplicationActivationPolicy, NSWorkspace};
 
@@ -71,7 +92,10 @@ fn list_running_apps_native() -> Vec<AppInfo> {
                 bundle_id: app.bundleIdentifier().map(|value| value.to_string()),
                 running: true,
                 active: app.isActive(),
-                launch_path: None,
+                launch_path: app
+                    .bundleURL()
+                    .and_then(|url| url.path())
+                    .map(|path| path.to_string()),
                 kind: Some("desktop".to_owned()),
                 last_used: None,
             });
@@ -371,6 +395,12 @@ pub(crate) fn resolve_bundle_id_to_locator(bundle_id: &str) -> Option<AppLocator
 ///    integration tests; can be added if we hit a non-English-name app
 ///    in the wild.
 pub(crate) fn locate_by_name(name: &str) -> Option<AppLocator> {
+    let supplied_path = std::path::Path::new(name);
+    if supplied_path.is_absolute() {
+        return (supplied_path.extension().and_then(|ext| ext.to_str()) == Some("app")
+            && supplied_path.join("Contents/Info.plist").is_file())
+        .then(|| AppLocator::Path(name.to_owned()));
+    }
     let app_name = if name.ends_with(".app") {
         name.to_owned()
     } else {
@@ -425,41 +455,31 @@ fn bundle_id_for_app_path(app_path: &str) -> Option<String> {
 ///   * `launch_path` (filesystem `.app` path when known, else `None`),
 ///   * `kind` (`"desktop"` on macOS).
 pub fn list_all_apps() -> Vec<AppInfo> {
-    let mut running = list_running_apps();
-    let installed = scan_installed_apps();
-    // Lookup: bundle_id → (launch_path, last_used) from the installed scan.
-    let installed_by_bundle: std::collections::HashMap<String, (Option<String>, Option<String>)> =
-        installed
-            .iter()
-            .filter_map(|a| {
-                a.bundle_id
-                    .clone()
-                    .map(|b| (b, (a.launch_path.clone(), a.last_used.clone())))
-            })
-            .collect();
-    // Backfill running entries with the launch_path the installed scan resolved.
+    merge_app_inventory(list_running_apps(), scan_installed_apps())
+}
+
+fn merge_app_inventory(mut running: Vec<AppInfo>, mut installed: Vec<AppInfo>) -> Vec<AppInfo> {
+    // A bundle identifier can belong to several installed copies. Only the
+    // running process's NSRunningApplication.bundleURL identifies its copy.
+    // Unknown runtime paths stay unknown; never borrow an installed path.
     for app in running.iter_mut() {
-        if let Some(bid) = &app.bundle_id {
-            if let Some((path, last_used)) = installed_by_bundle.get(bid) {
-                if app.launch_path.is_none() {
-                    app.launch_path = path.clone();
-                }
-                if app.last_used.is_none() {
-                    app.last_used = last_used.clone();
-                }
+        if let Some(path) = &app.launch_path {
+            if let Some(copy) = installed
+                .iter()
+                .find(|copy| copy.launch_path.as_ref() == Some(path))
+            {
+                app.last_used = app.last_used.clone().or_else(|| copy.last_used.clone());
             }
         }
     }
-
-    let running_bundles: std::collections::HashSet<String> =
-        running.iter().filter_map(|a| a.bundle_id.clone()).collect();
-
-    let mut installed = installed;
-    // Remove apps already in running list.
-    installed.retain(|a| {
-        !a.bundle_id
+    let running_paths: std::collections::HashSet<String> = running
+        .iter()
+        .filter_map(|app| app.launch_path.clone())
+        .collect();
+    installed.retain(|app| {
+        !app.launch_path
             .as_ref()
-            .is_some_and(|b| running_bundles.contains(b))
+            .is_some_and(|path| running_paths.contains(path))
     });
 
     let mut all = running;
@@ -716,7 +736,67 @@ pub fn format_app_list(apps: &[AppInfo]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{finder_folder_handoff, unix_secs_to_rfc3339};
+    use super::{finder_folder_handoff, merge_app_inventory, unix_secs_to_rfc3339, AppInfo};
+
+    fn inventory_copy(path: Option<&str>, pid: i32) -> AppInfo {
+        AppInfo {
+            name: "Editor".to_owned(),
+            pid,
+            bundle_id: Some("test.editor".to_owned()),
+            running: pid > 0,
+            active: false,
+            launch_path: path.map(str::to_owned),
+            kind: Some("desktop".to_owned()),
+            last_used: None,
+        }
+    }
+
+    #[test]
+    fn inventory_keeps_running_copy_path_and_other_installed_copies() {
+        let apps = merge_app_inventory(
+            vec![inventory_copy(Some("/work/Editor.app"), 42)],
+            vec![
+                inventory_copy(Some("/Applications/Editor.app"), 0),
+                inventory_copy(Some("/work/Editor.app"), 0),
+            ],
+        );
+        assert_eq!(apps.len(), 2);
+        assert_eq!(apps[0].pid, 42);
+        assert_eq!(apps[0].launch_path.as_deref(), Some("/work/Editor.app"));
+        assert_eq!(
+            apps[1].launch_path.as_deref(),
+            Some("/Applications/Editor.app")
+        );
+        assert!(!apps[1].running);
+    }
+
+    #[test]
+    fn inventory_does_not_assign_an_unrelated_installed_path_to_a_process() {
+        let apps = merge_app_inventory(
+            vec![inventory_copy(None, 42)],
+            vec![inventory_copy(Some("/Applications/Editor.app"), 0)],
+        );
+        assert_eq!(apps.len(), 2);
+        assert_eq!(apps[0].launch_path, None);
+        assert_eq!(apps[1].pid, 0);
+    }
+
+    #[test]
+    fn inventory_preserves_two_running_copies_with_the_same_bundle_id() {
+        let apps = merge_app_inventory(
+            vec![
+                inventory_copy(Some("/work/A/Editor.app"), 42),
+                inventory_copy(Some("/work/B/Editor.app"), 43),
+            ],
+            vec![],
+        );
+        assert_eq!(apps.len(), 2);
+        assert_ne!(apps[0].launch_path, apps[1].launch_path);
+        assert_eq!(
+            apps.iter().map(|app| app.pid).collect::<Vec<_>>(),
+            vec![42, 43]
+        );
+    }
 
     #[test]
     fn finder_folder_handoff_is_narrowly_selected() {

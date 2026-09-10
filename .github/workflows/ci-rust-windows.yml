@@ -15,6 +15,8 @@ on:
       - "libs/cua-driver/rust/crates/platform-windows/**"
       - "libs/cua-driver/rust/crates/cua-driver-uia/**"
       - "libs/cua-driver/tests/fixtures/**"
+      - "libs/cua-driver/scripts/uninstall*.ps1"
+      - "libs/cua-driver/scripts/tests/uninstall-windows-history-regression.ps1"
       - ".github/workflows/ci-rust-windows.yml"
   push:
     branches: [main]
@@ -31,6 +33,8 @@ on:
       - "libs/cua-driver/rust/crates/platform-windows/**"
       - "libs/cua-driver/rust/crates/cua-driver-uia/**"
       - "libs/cua-driver/tests/fixtures/**"
+      - "libs/cua-driver/scripts/uninstall*.ps1"
+      - "libs/cua-driver/scripts/tests/uninstall-windows-history-regression.ps1"
       - ".github/workflows/ci-rust-windows.yml"
   workflow_dispatch:
 
@@ -98,6 +102,17 @@ jobs:
         run: "cargo test -p platform-windows history::tests:: --lib --locked"
       - name: Validate Windows Computer History uninstall ordering
         run: .\libs\cua-driver\scripts\tests\uninstall-windows-history-regression.ps1
+      - name: Verify public uninstall validation modes without removing an installation
+        shell: pwsh
+        run: |
+          $normal = & pwsh -NoProfile -File .\libs\cua-driver\scripts\uninstall.ps1 -ValidateOnly
+          if ($LASTEXITCODE -ne 0 -or $normal -notcontains "history=preserve") {
+            throw "Normal uninstall must report history preservation"
+          }
+          $purge = & pwsh -NoProfile -File .\libs\cua-driver\scripts\uninstall.ps1 -ValidateOnly -Purge
+          if ($LASTEXITCODE -ne 0 -or $purge -notcontains "history=purge") {
+            throw "Explicit purge must reach the source-product uninstaller"
+          }
       - name: Prove unknown app launch stays bounded and responsive
         working-directory: libs/cua-driver/rust
         run: "cargo test -p cua-driver --test protocol_tools_call_test launch_unknown_app_is_bounded_and_keeps_mcp_session_responsive --locked -- --exact --nocapture"

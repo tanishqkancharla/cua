@@ -30,7 +30,15 @@ def copy_release_sources(destination: Path) -> None:
 
 
 def test_current_release_versions_agree():
-    validate(REPO_ROOT, "all")
+    validate(REPO_ROOT, "all", driver_installation="source")
+
+
+def test_source_build_still_rejects_package_version_drift(tmp_path: Path):
+    copy_release_sources(tmp_path)
+    package = tmp_path / "libs/cua-driver/python/pyproject.toml"
+    package.write_text(re.sub(r'^version = "[^"]+"', 'version = "9.9.9"', package.read_text(), count=1, flags=re.MULTILINE))
+    with pytest.raises(VersionError, match="python/pyproject.toml=9.9.9"):
+        validate(tmp_path, "driver", driver_installation="source")
 
 
 def test_version_drift_fails_with_the_source_name(tmp_path: Path):
@@ -59,7 +67,9 @@ def set_driver_installer_versions(
         )
     )
     powershell = root / "libs/cua-driver/scripts/install.ps1"
-    powershell_source = powershell.read_text()
+    # Historical release-mode input. The current OpenSky public installer is a
+    # source-build wrapper and intentionally has no baked download version.
+    powershell_source = '$Script:CuaDriverRsBakedVersion = "0.0.0" # published-installer-version\n'
     powershell.write_text(
         re.sub(
             r'^\$Script:CuaDriverRsBakedVersion\s*=\s*"[^"]+"',

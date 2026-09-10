@@ -201,20 +201,7 @@ unsafe extern "C" fn shutdown_cb(_ctx: *mut c_void) {
 /// `std::process::exit` when it finishes, which tears down NSApp at
 /// the same time.
 pub fn run_appkit_main_loop() {
-    use objc2::runtime::AnyObject;
-    use objc2::{class, msg_send};
-
-    let _mtm = objc2_foundation::MainThreadMarker::new()
-        .expect("run_appkit_main_loop must be called from the main thread");
-    unsafe {
-        let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
-        // Accessory policy: no Dock icon, no menu bar. Keeps the
-        // daemon out of the user's application switcher, same as
-        // the cursor overlay's NSApp setup.
-        let _: bool = msg_send![app, setActivationPolicy: 1i64];
-        let _: () = msg_send![app, finishLaunching];
-        let _: () = msg_send![app, run];
-    }
+    crate::apps::run_main_loop();
 }
 
 // ── Factory ──────────────────────────────────────────────────────────────

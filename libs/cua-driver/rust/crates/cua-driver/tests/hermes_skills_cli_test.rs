@@ -12,8 +12,8 @@ mod unix {
         let driver_home = root.path().join("driver");
         let hermes_home = root.path().join("hermes-profile");
         let hermes_skills = hermes_home.join("skills");
-        let local_skill = driver_home.join("skills").join("cua-driver");
-        let hermes_link = hermes_skills.join("cua-driver");
+        let local_skill = driver_home.join("skills").join("opensky-driver");
+        let hermes_link = hermes_skills.join("opensky-driver");
 
         fs::create_dir_all(&hermes_skills).expect("create Hermes skills directory");
         fs::create_dir_all(&local_skill).expect("create local skill directory");
