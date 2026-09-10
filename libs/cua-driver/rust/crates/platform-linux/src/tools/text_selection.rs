@@ -145,9 +145,9 @@ impl Tool for SelectTextTool {
                 None => crate::atspi::select_text(&request),
             }
         }).await {
-            Ok(Ok(range)) => ToolResult::text("Selected the requested live text range and verified read-back.")
+            Ok(Ok(selection)) => ToolResult::text("Selected the requested live text range and verified read-back.")
                 .with_structured(json!({"status":"completed","verified":true,"path":"atspi_text",
-                    "range":{"start":range.start,"end":range.end,"unit":"unicode_scalar"}})),
+                    "range":{"start":selection.range.start,"end":selection.range.end,"unit":selection.unit.name()}})),
             Ok(Err(error)) if !error.mutation_submitted => refused(error.message),
             Ok(Err(error)) => ToolResult::error(error.message).with_structured(json!({
                 "status":"partial","verified":false,"mutation_submitted":true,

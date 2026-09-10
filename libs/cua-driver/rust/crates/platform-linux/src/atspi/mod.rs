@@ -489,6 +489,9 @@ impl std::error::Error for ClickActionUnavailable {}
 /// Exact live text range/caret selection; no keyboard or pointer fallback.
 pub fn select_text(
     request: &crate::text_selection::SelectionRequest,
-) -> std::result::Result<crate::text_selection::TextRange, crate::text_selection::SelectionFailure> {
+) -> std::result::Result<
+    crate::text_selection::SelectionResult,
+    crate::text_selection::SelectionFailure,
+> {
     native::select_text(request)
 }

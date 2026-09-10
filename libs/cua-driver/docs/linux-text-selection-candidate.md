@@ -16,8 +16,8 @@ snapshot. Optional adjacent `prefix` and `suffix` disambiguate occurrences.
 The optional `session` follows the existing runtime convention.
 
 Success has `status: completed`, `verified: true`, `path: atspi_text`, and a
-`range` with `start`, `end`, and `unit: unicode_scalar`. Offsets are local to the
-live element, not the document or a UTF-8/UTF-16 string representation.
+`range` with `start`, `end`, and `unit` (`unicode_scalar` or `utf16`). Offsets
+are local to the live element in the verified toolkit unit, never UTF-8 bytes.
 
 A pre-mutation failure is a refusal. Existing token validation errors retain
 their typed refusal codes. A failure after the single native mutation is
@@ -37,8 +37,13 @@ selection before continuing. A timed-out operation is never replayed.
 - These checks are not an atomic transaction with an external application.
   A UI change can race the last check; the token format also identifies a
   snapshot ordinal rather than a persistent AT-SPI object identity.
-- Text must be at most 1,000,000 Unicode scalars. A toolkit whose character count
-  disagrees with live Unicode scalar text is refused rather than guessed.
+- The reported Text character count is bounded to 1,000,000. Its exact match
+  against the live scalar count or UTF-16 count selects the candidate unit;
+  BMP-only text is equivalent and reported as unicode_scalar. Any other count
+  is refused with reported/scalar/UTF-16 counts in the diagnostic.
+- Before mutation, GetText at the full matched offsets must return exactly the
+  requested substring in the chosen unit. Caret modes collapse that span only
+  after this check. A count match alone never authorizes selection.
 - At most one existing selection is supported. Caret placement must read back
   a collapsed/absent selection; a toolkit that retains an unrelated selection
   produces an uncertain result without a second mutation to remove it.
@@ -74,3 +79,15 @@ The tool returns its explicit verified-range result, not the separate shared
 Offline core checks pass: 41 authorization/session-authorization tests, the new
 window-scope test, the existing origin-bypass manifest test (now including
 selection), and the existing token-capability inventory test.
+
+## Toolkit offset candidate
+
+The real SELECT-L01 run on 00fb reached native Text but refused because its
+reported count differed from the live scalar count. UTF-16 is a hypothesis for
+that toolkit, not yet a verified cause. This candidate admits only an exact
+scalar/UTF-16 count match plus the native substring probe described above.
+Five pure tests pass, including emoji, combining marks, explicit unit selection,
+unknown-count rejection, context disambiguation and unit-correct caret edges.
+Linux compilation and the repeated saved-document test remain required before
+claiming that this resolves the observed refusal. No guard or replay rule was
+removed.

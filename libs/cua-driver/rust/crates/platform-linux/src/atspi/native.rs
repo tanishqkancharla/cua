@@ -2200,9 +2200,13 @@ pub fn resolve_indexed_click_target(pid: u32, idx: usize, xid: u64) -> Result<In
 /// including negative replies and read-back failures: callers must observe.
 pub fn select_text(
     request: &crate::text_selection::SelectionRequest,
-) -> std::result::Result<crate::text_selection::TextRange, crate::text_selection::SelectionFailure>
-{
-    use crate::text_selection::{matching_range, SelectionFailure, SelectionKind};
+) -> std::result::Result<
+    crate::text_selection::SelectionResult,
+    crate::text_selection::SelectionFailure,
+> {
+    use crate::text_selection::{
+        matching_range, OffsetUnit, SelectionFailure, SelectionKind, SelectionResult,
+    };
     let submitted = std::cell::Cell::new(false);
     let result = bounded(
         async {
@@ -2254,19 +2258,20 @@ pub fn select_text(
             let live = call(text.get_text(0, count))
                 .await
                 .ok_or_else(|| anyhow!("Text content read timed out"))??;
-            if live.chars().count() != count as usize {
-                return Err(anyhow!(
-                    "Text character count disagrees with live content; observe again"
-                ));
-            }
-            let range = matching_range(
+            let unit = OffsetUnit::infer(&live, count).map_err(anyhow::Error::msg)?;
+            // Always resolve a full noncollapsed match. Caret mode collapses
+            // only after the native substring probe confirms toolkit offsets.
+            let scalar_match = matching_range(
                 &live,
                 &request.text,
                 request.prefix.as_deref(),
                 request.suffix.as_deref(),
-                request.kind,
+                SelectionKind::Text,
             )
             .map_err(anyhow::Error::msg)?;
+            let matched = unit
+                .convert(&live, scalar_match)
+                .map_err(anyhow::Error::msg)?;
             let selections = call(text.get_n_selections())
                 .await
                 .ok_or_else(|| anyhow!("selection count timed out"))??;
@@ -2291,6 +2296,15 @@ pub fn select_text(
             let latest_count = call(text.character_count())
                 .await
                 .ok_or_else(|| anyhow!("Text character count recheck timed out"))??;
+            let matched_text = call(text.get_text(matched.start, matched.end))
+                .await
+                .ok_or_else(|| anyhow!("Text offset-unit substring verification timed out"))??;
+            if matched_text != request.text {
+                return Err(anyhow!(
+                    "Text offset-unit substring verification failed before mutation (unit={})",
+                    unit.name()
+                ));
+            }
             let latest_selections = call(text.get_n_selections())
                 .await
                 .ok_or_else(|| anyhow!("selection count recheck timed out"))??;
@@ -2304,6 +2318,7 @@ pub fn select_text(
             }
             // Use the standard Text D-Bus method names through its existing
             // proxy; no new transport, external command, or EditableText write.
+            let range = matched.for_kind(request.kind);
             submitted.set(true);
             let accepted: bool = match request.kind {
                 SelectionKind::Text if selections == 0 => {
@@ -2369,7 +2384,7 @@ pub fn select_text(
                     "element text changed during selection; inspect before continuing"
                 ));
             }
-            Ok(range)
+            Ok(SelectionResult { range, unit })
         },
         || Err(anyhow!("select_text operation timed out")),
     );
