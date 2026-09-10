@@ -894,9 +894,6 @@ impl Tool for GetWindowStateTool {
                     content.push(cua_driver_core::protocol::Content::text(
                         header + &tr.tree_markdown,
                     ));
-                    if !observation_only {
-                        state.element_cache.update(pid, xid, &tr.nodes);
-                    }
                     structured["element_count"] = json!(count);
                     // AT-SPI's current bounded walker does not surface an
                     // exhaustive-walk proof. Keep negative existence unknown.
@@ -915,6 +912,10 @@ impl Tool for GetWindowStateTool {
                             tr.nodes.iter().filter_map(|node| node.element_index),
                         )
                     });
+
+                    if let Some(snapshot_id) = snapshot_id {
+                        state.element_cache.update(pid, xid, snapshot_id, &tr.nodes);
+                    }
 
                     // Structured `elements` array: one entry per actionable node.
                     // Shape: `{element_index, element_token, role, label,
@@ -2581,18 +2582,30 @@ impl ClickTool {
         pid: u32,
         idx: usize,
         xid_hint: Option<u64>,
+        token: String,
         button: u8,
         count: usize,
         modifiers: Vec<String>,
         delivery: crate::input::delivery::DeliveryMode,
         cursor_id: String,
     ) -> ToolResult {
+        let Some(xid) = xid_hint.filter(|xid| *xid != 0) else {
+            return ToolResult::error("Indexed click requires an observed exact X11 window");
+        };
+        let identity = match self
+            .state
+            .element_cache
+            .observed_identity(pid, xid, idx, &token)
+        {
+            Ok(identity) => identity,
+            Err(error) => {
+                return ToolResult::error(error).with_structured(
+                    json!({"status":"refused", "refusal":{"code":"stale_element_token"}}),
+                )
+            }
+        };
         let resolved = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
-            let xid = xid_hint
-                .or_else(|| crate::x11::list_windows(Some(pid)).first().map(|w| w.xid))
-                .filter(|xid| *xid != 0)
-                .ok_or_else(|| anyhow::anyhow!("No exact X11 window for pid {pid}"))?;
-            let target = crate::atspi::resolve_indexed_click_target(pid, idx, xid)?;
+            let target = crate::atspi::resolve_indexed_click_target(pid, idx, xid, &identity)?;
             let center = target
                 .screen_bounds()
                 .ok()
@@ -2614,7 +2627,15 @@ impl ClickTool {
             );
             reveal_pointer_action_for(&self.state, &cursor_id, sx, sy, true).await;
         }
+        // Overlay awaits must not let a newer observation/invalidation revive
+        // this request against a different snapshot. No input has occurred yet.
+        if let Err(error) = cua_driver_core::element_token::global().resolve(pid as i32, &token) {
+            return ToolResult::error(error).with_structured(
+                json!({"status":"refused", "refusal":{"code":"stale_element_token"}}),
+            );
+        }
         let result = tokio::task::spawn_blocking(move || -> anyhow::Result<ToolResult> {
+            target.verify_live()?;
             let action = target.perform_action(modifiers.is_empty() && button == 1 && count == 1);
             let (path, suspected_noop) = match action {
                 Ok((_, suspected_noop)) => ("ax", suspected_noop),
@@ -2885,11 +2906,26 @@ impl Tool for ClickTool {
 
         if let Some(idx) = elem_idx_resolved {
             if !crate::wayland::is_wayland() {
+                // Core admission above requires either a token or a snapshot
+                // plus index. Never replace an absent/stale snapshot with the
+                // cache's latest entry or a live ordinal.
+                let token = match element_token_arg {
+                    Some(token) => token,
+                    None => match args.opt_str("snapshot_id") {
+                        Some(snapshot) => format!("{snapshot}:{idx}"),
+                        None => {
+                            return ToolResult::error(
+                                "click: snapshot_id required for element_index",
+                            )
+                        }
+                    },
+                };
                 return self
                     .click_indexed_x11(
                         pid,
                         idx,
                         window_id_resolved,
+                        token,
                         button,
                         count,
                         modifiers,
