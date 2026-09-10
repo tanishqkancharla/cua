@@ -61,3 +61,16 @@ matches, both caret modes, stale tokens, sibling windows and modal isolation.
 Compare resulting document text and formatting, and verify no unrelated input
 or window activation. A success in pure matching tests does not establish
 native selection support in LibreOffice.
+
+## Risk inventory integration
+
+`select_text` is reviewed as R1 reversible local control through the existing
+active `desktop_input` adapter. It retains the canonical own-process refusal,
+window capture-scope restrictions and browser-origin manifest bypass exclusion.
+It advertises `accessibility.element_tokens`. Unknown tools remain denied.
+The tool returns its explicit verified-range result, not the separate shared
+`ActionResult` schema; no generated cross-platform typed contract is claimed.
+
+Offline core checks pass: 41 authorization/session-authorization tests, the new
+window-scope test, the existing origin-bypass manifest test (now including
+selection), and the existing token-capability inventory test.

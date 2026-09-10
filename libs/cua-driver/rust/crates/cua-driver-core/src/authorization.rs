@@ -282,6 +282,7 @@ const DESKTOP_INPUT_OPERATIONS: &[&str] = &[
     "press_key",
     "hotkey",
     "set_value",
+    "select_text",
     "bring_to_front",
     "close_window",
     "set_window_frame",
@@ -893,6 +894,7 @@ pub fn advertised_risk_for(tool: &str) -> RiskAssessment {
         | "press_key"
         | "hotkey"
         | "set_value"
+        | "select_text"
         | "invoke_menu"
         | "launch_app"
         | "bring_to_front"
@@ -1193,6 +1195,7 @@ fn enforce_hard_invariants(
             | "press_key"
             | "hotkey"
             | "set_value"
+            | "select_text"
             | "kill_app"
             | "bring_to_front"
             | "close_window"
@@ -1555,6 +1558,32 @@ mod tests {
         assert_eq!(
             adapter.profile_behavior.for_mode(PermissionMode::Bounded),
             ModeBehavior::AllowWithoutGrant
+        );
+    }
+
+    #[test]
+    fn select_text_is_reviewed_desktop_input_with_existing_guards() {
+        let args = serde_json::json!({"pid": 42, "window_id": 7, "text": "selection"});
+        let risk = classify_tool_call("select_text", &args);
+        assert_eq!(risk.class, RiskClass::R1);
+        assert_eq!(risk.enforcement, RiskEnforcement::Active);
+        assert_eq!(advertised_risk_for("select_text").class, RiskClass::R1);
+        assert_eq!(
+            enforcement_adapters_for_call("select_text", &args)
+                .iter()
+                .map(|adapter| adapter.id)
+                .collect::<Vec<_>>(),
+            vec!["desktop_input"]
+        );
+        let error = enforce_hard_invariants(
+            "select_text",
+            &serde_json::json!({"pid": std::process::id()}),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("authorization process"));
+        assert_eq!(
+            advertised_risk_for("select_text_unreviewed").class,
+            RiskClass::Unclassified
         );
     }
 

@@ -322,6 +322,7 @@ pub fn default_capabilities_for(tool_name: &str) -> Vec<String> {
         // contract is intentionally narrower than `type_text`'s. It
         // still accepts `element_token`, hence the tokens claim.
         "type_text_chars" => &["input.keyboard.type", "accessibility.element_tokens"],
+        "select_text" => &["accessibility.element_tokens"],
         "set_value" => &[
             // Bulk-set an editable field's value — semantically a
             // typing surface, even though the implementation skips
@@ -4942,6 +4943,7 @@ mod capability_tests {
         "press_key",
         "hotkey",
         "set_value",
+        "select_text",
         // screen
         "zoom",
         "get_screen_size",
@@ -5271,6 +5273,7 @@ mod capability_tests {
             "type_text_chars",
             "press_key",
             "set_value",
+            "select_text",
             // get_window_state emits the tokens — same capability
             // claim, from the other side of the contract.
             "get_window_state",
