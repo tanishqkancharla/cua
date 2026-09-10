@@ -719,6 +719,7 @@ class TestCuaDriverReleaseWiring(unittest.TestCase):
                     "mouse_button_up",
                     "mouse_drag",
                     "parallel_mouse_drag",
+                    "select_text",
                 ]
             },
         )
