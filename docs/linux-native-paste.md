@@ -89,8 +89,9 @@ that negotiate only after input are still unsupported. INCR, rich-text input,
 clipboard managers, modal focus and delayed/large transfers still require
 implementation or real desktop evidence. Restored data remains available only
 while the driver process and its X11 connection remain alive. The exact-candidate
-Linux canonical desktop gate passed as recorded below. Full public-SDK clipboard
-preservation and race controls remain separate acceptance gaps.
+Linux canonical desktop gate passed as recorded below. Public-SDK clipboard
+preservation and empty-clipboard checks also pass as recorded below; concurrent
+ownership remains a separate acceptance gap.
 
 
 ### Focus and concurrent ownership controls
@@ -136,8 +137,24 @@ preserved the intended document plus the single subsequent sibling edit
 passed. Local evidence is retained in
 `work/native-paste-release-sdk-check.json` and the original worker artifacts.
 
-These passes do not establish full public-SDK clipboard preservation/races,
-empty-clipboard or modal behavior, delayed/large transfers, clipboard-manager
-compatibility, or other platforms. The pull request remains draft for those
-documented gaps. This documentation update changes no executable input to the
-certified build or tests.
+Two additional public-SDK cases passed on those same release bytes with runtime
+`50b9b22bdc720031364ad394ef6063b83baf745b` and fixture commit
+`90614b7bbd8898de0ae9ea89291f9a6ea6548e9c` in the OpenSky repository:
+PASTE-L02 preserved all five original clipboard formats, including exact
+property types, 8/16/32-bit widths and bytes (9.38 seconds); PASTE-L03 restored
+an initially empty clipboard (9.29 seconds). Both saved the requested two lines
+with surrounding paragraphs unchanged. A separate real X11 client read the
+clipboard after the public paste returned. Owned app, external clipboard owner,
+temporary document and container cleanup were verified. The worker run is
+`sdk-clipboard-preservation-v4-01`; independent evidence is retained in
+`work/sdk-clipboard-v4-outcome-review.json`.
+
+The original preservation attempt remains a failed test: text selection refused
+before paste. The passing test refreshes the public observation after external
+clipboard setup, then makes one selection attempt. This does not establish why
+the original target became ineffective or resolve stale-element behavior.
+
+These passes do not establish public-SDK concurrent ownership, modal behavior,
+delayed/large transfers, clipboard-manager compatibility, or other platforms.
+The pull request remains draft for those documented gaps. This documentation
+update changes no executable input to the certified build or tests.
