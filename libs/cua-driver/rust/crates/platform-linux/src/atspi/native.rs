@@ -2312,132 +2312,11 @@ impl IndexedClickTarget {
         )
     }
 
-    /// Focus the exact Calc cell, with no marked range to preserve or extend.
-    /// SelectChild only marks cells in LibreOffice; it does not move the typing
-    /// cursor. Only pre-input capability misses permit pointer fallback.
-    async fn focus_table_cell(&self) -> Result<(String, bool)> {
-        let target = &self.visited[self.target_position];
-        let identity = target
-            .identity
-            .as_ref()
-            .ok_or_else(|| anyhow!("cell identity missing"))?;
-        let conn = shared_connection().await?;
-        let proxies = target.acc.proxies().await?;
-        let cell = proxies.table_cell().await.map_err(|error| {
-            super::ClickActionUnavailable(format!("TableCell unavailable before input: {error}"))
-        })?;
-        let component = proxies.component().await.map_err(|error| {
-            super::ClickActionUnavailable(format!("Component unavailable before input: {error}"))
-        })?;
-        let (row, column) = cell.position().await?;
-        if row < 0 || column < 0 || cell.row_span().await? != 1 || cell.column_span().await? != 1 {
-            return Err(super::ElementClickNeedsForeground.into());
-        }
-        let raw_table = RawObjectRef::from_atspi(&cell.table().await?)
-            .ok_or_else(|| anyhow!("cell table identity missing"))?;
-        let mut owners = std::collections::HashMap::new();
-        let table_identity = identity_ref(conn, &raw_table, &mut owners)
-            .await
-            .ok_or_else(|| anyhow!("cell table owner unavailable"))?;
-        // Require the table to belong to the same observed exact window.
-        let table_node = self
-            .visited
-            .iter()
-            .find(|node| {
-                node.identity.as_ref().is_some_and(|id| {
-                    id.bus_name == table_identity.name
-                        && id.path == table_identity.path
-                        && id.frame_bus_name == identity.frame_bus_name
-                        && id.frame_path == identity.frame_path
-                })
-            })
-            .ok_or_else(|| anyhow!("cell table does not belong to the observed window"))?;
-        let table_proxies = table_node.acc.proxies().await?;
-        let table = table_proxies.table().await?;
-        let selection = table_proxies.selection().await.map_err(|error| {
-            super::ClickActionUnavailable(format!("Selection unavailable before input: {error}"))
-        })?;
-        // GrabFocus moves the cursor but does not clear a marked range. Preserve
-        // existing range-click semantics through the original pointer route.
-        if selection.n_selected_children().await? != 0 {
-            return Err(super::ElementClickNeedsForeground.into());
-        }
-        let referenced = RawObjectRef::from_atspi(&table.get_accessible_at(row, column).await?)
-            .ok_or_else(|| anyhow!("table cell reference missing"))?;
-        let referenced = identity_ref(conn, &referenced, &mut owners)
-            .await
-            .ok_or_else(|| anyhow!("table cell owner unavailable"))?;
-        if referenced.name != identity.bus_name || referenced.path != identity.path {
-            return Err(anyhow!(
-                "table position no longer identifies the observed cell"
-            ));
-        }
-        if !crate::x11::window_belongs_to_pid(self.xid, self.pid)
-            || !crate::input::is_x11_target_already_focused(self.xid)?
-        {
-            return Err(anyhow!("exact window focus changed before table selection"));
-        }
-        if !component.grab_focus().await? {
-            return Err(anyhow!("cell rejected focus; input must not be replayed"));
-        }
-        let state = target.acc.get_state().await?;
-        if state.contains(State::Defunct)
-            || !state.contains(State::Focused)
-            || selection.n_selected_children().await? != 0
-            || !crate::input::is_x11_target_already_focused(self.xid)?
-        {
-            return Err(anyhow!(
-                "requested cell focus was not established; input must not be replayed"
-            ));
-        }
-        Ok(("cell_focus".to_owned(), false))
-    }
-
-    fn is_calc_cell(&self) -> bool {
-        let target = &self.visited[self.target_position];
-        if target.role != "table cell"
-            || !std::fs::read_link(format!("/proc/{}/exe", self.pid))
-                .ok()
-                .and_then(|path| path.file_name().map(|name| name == "soffice.bin"))
-                .unwrap_or(false)
-        {
-            return false;
-        }
-        // Follow actual ancestors, not a preceding sibling from another sheet
-        // or a Writer/Impress table sharing the same soffice process.
-        let mut depth = target.depth;
-        for ancestor in self.visited[..self.target_position].iter().rev() {
-            if ancestor.depth < depth {
-                if ancestor.frame_ordinal != target.frame_ordinal {
-                    return false;
-                }
-                if ancestor.role == "document spreadsheet" {
-                    return true;
-                }
-                depth = ancestor.depth;
-            }
-        }
-        false
-    }
-
     /// Only ClickActionUnavailable and ElementClickNeedsForeground prove that
     /// no action was submitted. Other errors (including timeout/doAction
     /// failures) must not trigger a second pointer mutation.
     pub fn perform_action(&self, allow_activation: bool) -> Result<(String, bool)> {
         let target = &self.visited[self.target_position];
-        // LibreOffice can change its Screen coordinate convention after an edit.
-        // Use the retained cell's table identity rather than guessing an offset.
-        // Modified/right/double clicks retain their existing pointer semantics.
-        if allow_activation
-            && self.is_calc_cell()
-            && crate::input::is_x11_target_already_focused(self.xid)?
-        {
-            return bounded(self.focus_table_cell(), || {
-                Err(anyhow!(
-                    "table cell focus timed out; input must not be replayed"
-                ))
-            });
-        }
         if self.needs_foreground_pointer() {
             return Err(super::ElementClickNeedsForeground.into());
         }
@@ -3737,6 +3616,33 @@ fn component_screen_rebase(
     candidate
 }
 
+/// Calc may supply a grid-window Screen translation that differs from the
+/// X11 client origin. Suppress only axes already translated by that provider;
+/// equal Screen/Window axes retain the existing compatibility correction.
+fn calc_screen_rebase(fallback: (i32, i32), screen: (i32, i32), window: (i32, i32)) -> (i32, i32) {
+    (
+        if screen.0 != window.0 { 0 } else { fallback.0 },
+        if screen.1 != window.1 { 0 } else { fallback.1 },
+    )
+}
+
+fn has_spreadsheet_ancestor(visited: &[Visited<'_>], position: usize) -> bool {
+    let target = &visited[position];
+    let mut depth = target.depth;
+    for ancestor in visited[..position].iter().rev() {
+        if ancestor.depth < depth {
+            if ancestor.frame_ordinal != target.frame_ordinal {
+                return false;
+            }
+            if ancestor.role == "document spreadsheet" {
+                return true;
+            }
+            depth = ancestor.depth;
+        }
+    }
+    false
+}
+
 fn rebase_renderer_window_offset(
     mut offset: (i32, i32),
     frame_origin: Option<(i32, i32)>,
@@ -3891,7 +3797,16 @@ async fn element_bounds_for_visited(
         dlog!("element bounds: SCREEN coords with candidate X11 frame rebase ({ox},{oy})");
     }
 
-    let action_nodes: Vec<&Visited> = visited.iter().filter(|v| is_indexable(v)).collect();
+    let calc_process = screen_rebase.is_some()
+        && std::fs::read_link(format!("/proc/{pid}/exe"))
+            .ok()
+            .and_then(|path| path.file_name().map(|name| name == "soffice.bin"))
+            .unwrap_or(false);
+    let action_nodes: Vec<(usize, &Visited)> = visited
+        .iter()
+        .enumerate()
+        .filter(|(_, node)| is_indexable(node))
+        .collect();
     // Hard wall-clock budget for the whole collection: on pathological
     // trees individual D-Bus calls each burn up to CALL_TIMEOUT (geany's
     // unrealized nodes did exactly that). Return whatever was collected
@@ -3900,7 +3815,7 @@ async fn element_bounds_for_visited(
     // made PX targeting depend on DOM order.
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
     let mut out = Vec::with_capacity(action_nodes.len());
-    for (idx, node) in action_nodes.iter().enumerate() {
+    for (idx, (position, node)) in action_nodes.iter().enumerate() {
         if element_index.is_some_and(|target| idx != target)
             || frame_ordinal.is_some_and(|frame| node.frame_ordinal != frame)
         {
@@ -3944,15 +3859,38 @@ async fn element_bounds_for_visited(
                 screen_rebase.filter(|delta| *delta != (0, 0)),
                 screen_client_origin,
             ) {
+                let calc_cell = calc_process
+                    && node.role == "table cell"
+                    && has_spreadsheet_ancestor(visited, *position);
                 let window_origin = match call(comp.get_extents(CoordType::Window)).await {
                     Some(Ok((wx, wy, ww, wh)))
-                        if wx > -16384 && wy > -16384 && ww > 1 && wh > 1 =>
+                        if wx > -16384
+                            && wy > -16384
+                            && ww > 1
+                            && wh > 1
+                            && (!calc_cell || (ww == w && wh == h)) =>
                     {
                         Some((wx, wy))
                     }
                     _ => None,
                 };
-                component_screen_rebase(candidate, client_origin, (x, y), window_origin)
+                let fallback =
+                    component_screen_rebase(candidate, client_origin, (x, y), window_origin);
+                if calc_cell {
+                    let Some(window) = window_origin else {
+                        continue;
+                    };
+                    // Do not compare origins across a changing layout. Omit
+                    // unstable bounds before any pointer input is submitted.
+                    if !matches!(call(comp.get_extents(CoordType::Screen)).await,
+                        Some(Ok(bounds)) if bounds == (x, y, w, h))
+                    {
+                        continue;
+                    }
+                    calc_screen_rebase(fallback, (x, y), window)
+                } else {
+                    fallback
+                }
             } else {
                 (offset_x, offset_y)
             };
@@ -4073,6 +4011,32 @@ mod frame_correlation_tests {
 
 #[cfg(test)]
 mod coord_tests {
+    #[test]
+    fn calc_cell_translation_is_not_applied_twice() {
+        // Exact observed first/post-edit geometry; public SDK tests establish
+        // the physical click and saved-document behavior independently.
+        assert_eq!(
+            super::calc_screen_rebase((0, 17), (213, 363), (213, 363)),
+            (0, 17)
+        );
+        assert_eq!(
+            super::calc_screen_rebase((0, 17), (213, 387), (213, 363)),
+            (0, 0)
+        );
+        assert_eq!(
+            super::calc_screen_rebase((200, 17), (213, 387), (213, 363)),
+            (200, 0)
+        );
+        assert_eq!(
+            super::calc_screen_rebase((200, 100), (413, 463), (213, 363)),
+            (0, 0)
+        );
+        assert_eq!(
+            super::component_screen_rebase((0, 17), (0, 17), (213, 387), Some((213, 363))),
+            (0, 17)
+        );
+    }
+
     use super::parse_gtk_frame_extents;
     use super::{
         activation_index, before_snapshot_deadline, combine_wayland_content_offsets,
