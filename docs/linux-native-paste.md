@@ -88,9 +88,9 @@ currently requires eager TARGETS negotiation before sending the chord; apps
 that negotiate only after input are still unsupported. INCR, rich-text input,
 clipboard managers, modal focus and delayed/large transfers still require
 implementation or real desktop evidence. Restored data remains available only
-while the driver process and its X11 connection remain alive. Exact-candidate
-canonical desktop regressions remain a promotion gate; ordinary CI and these
-focused checks do not replace that gate.
+while the driver process and its X11 connection remain alive. The exact-candidate
+Linux canonical desktop gate passed as recorded below. Full public-SDK clipboard
+preservation and race controls remain separate acceptance gaps.
 
 
 ### Focus and concurrent ownership controls
@@ -118,7 +118,26 @@ accepted oracle permits only unchanged text, the intended text once, or the
 known newer HTML once when delivery is explicitly uncertain. It does not accept
 arbitrary document changes or relabel the uncertain operation as success.
 
-Canonical shared/native/capture and local installer checks are running at
+Canonical shared/native/capture and local installer checks passed at
 `ae1577dd1faebd55385b16fe1a9c5453dceec4ee` in
 [CI34650375969](https://github.com/tanishqkancharla/opensky/actions/runs/34650375969).
-This documentation update changes no executable input to that run.
+All 129 unchanged cases passed: 83 shared, 39 native and seven capture cases.
+The local installer built the installed product, served `get_config`, and
+cleaned its owned installation. This is not evidence of a published release.
+
+The release binary from that run has SHA-256
+`84e91eb18e208cf23a234ff685edd468e53aa585112937dcecfe898d9ba75d92`.
+Both public-SDK cases were repeated against these exact bytes on the isolated
+Linux worker, using SDK source `fca4efc369fada4d47d69d8be52459f5ac88be4f`:
+PASTE-L01 saved the requested two lines with both surrounding paragraphs
+unchanged (6.96 seconds); PASTE-G01 rejected the wrong sibling target and
+preserved the intended document plus the single subsequent sibling edit
+(16.72 seconds). Independent saved-ODT reads and owned app/container cleanup
+passed. Local evidence is retained in
+`work/native-paste-release-sdk-check.json` and the original worker artifacts.
+
+These passes do not establish full public-SDK clipboard preservation/races,
+empty-clipboard or modal behavior, delayed/large transfers, clipboard-manager
+compatibility, or other platforms. The pull request remains draft for those
+documented gaps. This documentation update changes no executable input to the
+certified build or tests.
