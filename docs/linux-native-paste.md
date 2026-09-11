@@ -1,7 +1,7 @@
 # Linux native paste
 
-Work in progress. Native OpenSky `App.paste` currently refuses native targets.
-This work adds a real clipboard paste into the exact native window, preserving
+Work in progress. The current frozen OpenSky build refuses native `App.paste`.
+This candidate adds a real clipboard paste into the exact native window, preserving
 the prior clipboard and avoiding overwriting a later copy by another client.
 The user selected Linux-first implementation on the OpenSky Driver fork.
 Issues are disabled on this fork; the linked draft pull request is the scope
@@ -55,3 +55,18 @@ guarantee about every application.
 Run focused primitive and SDK checks first. Before promotion, compile the exact
 candidate and run the relevant canonical desktop regressions. Keep the existing
 V3 popup evaluation source and results unchanged while this work is developed.
+
+## Candidate validation and remaining limits
+
+The actual actor, input helper and tool wrapper compile together with the driver
+core in a local adapter. Core authorization and clipboard recording redaction
+checks pass. These checks do not compile the full Linux platform or exercise a
+desktop. Public SDK typing checks pass; the positive Writer test is not yet run.
+
+Initial implementation supports X11 plain text up to 16 KiB, at most 32 saved
+clipboard formats and 512 KiB total, with direct property transfers only. It
+currently requires eager TARGETS negotiation before sending the chord; apps
+that negotiate only after input are still unsupported. INCR, rich-text input,
+clipboard managers, concurrent-owner behavior and saved-document acceptance
+require real desktop evidence before support is claimed. Restored data remains
+available only while the driver process and its X11 connection remain alive.

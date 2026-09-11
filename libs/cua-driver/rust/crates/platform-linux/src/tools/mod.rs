@@ -8,6 +8,8 @@ use cua_driver_core::tool::ToolRegistry;
 #[cfg(target_os = "linux")]
 mod impl_;
 #[cfg(target_os = "linux")]
+mod native_paste;
+#[cfg(target_os = "linux")]
 pub(crate) mod page;
 #[cfg(target_os = "linux")]
 mod text_selection;

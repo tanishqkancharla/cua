@@ -48,6 +48,8 @@ pub mod installed_apps;
 pub mod capture;
 #[cfg(target_os = "linux")]
 mod clipboard;
+#[cfg(target_os = "linux")]
+mod native_paste;
 
 #[cfg(target_os = "linux")]
 pub mod atspi;

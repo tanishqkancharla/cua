@@ -14,6 +14,8 @@
 /// Shared `delivery_mode` contract (background|foreground) — mirrors macOS
 /// `tools::DeliveryMode` and Windows `input::delivery`.
 pub mod delivery;
+mod native_paste;
+pub(crate) use native_paste::{send_paste_xtest_checked, validate_paste_xtest};
 
 use anyhow::{anyhow, bail, Context, Result};
 use evdev::uinput::VirtualDevice;
@@ -2193,7 +2195,7 @@ pub fn try_type_text_xtest_already_focused(xid: u64, text: &str) -> Result<bool>
     send_type_text_xtest_checked(text, Some(target))
 }
 
-fn x11_target_already_focused(
+pub(crate) fn x11_target_already_focused(
     conn: &RustConnection,
     root: Window,
     active_atom: Atom,

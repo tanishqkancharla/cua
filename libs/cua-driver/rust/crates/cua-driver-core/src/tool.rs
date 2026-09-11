@@ -323,6 +323,11 @@ pub fn default_capabilities_for(tool_name: &str) -> Vec<String> {
         // still accepts `element_token`, hence the tokens claim.
         "type_text_chars" => &["input.keyboard.type", "accessibility.element_tokens"],
         "select_text" => &["accessibility.element_tokens"],
+        "native_paste" => &[
+            "input.keyboard.press",
+            "clipboard.read",
+            "clipboard.write.text",
+        ],
         "set_value" => &[
             // Bulk-set an editable field's value — semantically a
             // typing surface, even though the implementation skips
@@ -1961,7 +1966,13 @@ impl ToolRegistry {
         {
             return Ok(());
         }
-        let (operation, content_kind, summary) = if tool_name == "clipboard_read" {
+        let (operation, content_kind, summary) = if tool_name == "native_paste" {
+            (
+                "read_and_write",
+                "supported_formats",
+                "Allow Cua to preserve the current clipboard formats and temporarily replace them for native paste",
+            )
+        } else if tool_name == "clipboard_read" {
             (
                 "read",
                 if args.get("include_text").and_then(Value::as_bool) == Some(true) {
@@ -2568,6 +2579,7 @@ fn is_physical_desktop_action(tool: &str) -> bool {
             | "hotkey"
             | "set_value"
             | "select_text"
+            | "native_paste"
             | "bring_to_front"
             | "close_window"
             | "set_window_frame"
@@ -4727,7 +4739,7 @@ fn recording_args_for(tool_name: &str, args: &Value) -> Value {
                     );
                 }
             }
-            "clipboard_write" => {
+            "clipboard_write" | "native_paste" => {
                 for field in ["text", "image_path", "file_path"] {
                     if arguments.contains_key(field) {
                         arguments.insert(field.to_owned(), Value::String("[redacted]".to_owned()));
@@ -4879,6 +4891,18 @@ mod capability_tests {
     }
 
     #[test]
+    fn native_paste_recording_keeps_target_without_clipboard_text() {
+        let recorded = recording_args_for(
+            "native_paste",
+            &serde_json::json!({"pid": 42, "window_id": 7, "text": "private clipboard text", "format": "text"}),
+        );
+        assert_eq!(recorded["pid"], 42);
+        assert_eq!(recorded["window_id"], 7);
+        assert_eq!(recorded["format"], "text");
+        assert!(!recorded.to_string().contains("private clipboard text"));
+    }
+
+    #[test]
     fn clipboard_write_recording_args_are_content_free() {
         let recorded = recording_args_for(
             "clipboard_write",
@@ -4944,6 +4968,7 @@ mod capability_tests {
         "hotkey",
         "set_value",
         "select_text",
+        "native_paste",
         // screen
         "zoom",
         "get_screen_size",

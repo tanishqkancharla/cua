@@ -283,6 +283,7 @@ const DESKTOP_INPUT_OPERATIONS: &[&str] = &[
     "hotkey",
     "set_value",
     "select_text",
+    "native_paste",
     "bring_to_front",
     "close_window",
     "set_window_frame",
@@ -602,7 +603,7 @@ pub const ENFORCEMENT_ADAPTERS: &[EnforcementAdapterDescriptor] = &[
     },
     EnforcementAdapterDescriptor {
         id: "clipboard",
-        operations: &["clipboard_read", "clipboard_write"],
+        operations: &["clipboard_read", "clipboard_write", "native_paste"],
         state: RiskEnforcement::Active,
         risk_class: RiskClass::R2,
         resource_kind: "system_clipboard",
@@ -767,7 +768,7 @@ pub fn enforcement_adapters_for_call(
         add("desktop_input");
     }
 
-    if matches!(tool, "clipboard_read" | "clipboard_write")
+    if matches!(tool, "clipboard_read" | "clipboard_write" | "native_paste")
         || (tool == "browser_type" && args.get("mode").and_then(Value::as_str) == Some("paste"))
     {
         add("clipboard");
@@ -913,6 +914,7 @@ pub fn advertised_risk_for(tool: &str) -> RiskAssessment {
         // the canonical registry boundary before platform dispatch.
         "zoom"
         | "clipboard_read"
+        | "native_paste"
         | "list_apps"
         | "list_windows"
         | "debug_window_info"
@@ -1196,6 +1198,7 @@ fn enforce_hard_invariants(
             | "hotkey"
             | "set_value"
             | "select_text"
+            | "native_paste"
             | "kill_app"
             | "bring_to_front"
             | "close_window"
@@ -1583,6 +1586,30 @@ mod tests {
         assert!(error.to_string().contains("authorization process"));
         assert_eq!(
             advertised_risk_for("select_text_unreviewed").class,
+            RiskClass::Unclassified
+        );
+    }
+
+    #[test]
+    fn native_paste_requires_both_target_and_clipboard_guards() {
+        let args = serde_json::json!({"pid": 42, "window_id": 7, "text": "line one\nline two"});
+        let risk = classify_tool_call("native_paste", &args);
+        assert_eq!(risk.class, RiskClass::R2);
+        assert_eq!(risk.enforcement, RiskEnforcement::Active);
+        assert_eq!(
+            enforcement_adapters_for_call("native_paste", &args)
+                .iter()
+                .map(|adapter| adapter.id)
+                .collect::<Vec<_>>(),
+            vec!["desktop_input", "clipboard"]
+        );
+        assert!(enforce_hard_invariants(
+            "native_paste",
+            &serde_json::json!({"pid": std::process::id()})
+        )
+        .is_err());
+        assert_eq!(
+            advertised_risk_for("native_paste_unreviewed").class,
             RiskClass::Unclassified
         );
     }
