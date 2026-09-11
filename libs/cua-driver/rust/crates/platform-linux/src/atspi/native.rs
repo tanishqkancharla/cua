@@ -2312,11 +2312,112 @@ impl IndexedClickTarget {
         )
     }
 
+    /// One semantic mutation with identity and exclusive-selection readback.
+    /// No errors from this route permit pointer fallback: even a rejected or
+    /// timed-out SelectChild may have partially changed the selection.
+    async fn select_table_cell(&self) -> Result<(String, bool)> {
+        let target = &self.visited[self.target_position];
+        let identity = target
+            .identity
+            .as_ref()
+            .ok_or_else(|| anyhow!("cell identity missing"))?;
+        let conn = shared_connection().await?;
+        let proxies = target.acc.proxies().await?;
+        let cell = proxies.table_cell().await?;
+        let (row, column) = cell.position().await?;
+        if row < 0 || column < 0 || cell.row_span().await? != 1 || cell.column_span().await? != 1 {
+            return Err(anyhow!("cell does not expose an unmerged table position"));
+        }
+        let raw_table = RawObjectRef::from_atspi(&cell.table().await?)
+            .ok_or_else(|| anyhow!("cell table identity missing"))?;
+        let mut owners = std::collections::HashMap::new();
+        let table_identity = identity_ref(conn, &raw_table, &mut owners)
+            .await
+            .ok_or_else(|| anyhow!("cell table owner unavailable"))?;
+        // Require the table to belong to the same observed exact window.
+        let table_node = self
+            .visited
+            .iter()
+            .find(|node| {
+                node.identity.as_ref().is_some_and(|id| {
+                    id.bus_name == table_identity.name
+                        && id.path == table_identity.path
+                        && id.frame_bus_name == identity.frame_bus_name
+                        && id.frame_path == identity.frame_path
+                })
+            })
+            .ok_or_else(|| anyhow!("cell table does not belong to the observed window"))?;
+        let table_proxies = table_node.acc.proxies().await?;
+        let table = table_proxies.table().await?;
+        let selection = table_proxies.selection().await?;
+        let index = table.get_index_at(row, column).await?;
+        if index < 0 {
+            return Err(anyhow!("table rejected the retained cell position"));
+        }
+        let referenced = RawObjectRef::from_atspi(&table.get_accessible_at(row, column).await?)
+            .ok_or_else(|| anyhow!("table cell reference missing"))?;
+        let referenced = identity_ref(conn, &referenced, &mut owners)
+            .await
+            .ok_or_else(|| anyhow!("table cell owner unavailable"))?;
+        if referenced.name != identity.bus_name || referenced.path != identity.path {
+            return Err(anyhow!(
+                "table position no longer identifies the observed cell"
+            ));
+        }
+        if !crate::x11::window_belongs_to_pid(self.xid, self.pid)
+            || !crate::input::is_x11_target_already_focused(self.xid)?
+        {
+            return Err(anyhow!("exact window focus changed before table selection"));
+        }
+        // Do not clear an existing selection or grab focus as a hidden second
+        // operation. Real saved-document tests must prove keyboard behavior.
+        if !selection.select_child(index).await? {
+            return Err(anyhow!(
+                "table rejected cell selection; input must not be replayed"
+            ));
+        }
+        if selection.n_selected_children().await? != 1
+            || !selection.is_child_selected(index).await?
+        {
+            return Err(anyhow!(
+                "table did not select exactly the requested cell; input must not be replayed"
+            ));
+        }
+        let selected = RawObjectRef::from_atspi(&selection.get_selected_child(0).await?)
+            .ok_or_else(|| anyhow!("selected cell identity missing"))?;
+        let selected = identity_ref(conn, &selected, &mut owners)
+            .await
+            .ok_or_else(|| anyhow!("selected cell owner unavailable"))?;
+        if selected.name != identity.bus_name || selected.path != identity.path {
+            return Err(anyhow!(
+                "selected cell differs from requested cell; input must not be replayed"
+            ));
+        }
+        Ok(("table_selection".to_owned(), false))
+    }
+
     /// Only ClickActionUnavailable and ElementClickNeedsForeground prove that
     /// no action was submitted. Other errors (including timeout/doAction
     /// failures) must not trigger a second pointer mutation.
     pub fn perform_action(&self, allow_activation: bool) -> Result<(String, bool)> {
         let target = &self.visited[self.target_position];
+        // LibreOffice can change its Screen coordinate convention after an edit.
+        // Use the retained cell's table identity rather than guessing an offset.
+        // Modified/right/double clicks retain their existing pointer semantics.
+        if allow_activation
+            && target.role == "table cell"
+            && std::fs::read_link(format!("/proc/{}/exe", self.pid))
+                .ok()
+                .and_then(|path| path.file_name().map(|name| name == "soffice.bin"))
+                .unwrap_or(false)
+            && crate::input::is_x11_target_already_focused(self.xid)?
+        {
+            return bounded(self.select_table_cell(), || {
+                Err(anyhow!(
+                    "table cell selection timed out; input must not be replayed"
+                ))
+            });
+        }
         if self.needs_foreground_pointer() {
             return Err(super::ElementClickNeedsForeground.into());
         }

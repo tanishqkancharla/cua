@@ -2193,6 +2193,16 @@ pub fn try_type_text_xtest_already_focused(xid: u64, text: &str) -> Result<bool>
     send_type_text_xtest_checked(text, Some(target))
 }
 
+/// Read-only exact-client focus check for semantic selection. This is not an
+/// input lease; callers must recheck immediately before their mutation.
+pub(crate) fn is_x11_target_already_focused(xid: u64) -> Result<bool> {
+    let (conn, screen_num) = connect_x11_for_input()?;
+    let root = conn.setup().roots[screen_num].root;
+    let target = u32::try_from(xid).context("X11 target window exceeds 32 bits")?;
+    let active_atom = conn.intern_atom(true, b"_NET_ACTIVE_WINDOW")?.reply()?.atom;
+    x11_target_already_focused(&conn, root, active_atom, target)
+}
+
 fn x11_target_already_focused(
     conn: &RustConnection,
     root: Window,
