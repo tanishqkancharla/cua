@@ -2634,6 +2634,7 @@ impl ClickTool {
                 json!({"status":"refused", "refusal":{"code":"stale_element_token"}}),
             );
         }
+        let runtime_scope = cua_driver_core::tool::current_dispatch_runtime_scope();
         let result = tokio::task::spawn_blocking(move || -> anyhow::Result<ToolResult> {
             target.verify_live()?;
             let action = target.perform_action(modifiers.is_empty() && button == 1 && count == 1);
@@ -2657,15 +2658,43 @@ impl ClickTool {
                         ))
                     };
                     let modifier_refs: Vec<&str> = modifiers.iter().map(String::as_str).collect();
+                    let refresh_after_motion = modifiers.is_empty()
+                        && button == 1
+                        && count == 1
+                        && target.needs_pointer_geometry_refresh();
+                    let click_focused = || -> anyhow::Result<bool> {
+                        let (lx, ly) = local_center()?;
+                        if refresh_after_motion {
+                            crate::input::try_click_xtest_already_focused_refreshed(
+                                xid, lx.round() as i32, ly.round() as i32,
+                                button, count, &modifier_refs,
+                                || {
+                                    let verify_token = || {
+                                        cua_driver_core::element_token::global()
+                                            .resolve(pid as i32, &token)
+                                            .map_err(|error| anyhow::anyhow!(error))
+                                    };
+                                    if let Some(scope) = &runtime_scope {
+                                        cua_driver_core::tool::with_runtime_scope(
+                                            scope.clone(), verify_token,
+                                        )?;
+                                    } else {
+                                        verify_token()?;
+                                    }
+                                    target.verify_pointer_refresh_identity()?;
+                                    let (x, y) = local_center()?;
+                                    Ok((x.round() as i32, y.round() as i32))
+                                },
+                            )
+                        } else {
+                            crate::input::try_click_xtest_already_focused(
+                                xid, lx.round() as i32, ly.round() as i32,
+                                button, count, &modifier_refs,
+                            )
+                        }
+                    };
                     let (lx, ly) = local_center()?;
-                    let path = if crate::input::try_click_xtest_already_focused(
-                        xid,
-                        lx.round() as i32,
-                        ly.round() as i32,
-                        button,
-                        count,
-                        &modifier_refs,
-                    )? {
+                    let path = if click_focused()? {
                         "xtest"
                     } else if !delivery.is_foreground() && target.needs_foreground_pointer() {
                         return Ok(crate::input::delivery::background_unavailable_error(
@@ -2673,6 +2702,12 @@ impl ClickTool {
                         ));
                     } else if delivery.is_foreground() {
                         crate::input::with_x11_foreground(xid, 80, || {
+                            if refresh_after_motion {
+                                if !click_focused()? {
+                                    anyhow::bail!("Calc target lost focus or input surface before pointer preparation");
+                                }
+                                return Ok(());
+                            }
                             let (lx, ly) = local_center()?;
                             let (sx, sy) = window_local_to_screen(xid, lx, ly)?;
                             crate::input::send_click_xtest_desktop_with_modifiers(

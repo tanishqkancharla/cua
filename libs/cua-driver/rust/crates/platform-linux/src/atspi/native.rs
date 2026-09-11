@@ -2285,6 +2285,39 @@ impl IndexedClickTarget {
         target.has_editable || target.role == "table cell"
     }
 
+    /// LibreOffice GTK3 updates its drawing-area screen origin on pointer
+    /// motion. A plain indexed cell click must refresh this same accessible
+    /// after positioning the pointer, before its one button gesture.
+    pub fn needs_pointer_geometry_refresh(&self) -> bool {
+        let target = &self.visited[self.target_position];
+        target.role == "table cell"
+            && has_spreadsheet_ancestor(&self.visited, self.target_position)
+            && std::fs::read_link(format!("/proc/{}/exe", self.pid))
+                .ok()
+                .and_then(|path| path.file_name().map(|name| name == "soffice.bin"))
+                .unwrap_or(false)
+    }
+
+    pub fn verify_pointer_refresh_identity(&self) -> Result<()> {
+        self.verify_live()?;
+        bounded(
+            async {
+                let target = &self.visited[self.target_position];
+                let (name, role) =
+                    tokio::join!(call(target.acc.name()), call(target.acc.get_role_name()));
+                if !matches!(name, Some(Ok(ref value)) if value == &target.name)
+                    || !matches!(role, Some(Ok(ref value)) if value == &target.role)
+                {
+                    return Err(anyhow!(
+                        "retained Calc cell changed during pointer preparation"
+                    ));
+                }
+                Ok(())
+            },
+            || Err(anyhow!("Calc pointer preparation identity check timed out")),
+        )
+    }
+
     /// Refresh Component extents through the retained proxies. No tree walk is
     /// repeated, and AX-only controls need not have bounds to be resolved.
     pub fn screen_bounds(&self) -> Result<(i32, i32, u32, u32)> {
@@ -3616,6 +3649,33 @@ fn component_screen_rebase(
     candidate
 }
 
+/// Calc may supply a grid-window Screen translation that differs from the
+/// X11 client origin. Suppress only axes already translated by that provider;
+/// equal Screen/Window axes retain the existing compatibility correction.
+fn calc_screen_rebase(fallback: (i32, i32), screen: (i32, i32), window: (i32, i32)) -> (i32, i32) {
+    (
+        if screen.0 != window.0 { 0 } else { fallback.0 },
+        if screen.1 != window.1 { 0 } else { fallback.1 },
+    )
+}
+
+fn has_spreadsheet_ancestor(visited: &[Visited<'_>], position: usize) -> bool {
+    let target = &visited[position];
+    let mut depth = target.depth;
+    for ancestor in visited[..position].iter().rev() {
+        if ancestor.depth < depth {
+            if ancestor.frame_ordinal != target.frame_ordinal {
+                return false;
+            }
+            if ancestor.role == "document spreadsheet" {
+                return true;
+            }
+            depth = ancestor.depth;
+        }
+    }
+    false
+}
+
 fn rebase_renderer_window_offset(
     mut offset: (i32, i32),
     frame_origin: Option<(i32, i32)>,
@@ -3770,7 +3830,16 @@ async fn element_bounds_for_visited(
         dlog!("element bounds: SCREEN coords with candidate X11 frame rebase ({ox},{oy})");
     }
 
-    let action_nodes: Vec<&Visited> = visited.iter().filter(|v| is_indexable(v)).collect();
+    let calc_process = screen_rebase.is_some()
+        && std::fs::read_link(format!("/proc/{pid}/exe"))
+            .ok()
+            .and_then(|path| path.file_name().map(|name| name == "soffice.bin"))
+            .unwrap_or(false);
+    let action_nodes: Vec<(usize, &Visited)> = visited
+        .iter()
+        .enumerate()
+        .filter(|(_, node)| is_indexable(node))
+        .collect();
     // Hard wall-clock budget for the whole collection: on pathological
     // trees individual D-Bus calls each burn up to CALL_TIMEOUT (geany's
     // unrealized nodes did exactly that). Return whatever was collected
@@ -3779,7 +3848,7 @@ async fn element_bounds_for_visited(
     // made PX targeting depend on DOM order.
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
     let mut out = Vec::with_capacity(action_nodes.len());
-    for (idx, node) in action_nodes.iter().enumerate() {
+    for (idx, (position, node)) in action_nodes.iter().enumerate() {
         if element_index.is_some_and(|target| idx != target)
             || frame_ordinal.is_some_and(|frame| node.frame_ordinal != frame)
         {
@@ -3823,15 +3892,38 @@ async fn element_bounds_for_visited(
                 screen_rebase.filter(|delta| *delta != (0, 0)),
                 screen_client_origin,
             ) {
+                let calc_cell = calc_process
+                    && node.role == "table cell"
+                    && has_spreadsheet_ancestor(visited, *position);
                 let window_origin = match call(comp.get_extents(CoordType::Window)).await {
                     Some(Ok((wx, wy, ww, wh)))
-                        if wx > -16384 && wy > -16384 && ww > 1 && wh > 1 =>
+                        if wx > -16384
+                            && wy > -16384
+                            && ww > 1
+                            && wh > 1
+                            && (!calc_cell || (ww == w && wh == h)) =>
                     {
                         Some((wx, wy))
                     }
                     _ => None,
                 };
-                component_screen_rebase(candidate, client_origin, (x, y), window_origin)
+                let fallback =
+                    component_screen_rebase(candidate, client_origin, (x, y), window_origin);
+                if calc_cell {
+                    let Some(window) = window_origin else {
+                        continue;
+                    };
+                    // Do not compare origins across a changing layout. Omit
+                    // unstable bounds before any pointer input is submitted.
+                    if !matches!(call(comp.get_extents(CoordType::Screen)).await,
+                        Some(Ok(bounds)) if bounds == (x, y, w, h))
+                    {
+                        continue;
+                    }
+                    calc_screen_rebase(fallback, (x, y), window)
+                } else {
+                    fallback
+                }
             } else {
                 (offset_x, offset_y)
             };
@@ -3952,6 +4044,32 @@ mod frame_correlation_tests {
 
 #[cfg(test)]
 mod coord_tests {
+    #[test]
+    fn calc_cell_translation_is_not_applied_twice() {
+        // Exact observed first/post-edit geometry; public SDK tests establish
+        // the physical click and saved-document behavior independently.
+        assert_eq!(
+            super::calc_screen_rebase((0, 17), (213, 363), (213, 363)),
+            (0, 17)
+        );
+        assert_eq!(
+            super::calc_screen_rebase((0, 17), (213, 387), (213, 363)),
+            (0, 0)
+        );
+        assert_eq!(
+            super::calc_screen_rebase((200, 17), (213, 387), (213, 363)),
+            (200, 0)
+        );
+        assert_eq!(
+            super::calc_screen_rebase((200, 100), (413, 463), (213, 363)),
+            (0, 0)
+        );
+        assert_eq!(
+            super::component_screen_rebase((0, 17), (0, 17), (213, 387), Some((213, 363))),
+            (0, 17)
+        );
+    }
+
     use super::parse_gtk_frame_extents;
     use super::{
         activation_index, before_snapshot_deadline, combine_wayland_content_offsets,
