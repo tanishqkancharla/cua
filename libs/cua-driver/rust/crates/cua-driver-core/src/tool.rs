@@ -5047,6 +5047,13 @@ mod capability_tests {
         "input.keyboard.hotkey",
         "input.keyboard.press",
         "input.delivery_mode",
+        // Shared clipboard contract (also used by compound native paste).
+        "clipboard.read",
+        "clipboard.types",
+        "clipboard.write",
+        "clipboard.write.text",
+        "clipboard.write.image",
+        "clipboard.write.file_url",
         // screen
         "screen.capture",
         "screen.capture.window",
