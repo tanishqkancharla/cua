@@ -3364,9 +3364,10 @@ async fn focus_by_pixel(
     .invoke(click_args)
     .await;
     if focus.is_error == Some(true) {
-        return Err(ToolResult::error(format!(
-            "focus pixel-click at ({x:.0},{y:.0}) failed."
-        )));
+        // Preserve the prerequisite's typed refusal and delivery evidence so
+        // callers can distinguish unavailable background input from an
+        // uncertain failure. No keyboard input has been sent at this point.
+        return Err(focus);
     }
     // Brief settle so the renderer registers focus before the keystrokes.
     tokio::time::sleep(std::time::Duration::from_millis(120)).await;
