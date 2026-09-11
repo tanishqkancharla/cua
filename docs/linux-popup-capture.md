@@ -131,3 +131,8 @@ reads deliberately exercises the readback guard. No such mutation is in
 production capture. These integration tests are drafted but unexecuted locally;
 Linux compilation, real integration execution and the parent's public SDK
 acceptance remain required.
+
+First Linux build34591610618 failed before runtime with Rust E0597 in the
+property reader's tail expression. Binding the collected values locally ends the
+borrow before the reply is dropped. The failed build is retained; the correction
+requires a fresh Linux build and has no accepted runtime result yet.

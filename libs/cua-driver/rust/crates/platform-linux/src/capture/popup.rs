@@ -91,10 +91,11 @@ impl Inspector {
         if reply.type_ != u32::from(kind) || reply.format != 32 || reply.bytes_after != 0 {
             bail!("unsupported X11 popup property format");
         }
-        Ok(reply
+        let values = reply
             .value32()
             .ok_or_else(|| anyhow!("missing X11 property values"))?
-            .collect())
+            .collect();
+        Ok(values)
     }
 
     fn singleton(&self, xid: Window, atom: u32, kind: AtomEnum) -> Result<Option<u32>> {
