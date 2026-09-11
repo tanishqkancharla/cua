@@ -193,7 +193,7 @@ jobs:
         with:
           workspaces: "libs/cua-driver/rust -> target"
           key: linux-selection-identity
-          save-if: ${{ always() }}
+          save-if: 'true'
       - name: Install focused GTK3 build dependencies
         run: |
           sudo apt-get update
