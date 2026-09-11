@@ -86,8 +86,39 @@ Initial implementation supports X11 plain text up to 16 KiB, at most 32 saved
 clipboard formats and 512 KiB total, with direct property transfers only. It
 currently requires eager TARGETS negotiation before sending the chord; apps
 that negotiate only after input are still unsupported. INCR, rich-text input,
-clipboard managers, concurrent-owner and wrong-focus behavior still require
+clipboard managers, modal focus and delayed/large transfers still require
 implementation or real desktop evidence. Restored data remains available only
 while the driver process and its X11 connection remain alive. Exact-candidate
 canonical desktop regressions remain a promotion gate; ordinary CI and these
 focused checks do not replace that gate.
+
+
+### Focus and concurrent ownership controls
+
+Public SDK PASTE-G01 (fixture `aad608b0fee3296749b2dababe50dca390ce5c57`)
+passes on the same full driver in 49.78 seconds. Bringing a sibling document
+forward causes paste to reject before input; saved files retain the intended
+document unchanged and exactly the subsequent sibling edit. Owned app, temporary
+files and container cleanup were verified. This does not cover modal focus.
+
+Two separate actor/input controls use real X11 clients and saved Writer files.
+Before input, a newer clipboard owner with equal text but different opaque data
+survives; all five formats match and the document is unchanged. After input,
+XRecord observes exactly one server Ctrl+V event before the second client claims
+the clipboard. The claim is verified before the actor returns with
+`inputSubmitted=true`, `skipped_owner_changed` and uncertain delivery. All five
+newer formats survive. Writer consumes that client's distinct HTML once, with
+surrounding paragraphs preserved. This is honest uncertainty coverage, not a
+successful requested paste. XRecord observes server processing, not application
+consumption. Both controls verify owned process/container cleanup; they do not
+replace public-SDK clipboard-race acceptance.
+
+The after-input control retains earlier strict document-oracle failures. Its
+accepted oracle permits only unchanged text, the intended text once, or the
+known newer HTML once when delivery is explicitly uncertain. It does not accept
+arbitrary document changes or relabel the uncertain operation as success.
+
+Canonical shared/native/capture and local installer checks are running at
+`ae1577dd1faebd55385b16fe1a9c5453dceec4ee` in
+[CI34650375969](https://github.com/tanishqkancharla/opensky/actions/runs/34650375969).
+This documentation update changes no executable input to that run.
