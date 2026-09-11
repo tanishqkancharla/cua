@@ -16,6 +16,8 @@
 # modality recorder's effect verifier reads (counter=, mirror=, agreed=,
 # slider_value=, last_action=, clicks=, menu_action=, scroll_offset=).
 
+import os
+
 import gi
 
 gi.require_version("Gtk", "3.0")
@@ -93,6 +95,33 @@ class HarnessWindow(Gtk.Window):
         root.pack_start(self.entry, False, False, 0)
         self.mirror = Gtk.Label(label="mirror=", xalign=0)
         root.pack_start(self.mirror, False, False, 0)
+
+        if os.environ.get("CUA_SELECTION_IDENTITY_FIXTURE") == "1":
+            # ── selection identity drift ─────────────────────────────────
+            # The visible button performs a real GTK container rebuild that
+            # inserts an identical Entry before the observed one. This shifts
+            # its AT-SPI index without destroying that accessible object.
+            section(root, "selection identity drift")
+            self.selection_drift_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            self.selection_drift_original = aid(Gtk.Entry(), "selection-original")
+            self.selection_drift_original.set_text("SELECTION_IDENTITY_DUPLICATE_v1")
+            self.selection_drift_replacement = aid(Gtk.Entry(), "selection-replacement")
+            self.selection_drift_replacement.set_text("SELECTION_IDENTITY_DUPLICATE_v1")
+            self.selection_drift_status = Gtk.Label(label="selection_drift=armed", xalign=0)
+            self.selection_drift_button = aid(
+                Gtk.Button(label="Insert duplicate above"),
+                "selection-insert-duplicate-above",
+            )
+            self.selection_drift_button.connect("clicked", self.on_insert_selection_duplicate)
+            for entry, name in (
+                (self.selection_drift_original, "selection-original"),
+                (self.selection_drift_replacement, "selection-replacement"),
+            ):
+                entry.connect("notify::selection-bound", self.on_selection_drift, name)
+                self.selection_drift_box.pack_start(entry, False, False, 0)
+            self.selection_drift_box.pack_start(self.selection_drift_button, False, False, 0)
+            self.selection_drift_box.pack_start(self.selection_drift_status, False, False, 0)
+            root.pack_start(self.selection_drift_box, False, False, 0)
 
         # ── click_target (left / right / double) ──────────────────────────
         section(root, "click target")
@@ -208,6 +237,28 @@ class HarnessWindow(Gtk.Window):
 
     def on_entry_changed(self, entry):
         self.mirror.set_text(f"mirror={entry.get_text()}")
+
+    def on_insert_selection_duplicate(self, *_):
+        self.selection_drift_insert = aid(Gtk.Entry(), "selection-drift-insert")
+        self.selection_drift_insert.set_text("SELECTION_IDENTITY_DUPLICATE_v1")
+        self.selection_drift_insert.connect(
+            "notify::selection-bound", self.on_selection_drift, "selection-drift-insert"
+        )
+        self.selection_drift_box.pack_start(self.selection_drift_insert, False, False, 0)
+        self.selection_drift_box.reorder_child(self.selection_drift_insert, 0)
+        self.selection_drift_insert.show()
+        self.selection_drift_button.set_sensitive(False)
+        self.selection_drift_status.set_text("selection_drift=applied")
+
+    def on_selection_drift(self, entry, _property, name):
+        # PyGObject versions expose GtkEditable.get_selection_bounds() as
+        # either `(start, end)` / `()` or `(selected, start, end)`.
+        bounds = entry.get_selection_bounds()
+        selected = bool(bounds[0]) if len(bounds) == 3 else len(bounds) == 2
+        if selected:
+            self.selection_drift_status.set_text(
+                f"selection_drift=applied selection_target={name}"
+            )
 
     def on_click_target(self, *_):
         self.clicks += 1

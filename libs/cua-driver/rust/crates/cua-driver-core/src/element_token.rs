@@ -394,6 +394,10 @@ pub enum ResolvedElement {
     Element {
         window_id: Option<u32>,
         element_index: usize,
+        /// Canonical token for this exact snapshot-bound element. Tools that
+        /// retain a native identity use it to bind a live object to the
+        /// observation that authorized the action.
+        element_token: String,
         /// True when the caller supplied a token and we resolved
         /// through the registry — informational, used by tools that
         /// want to log "via token" in the success summary.
@@ -482,6 +486,7 @@ pub fn resolve_element_args(
             Ok(ResolvedElement::Element {
                 window_id: Some(wid),
                 element_index: resolved_idx,
+                element_token: token,
                 via_token: false,
             })
         }
@@ -504,6 +509,7 @@ pub fn resolve_element_args(
             Ok(ResolvedElement::Element {
                 window_id: Some(wid),
                 element_index: idx,
+                element_token: tok.to_owned(),
                 via_token: true,
             })
         }
@@ -834,10 +840,12 @@ mod tests {
             ResolvedElement::Element {
                 window_id,
                 element_index,
+                element_token,
                 via_token,
             } => {
                 assert_eq!(window_id, Some(555), "window_id comes from the snapshot");
                 assert_eq!(element_index, 2);
+                assert_eq!(element_token, token);
                 assert!(via_token, "token path must report via_token=true");
             }
             _ => panic!("expected Element, got {resolved:?}"),
@@ -867,7 +875,8 @@ mod tests {
             ResolvedElement::Element {
                 window_id: Some(888),
                 element_index: 2,
-                via_token: false
+                via_token: false,
+                ..
             }
         ));
     }

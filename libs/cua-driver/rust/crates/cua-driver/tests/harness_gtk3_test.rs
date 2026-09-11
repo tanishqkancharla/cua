@@ -36,15 +36,25 @@ fn harness_exe() -> std::path::PathBuf {
 }
 
 fn launch(driver: &mut McpDriver) -> (u32, u64) {
+    launch_with_selection_identity_fixture(driver, false)
+}
+
+fn launch_with_selection_identity_fixture(
+    driver: &mut McpDriver,
+    selection_identity_fixture: bool,
+) -> (u32, u64) {
     let exe = harness_exe();
     assert!(exe.exists(), "required GTK3 harness is missing: {exe:?}");
     driver
         .reaper()
-        .spawn(
-            Command::new(&exe)
-                .stdout(Stdio::inherit())
-                .stderr(Stdio::inherit()),
-        )
+        .spawn({
+            let mut command = Command::new(&exe);
+            command.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+            if selection_identity_fixture {
+                command.env("CUA_SELECTION_IDENTITY_FIXTURE", "1");
+            }
+            command
+        })
         .unwrap_or_else(|error| panic!("launch GTK3 harness {exe:?}: {error}"));
 
     let deadline = Instant::now() + Duration::from_secs(12);
@@ -521,6 +531,81 @@ fn harness_gtk3_stale_element_token_fails_closed() {
             Observation::delivered(vec![OracleKind::AxState], Evidence::default())
         },
     );
+}
+
+#[test]
+#[ignore]
+fn harness_gtk3_select_text_binds_the_observed_identity_after_index_drift() {
+    let case = native_background_case(
+        "gtk3",
+        "select_text_identity_after_index_drift",
+        Targeting::Ax,
+        DriverRoute::LinuxAtSpiAction,
+    );
+    let cell_id = case.cell_id.clone();
+    execute_case(case, |evidence| {
+        let mut driver = McpDriver::spawn_named(&cell_id).expect("start source-built Linux driver");
+        *evidence = recording_evidence(driver.recording_dir());
+        let (pid, window_id) = launch_with_selection_identity_fixture(&mut driver, true);
+        let observed = snapshot(&mut driver, pid, window_id);
+        let index = element_index(&observed, "selection-original");
+        let token = element_token(&observed, "selection-original");
+
+        // A separate driver owns the visible fixture action and its snapshot
+        // registry. It therefore proves real index drift without refreshing
+        // the primary driver's token or cached observed identity.
+        let mut observer = McpDriver::spawn_named(&format!("{cell_id}-independent-observer"))
+            .expect("start independent source-built Linux driver");
+        let before_drift = snapshot(&mut observer, pid, window_id);
+        let insert = observer.call(
+            "click",
+            serde_json::json!({
+                "pid": pid,
+                "window_id": window_id,
+                "element_token": element_token(&before_drift, "selection-insert-duplicate-above")
+            }),
+        );
+        assert!(
+            !insert.is_error(),
+            "independent fixture action failed: {}",
+            insert.text()
+        );
+        let after_drift = snapshot(&mut observer, pid, window_id);
+        let original_live_index = element_index(&after_drift, "selection-original");
+        let duplicate_live_index = element_index(&after_drift, "selection-drift-insert");
+        assert_ne!(
+            original_live_index, index,
+            "fixture action did not move the original Entry's AT-SPI ordinal"
+        );
+        assert_eq!(
+            duplicate_live_index, index,
+            "the old ordinal must now resolve to the inserted duplicate"
+        );
+
+        driver.start_behavior_recording();
+        let selected = driver.call(
+            "select_text",
+            serde_json::json!({
+                "pid": pid,
+                "window_id": window_id,
+                "element_index": index,
+                "element_token": token,
+                "text": "SELECTION_IDENTITY_DUPLICATE_v1"
+            }),
+        );
+        assert!(
+            !selected.is_error(),
+            "select_text rejected the preserved observed Entry: {}",
+            selected.text()
+        );
+        wait_for_state(
+            &mut driver,
+            pid,
+            window_id,
+            "selection_drift=applied selection_target=selection-original",
+        );
+        Observation::delivered_with_fixture_state(Vec::new())
+    });
 }
 
 #[test]

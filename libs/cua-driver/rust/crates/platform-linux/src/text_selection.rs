@@ -104,6 +104,9 @@ pub struct SelectionRequest {
     pub element_index: usize,
     pub element_token: Option<String>,
     pub snapshot_id: Option<String>,
+    /// Exact native object observed for this snapshot-bound target. This is
+    /// internal driver state; callers still address the public SDK by token.
+    pub observed_identity: crate::atspi::AtspiIdentity,
     pub text: String,
     pub prefix: Option<String>,
     pub suffix: Option<String>,
