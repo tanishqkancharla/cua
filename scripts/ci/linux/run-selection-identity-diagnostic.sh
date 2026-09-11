@@ -37,7 +37,7 @@ bash "${DRIVER_ROOT}/tests/fixtures/build/linux.sh" --only gtk3 \
   2>&1 | tee "${ARTIFACT_DIR}/fixture-build.log"
 (cd "${RUST_ROOT}" && cargo test --locked -p cua-driver --test harness_gtk3_test \
   --no-run --message-format=json) \
-  2>&1 | tee "${ARTIFACT_DIR}/test-build.jsonl"
+  2>"${ARTIFACT_DIR}/test-build.stderr.log" | tee "${ARTIFACT_DIR}/test-build.jsonl"
 
 test_bin="$(jq -r \
   'select(.reason == "compiler-artifact" and .target.name == "harness_gtk3_test") | .executable' \
