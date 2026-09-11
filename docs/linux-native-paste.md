@@ -5,7 +5,7 @@ This candidate adds a real clipboard paste into the exact native window, preserv
 the prior clipboard and avoiding overwriting a later copy by another client.
 The user selected Linux-first implementation on the OpenSky Driver fork.
 Issues are disabled on this fork; the linked draft pull request is the scope
-and implementation record. No native-paste acceptance is claimed yet.
+and implementation record. The focused plain-text acceptance below passes; broader native-paste parity remains incomplete.
 
 ## Contract
 
@@ -58,15 +58,36 @@ V3 popup evaluation source and results unchanged while this work is developed.
 
 ## Candidate validation and remaining limits
 
-The actual actor, input helper and tool wrapper compile together with the driver
-core in a local adapter. Core authorization and clipboard recording redaction
-checks pass. These checks do not compile the full Linux platform or exercise a
-desktop. Public SDK typing checks pass; the positive Writer test is not yet run.
+Full Linux CI [34646289769](https://github.com/tanishqkancharla/cua/actions/runs/34646289769)
+passes at source `445884192f616f4fa3be124a3d4b9148d18adc2c`, including Rust
+tests, overlay and MIT-SHM regressions, uinput checks and portal compilation.
+The initial CI vocabulary failure is retained: the test omitted existing shared
+clipboard capability names. The correction changes the test vocabulary only;
+actor/input code remains byte-identical to `9c7272351`.
+
+The public SDK Writer case PASTE-L01 passes on SDK
+`9cfbb709de8c87fa34f96f19ca6aadf322c83cc5`, using this full driver built by
+[CI34646617341](https://github.com/tanishqkancharla/opensky/actions/runs/34646617341).
+Driver binary SHA256:
+`e9cfd5cd24d9fc2ae1df2bdc443924cbdb7174dd16c6a8dd0af41a91ebcbd770`.
+The test selected a Unicode paragraph, pasted two lines, saved through normal
+input and verified the exact saved ODT text plus unchanged surrounding paragraphs.
+It completed in 17.64 seconds. Owned app, temporary files and container were
+cleaned up. The fresh profile disables LibreOffice's ordinary Tip of the Day
+preference; the preference file is retained with the evidence. Independent local
+report: `work/native-paste-sdk-445-independent-check.json`.
+
+A separate real actor/input check verified the same Writer saved outcome and
+restoration of five original clipboard formats (UTF-8, HTML, opaque 8/16/32-bit),
+including exact property type, width and bytes through an independent X11 client.
+This supporting actor check is not full-SDK clipboard coverage.
 
 Initial implementation supports X11 plain text up to 16 KiB, at most 32 saved
 clipboard formats and 512 KiB total, with direct property transfers only. It
 currently requires eager TARGETS negotiation before sending the chord; apps
 that negotiate only after input are still unsupported. INCR, rich-text input,
-clipboard managers, concurrent-owner behavior and saved-document acceptance
-require real desktop evidence before support is claimed. Restored data remains
-available only while the driver process and its X11 connection remain alive.
+clipboard managers, concurrent-owner and wrong-focus behavior still require
+implementation or real desktop evidence. Restored data remains available only
+while the driver process and its X11 connection remain alive. Exact-candidate
+canonical desktop regressions remain a promotion gate; ordinary CI and these
+focused checks do not replace that gate.
