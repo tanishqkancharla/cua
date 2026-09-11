@@ -2285,6 +2285,39 @@ impl IndexedClickTarget {
         target.has_editable || target.role == "table cell"
     }
 
+    /// LibreOffice GTK3 updates its drawing-area screen origin on pointer
+    /// motion. A plain indexed cell click must refresh this same accessible
+    /// after positioning the pointer, before its one button gesture.
+    pub fn needs_pointer_geometry_refresh(&self) -> bool {
+        let target = &self.visited[self.target_position];
+        target.role == "table cell"
+            && has_spreadsheet_ancestor(&self.visited, self.target_position)
+            && std::fs::read_link(format!("/proc/{}/exe", self.pid))
+                .ok()
+                .and_then(|path| path.file_name().map(|name| name == "soffice.bin"))
+                .unwrap_or(false)
+    }
+
+    pub fn verify_pointer_refresh_identity(&self) -> Result<()> {
+        self.verify_live()?;
+        bounded(
+            async {
+                let target = &self.visited[self.target_position];
+                let (name, role) =
+                    tokio::join!(call(target.acc.name()), call(target.acc.get_role_name()));
+                if !matches!(name, Some(Ok(ref value)) if value == &target.name)
+                    || !matches!(role, Some(Ok(ref value)) if value == &target.role)
+                {
+                    return Err(anyhow!(
+                        "retained Calc cell changed during pointer preparation"
+                    ));
+                }
+                Ok(())
+            },
+            || Err(anyhow!("Calc pointer preparation identity check timed out")),
+        )
+    }
+
     /// Refresh Component extents through the retained proxies. No tree walk is
     /// repeated, and AX-only controls need not have bounds to be resolved.
     pub fn screen_bounds(&self) -> Result<(i32, i32, u32, u32)> {
