@@ -2634,6 +2634,7 @@ impl ClickTool {
                 json!({"status":"refused", "refusal":{"code":"stale_element_token"}}),
             );
         }
+        let runtime_scope = cua_driver_core::tool::current_dispatch_runtime_scope();
         let result = tokio::task::spawn_blocking(move || -> anyhow::Result<ToolResult> {
             target.verify_live()?;
             let action = target.perform_action(modifiers.is_empty() && button == 1 && count == 1);
@@ -2668,9 +2669,18 @@ impl ClickTool {
                                 xid, lx.round() as i32, ly.round() as i32,
                                 button, count, &modifier_refs,
                                 || {
-                                    cua_driver_core::element_token::global()
-                                        .resolve(pid as i32, &token)
-                                        .map_err(|error| anyhow::anyhow!(error))?;
+                                    let verify_token = || {
+                                        cua_driver_core::element_token::global()
+                                            .resolve(pid as i32, &token)
+                                            .map_err(|error| anyhow::anyhow!(error))
+                                    };
+                                    if let Some(scope) = &runtime_scope {
+                                        cua_driver_core::tool::with_runtime_scope(
+                                            scope.clone(), verify_token,
+                                        )?;
+                                    } else {
+                                        verify_token()?;
+                                    }
                                     target.verify_pointer_refresh_identity()?;
                                     let (x, y) = local_center()?;
                                     Ok((x.round() as i32, y.round() as i32))
