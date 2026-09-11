@@ -33,9 +33,10 @@ export CUA_DRIVER_SOURCE_SHA="${CUA_E2E_SOURCE_SHA:-$(git -C "${REPO_ROOT}" rev-
 candidate="${RUST_ROOT}/target/release/cua-driver"
 (cd "${RUST_ROOT}" && cargo build --locked --release -p cua-driver) \
   2>&1 | tee "${ARTIFACT_DIR}/candidate-build.log"
+cp "${candidate}" "${ARTIFACT_DIR}/compiled-test/cua-driver-candidate"
 bash "${DRIVER_ROOT}/tests/fixtures/build/linux.sh" --only gtk3 \
   2>&1 | tee "${ARTIFACT_DIR}/fixture-build.log"
-(cd "${RUST_ROOT}" && cargo test --locked -p cua-driver --test harness_gtk3_test \
+(cd "${RUST_ROOT}" && cargo test --locked --release -p cua-driver --test harness_gtk3_test \
   --no-run --message-format=json) \
   2>"${ARTIFACT_DIR}/test-build.stderr.log" | tee "${ARTIFACT_DIR}/test-build.jsonl"
 

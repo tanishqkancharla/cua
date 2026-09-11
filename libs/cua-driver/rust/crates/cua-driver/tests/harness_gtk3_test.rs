@@ -45,16 +45,14 @@ fn launch_with_selection_identity_fixture(
 ) -> (u32, u64) {
     let exe = harness_exe();
     assert!(exe.exists(), "required GTK3 harness is missing: {exe:?}");
+    let mut command = Command::new(&exe);
+    command.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+    if selection_identity_fixture {
+        command.env("CUA_SELECTION_IDENTITY_FIXTURE", "1");
+    }
     driver
         .reaper()
-        .spawn({
-            let mut command = Command::new(&exe);
-            command.stdout(Stdio::inherit()).stderr(Stdio::inherit());
-            if selection_identity_fixture {
-                command.env("CUA_SELECTION_IDENTITY_FIXTURE", "1");
-            }
-            command
-        })
+        .spawn(&mut command)
         .unwrap_or_else(|error| panic!("launch GTK3 harness {exe:?}: {error}"));
 
     let deadline = Instant::now() + Duration::from_secs(12);
