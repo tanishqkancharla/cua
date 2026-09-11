@@ -8775,6 +8775,10 @@ pub fn build_registry_with_provider(
         super::text_selection::SelectTextTool,
         &pid_window_candidates,
     ));
+    r.register(pid_window_guarded(
+        super::native_paste::NativePasteTool,
+        &pid_window_candidates,
+    ));
     r.register(Box::new(SetWindowFrameTool));
     r.register(Box::new(InvokeMenuTool));
     r.register(pid_window_guarded(
