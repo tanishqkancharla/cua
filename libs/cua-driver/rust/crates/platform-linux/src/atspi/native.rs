@@ -2312,10 +2312,10 @@ impl IndexedClickTarget {
         )
     }
 
-    /// One semantic mutation with identity and exclusive-selection readback.
-    /// No errors from this route permit pointer fallback: even a rejected or
-    /// timed-out SelectChild may have partially changed the selection.
-    async fn select_table_cell(&self) -> Result<(String, bool)> {
+    /// Focus the exact Calc cell, with no marked range to preserve or extend.
+    /// SelectChild only marks cells in LibreOffice; it does not move the typing
+    /// cursor. Only pre-input capability misses permit pointer fallback.
+    async fn focus_table_cell(&self) -> Result<(String, bool)> {
         let target = &self.visited[self.target_position];
         let identity = target
             .identity
@@ -2323,10 +2323,15 @@ impl IndexedClickTarget {
             .ok_or_else(|| anyhow!("cell identity missing"))?;
         let conn = shared_connection().await?;
         let proxies = target.acc.proxies().await?;
-        let cell = proxies.table_cell().await?;
+        let cell = proxies.table_cell().await.map_err(|error| {
+            super::ClickActionUnavailable(format!("TableCell unavailable before input: {error}"))
+        })?;
+        let component = proxies.component().await.map_err(|error| {
+            super::ClickActionUnavailable(format!("Component unavailable before input: {error}"))
+        })?;
         let (row, column) = cell.position().await?;
         if row < 0 || column < 0 || cell.row_span().await? != 1 || cell.column_span().await? != 1 {
-            return Err(anyhow!("cell does not expose an unmerged table position"));
+            return Err(super::ElementClickNeedsForeground.into());
         }
         let raw_table = RawObjectRef::from_atspi(&cell.table().await?)
             .ok_or_else(|| anyhow!("cell table identity missing"))?;
@@ -2349,10 +2354,13 @@ impl IndexedClickTarget {
             .ok_or_else(|| anyhow!("cell table does not belong to the observed window"))?;
         let table_proxies = table_node.acc.proxies().await?;
         let table = table_proxies.table().await?;
-        let selection = table_proxies.selection().await?;
-        let index = table.get_index_at(row, column).await?;
-        if index < 0 {
-            return Err(anyhow!("table rejected the retained cell position"));
+        let selection = table_proxies.selection().await.map_err(|error| {
+            super::ClickActionUnavailable(format!("Selection unavailable before input: {error}"))
+        })?;
+        // GrabFocus moves the cursor but does not clear a marked range. Preserve
+        // existing range-click semantics through the original pointer route.
+        if selection.n_selected_children().await? != 0 {
+            return Err(super::ElementClickNeedsForeground.into());
         }
         let referenced = RawObjectRef::from_atspi(&table.get_accessible_at(row, column).await?)
             .ok_or_else(|| anyhow!("table cell reference missing"))?;
@@ -2369,31 +2377,47 @@ impl IndexedClickTarget {
         {
             return Err(anyhow!("exact window focus changed before table selection"));
         }
-        // Do not clear an existing selection or grab focus as a hidden second
-        // operation. Real saved-document tests must prove keyboard behavior.
-        if !selection.select_child(index).await? {
-            return Err(anyhow!(
-                "table rejected cell selection; input must not be replayed"
-            ));
+        if !component.grab_focus().await? {
+            return Err(anyhow!("cell rejected focus; input must not be replayed"));
         }
-        if selection.n_selected_children().await? != 1
-            || !selection.is_child_selected(index).await?
+        let state = target.acc.get_state().await?;
+        if state.contains(State::Defunct)
+            || !state.contains(State::Focused)
+            || selection.n_selected_children().await? != 0
+            || !crate::input::is_x11_target_already_focused(self.xid)?
         {
             return Err(anyhow!(
-                "table did not select exactly the requested cell; input must not be replayed"
+                "requested cell focus was not established; input must not be replayed"
             ));
         }
-        let selected = RawObjectRef::from_atspi(&selection.get_selected_child(0).await?)
-            .ok_or_else(|| anyhow!("selected cell identity missing"))?;
-        let selected = identity_ref(conn, &selected, &mut owners)
-            .await
-            .ok_or_else(|| anyhow!("selected cell owner unavailable"))?;
-        if selected.name != identity.bus_name || selected.path != identity.path {
-            return Err(anyhow!(
-                "selected cell differs from requested cell; input must not be replayed"
-            ));
+        Ok(("cell_focus".to_owned(), false))
+    }
+
+    fn is_calc_cell(&self) -> bool {
+        let target = &self.visited[self.target_position];
+        if target.role != "table cell"
+            || !std::fs::read_link(format!("/proc/{}/exe", self.pid))
+                .ok()
+                .and_then(|path| path.file_name().map(|name| name == "soffice.bin"))
+                .unwrap_or(false)
+        {
+            return false;
         }
-        Ok(("table_selection".to_owned(), false))
+        // Follow actual ancestors, not a preceding sibling from another sheet
+        // or a Writer/Impress table sharing the same soffice process.
+        let mut depth = target.depth;
+        for ancestor in self.visited[..self.target_position].iter().rev() {
+            if ancestor.depth < depth {
+                if ancestor.frame_ordinal != target.frame_ordinal {
+                    return false;
+                }
+                if ancestor.role == "document spreadsheet" {
+                    return true;
+                }
+                depth = ancestor.depth;
+            }
+        }
+        false
     }
 
     /// Only ClickActionUnavailable and ElementClickNeedsForeground prove that
@@ -2405,16 +2429,12 @@ impl IndexedClickTarget {
         // Use the retained cell's table identity rather than guessing an offset.
         // Modified/right/double clicks retain their existing pointer semantics.
         if allow_activation
-            && target.role == "table cell"
-            && std::fs::read_link(format!("/proc/{}/exe", self.pid))
-                .ok()
-                .and_then(|path| path.file_name().map(|name| name == "soffice.bin"))
-                .unwrap_or(false)
+            && self.is_calc_cell()
             && crate::input::is_x11_target_already_focused(self.xid)?
         {
-            return bounded(self.select_table_cell(), || {
+            return bounded(self.focus_table_cell(), || {
                 Err(anyhow!(
-                    "table cell selection timed out; input must not be replayed"
+                    "table cell focus timed out; input must not be replayed"
                 ))
             });
         }
