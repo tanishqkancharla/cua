@@ -10,6 +10,9 @@
 
 #![cfg(target_os = "linux")]
 
+#[path = "support/linux_visible_fixture.rs"]
+mod linux_visible_fixture;
+
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -225,12 +228,21 @@ fn assert_popover_marker(driver: &mut McpDriver, pid: u32, main_window_id: u64) 
 }
 
 fn run_case(case: CaseSpec, test: impl FnOnce(u32, u64, &mut McpDriver) -> Observation) {
+    run_case_with_setup(case, |_, _, _| {}, test);
+}
+
+fn run_case_with_setup(
+    case: CaseSpec,
+    setup: impl FnOnce(u32, u64, &mut McpDriver),
+    test: impl FnOnce(u32, u64, &mut McpDriver) -> Observation,
+) {
     let cell_id = case.cell_id.clone();
     let delivery = case.delivery;
     execute_case(case, |evidence| {
         let mut driver = McpDriver::spawn_named(&cell_id).expect("start source-built Linux driver");
         *evidence = recording_evidence(driver.recording_dir());
         let (pid, window_id) = launch(&mut driver);
+        setup(pid, window_id, &mut driver);
         if delivery != Delivery::Background {
             driver.start_behavior_recording();
         }
@@ -961,45 +973,63 @@ fn run_catalog_row(row: CatalogRow) {
     } else {
         case
     };
-    run_case(case, |pid, window_id, driver| match row.delivery {
-        Delivery::Background => {
-            let mut refused = false;
-            let (_, passed) = run_with_background_oracles(
+    run_case_with_setup(
+        case,
+        |pid, window_id, driver| match row.operation {
+            Operation::Scroll { target, .. } => linux_visible_fixture::prepare_visible_controls(
                 driver,
-                TargetWindow {
-                    pid,
-                    native_id: window_id,
-                },
-                |driver| {
-                    refused = invoke_operation(row, pid, window_id, driver, expect_refusal);
-                },
-            )
-            .unwrap_or_else(|error| panic!("background desktop contract failed: {error}"));
-            if refused {
-                let mut passed = passed;
-                passed.push(OracleKind::FixtureState);
-                Observation::refused(
-                    RefusalCode::BackgroundUnavailable,
-                    passed,
-                    "GTK3 focus-bound background input was refused",
-                    Evidence::default(),
+                pid,
+                window_id,
+                &[target, "scroll_offset=0"],
+            ),
+            Operation::Popover { target, .. } => linux_visible_fixture::prepare_visible_controls(
+                driver,
+                pid,
+                window_id,
+                &[target, "popover_open=False"],
+            ),
+            _ => {}
+        },
+        |pid, window_id, driver| match row.delivery {
+            Delivery::Background => {
+                let mut refused = false;
+                let (_, passed) = run_with_background_oracles(
+                    driver,
+                    TargetWindow {
+                        pid,
+                        native_id: window_id,
+                    },
+                    |driver| {
+                        refused = invoke_operation(row, pid, window_id, driver, expect_refusal);
+                    },
                 )
-            } else {
-                Observation::delivered_with_fixture_state(passed)
+                .unwrap_or_else(|error| panic!("background desktop contract failed: {error}"));
+                if refused {
+                    let mut passed = passed;
+                    passed.push(OracleKind::FixtureState);
+                    Observation::refused(
+                        RefusalCode::BackgroundUnavailable,
+                        passed,
+                        "GTK3 focus-bound background input was refused",
+                        Evidence::default(),
+                    )
+                } else {
+                    Observation::delivered_with_fixture_state(passed)
+                }
             }
-        }
-        Delivery::Foreground => {
-            assert!(!invoke_operation(row, pid, window_id, driver, false));
-            Observation::delivered_with_fixture_state(Vec::new())
-        }
-        Delivery::NotApplicable => unreachable!(),
-    });
+            Delivery::Foreground => {
+                assert!(!invoke_operation(row, pid, window_id, driver, false));
+                Observation::delivered_with_fixture_state(Vec::new())
+            }
+            Delivery::NotApplicable => unreachable!(),
+        },
+    );
 }
 
 #[test]
 #[ignore]
 fn harness_gtk3_ax_tree() {
-    run_case(
+    run_case_with_setup(
         native_readonly_case(
             "gtk3",
             "ax_tree",
@@ -1007,6 +1037,33 @@ fn harness_gtk3_ax_tree() {
             DriverRoute::AxRead,
             vec![OracleKind::AxState],
         ),
+        |pid, window_id, driver| {
+            linux_visible_fixture::prepare_visible_controls(
+                driver,
+                pid,
+                window_id,
+                &[
+                    "btn-increment",
+                    "txt-input",
+                    "btn-clicktarget",
+                    "sld-value",
+                    "chk-agree",
+                    "scroll-tall",
+                    "btn-open-popover",
+                    "btn-exit",
+                    "HARNESS_TEXT_MARKER_v1",
+                    "counter=0",
+                    "mirror=",
+                    "last_action=none",
+                    "last_key=none",
+                    "last_hotkey=none",
+                    "slider_value=0",
+                    "agreed=False",
+                    "scroll_offset=0",
+                    "popover_open=False",
+                ],
+            )
+        },
         |pid, window_id, driver| {
             let state = snapshot(driver, pid, window_id);
             let text = state.tree_text();

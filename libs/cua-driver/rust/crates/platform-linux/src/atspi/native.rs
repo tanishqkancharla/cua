@@ -19,7 +19,7 @@ use anyhow::{anyhow, Result};
 use atspi::connection::{AccessibilityConnection, P2P};
 use atspi::proxy::accessible::AccessibleProxy;
 use atspi::proxy::proxy_ext::ProxyExt;
-use atspi::{CoordType, Interface, State, StateSet};
+use atspi::{CoordType, Interface, RelationType, State, StateSet};
 
 use super::{AtspiIdentity, AtspiNode};
 
@@ -233,9 +233,13 @@ struct Visited<'a> {
     /// Display text: the accessible `name`, or — for editable/text widgets that
     /// expose no name — the Text-interface content (where typed text lives).
     name: String,
+    has_native_name: bool,
+    observed_text: Option<String>,
     value: Option<String>,
     checked: Option<bool>,
     enabled: Option<bool>,
+    showing: Option<bool>,
+    visible: Option<bool>,
     selected: Option<bool>,
     selectable: bool,
     actions: Vec<String>,
@@ -882,6 +886,8 @@ async fn collect_visited_bounded<'a>(
 
     let mut visited: Vec<Visited<'a>> = Vec::new();
     let mut identity_owners = std::collections::HashMap::new();
+    let mut labels: std::collections::HashMap<(String, String), Vec<String>> =
+        std::collections::HashMap::new();
     // Guard against pathological/looping trees. Defaults to 5 000 (the
     // historical hard-coded budget); callers can override via max_elements.
     let mut budget = max_elements.unwrap_or(5000usize);
@@ -1005,6 +1011,15 @@ async fn collect_visited_bounded<'a>(
             Some(Ok(n)) => n,
             _ => String::new(),
         };
+        let has_native_name = !name.trim().is_empty();
+        let showing = state_r
+            .as_ref()
+            .and_then(|r| r.as_ref().ok())
+            .map(|state| state.contains(State::Showing));
+        let visible = state_r
+            .as_ref()
+            .and_then(|r| r.as_ref().ok())
+            .map(|state| state.contains(State::Visible));
         let focused = matches!(state_r.as_ref(), Some(Ok(s)) if s.contains(State::Focused));
         let role_lower = role.to_ascii_lowercase();
         let checked = if role_lower.contains("check") {
@@ -1096,14 +1111,73 @@ async fn collect_visited_bounded<'a>(
         // contains the displayed content. Preserve both. Value often reports
         // zero for a string/empty cell and must not replace its actual text.
         if role_lower == "table cell" {
-            if let Some(text) = observed_text {
-                value = if text.is_empty() { None } else { Some(text) };
+            if let Some(text) = observed_text.as_ref() {
+                value = if text.is_empty() {
+                    None
+                } else {
+                    Some(text.clone())
+                };
             }
         }
 
         // Surface Text content as the display name when the widget has no name.
         if name.trim().is_empty() && !text_content.trim().is_empty() {
             name = text_content;
+        }
+
+        // GTK sometimes exports only one direction of the label relationship.
+        // Collect both, using object identity rather than sibling proximity.
+        // Only observed targets or reverse-label sources initiate discovery.
+        // Explicit LabelledBy may refer to a non-showing semantic label.
+        if is_observed(showing, visible)
+            && (!has_native_name || role_lower == "label")
+            && std::time::Instant::now() < deadline
+        {
+            if let Some(Ok(relations)) = call(acc.get_relation_set()).await {
+                for (kind, references) in relations {
+                    if kind != RelationType::LabelFor && kind != RelationType::LabelledBy {
+                        continue;
+                    }
+                    for reference in references.into_iter().take(8) {
+                        if std::time::Instant::now() >= deadline {
+                            break;
+                        }
+                        let Some(raw) = RawObjectRef::from_atspi(&reference) else {
+                            continue;
+                        };
+                        let Some(other) = identity_ref(conn, &raw, &mut identity_owners).await
+                        else {
+                            continue;
+                        };
+                        let binding = if kind == RelationType::LabelFor && !name.trim().is_empty() {
+                            Some(((other.name, other.path), name.clone()))
+                        } else if kind == RelationType::LabelledBy && !has_native_name {
+                            if let (Some(object), Some(Ok(label))) = (
+                                object_identity.as_ref(),
+                                call(accessible_for(conn, &other)).await,
+                            ) {
+                                call(label.name())
+                                    .await
+                                    .and_then(|r| r.ok())
+                                    .filter(|label| !label.trim().is_empty())
+                                    .map(|label| {
+                                        ((object.name.clone(), object.path.clone()), label)
+                                    })
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+                        if let Some((key, label)) = binding {
+                            let names = labels.entry(key).or_default();
+                            if !names.contains(&label) {
+                                names.push(label);
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // Children inherit web-document context, plus this node's own role.
@@ -1132,9 +1206,13 @@ async fn collect_visited_bounded<'a>(
             depth,
             role,
             name,
+            has_native_name,
+            observed_text,
             value,
             checked,
             enabled,
+            showing,
+            visible,
             selected,
             selectable,
             actions,
@@ -1156,6 +1234,24 @@ async fn collect_visited_bounded<'a>(
                 }),
             acc,
         });
+    }
+
+    for node in &mut visited {
+        if node.has_native_name {
+            continue;
+        }
+        if let Some(names) = node
+            .identity
+            .as_ref()
+            .and_then(|id| labels.get(&(id.bus_name.clone(), id.path.clone())))
+        {
+            // A related label names the field; preserve its actual Text
+            // content as a value, including read-only text widgets.
+            if let Some(text) = node.observed_text.as_ref().filter(|text| !text.is_empty()) {
+                node.value = Some(text.clone());
+            }
+            node.name = names.join(" ");
+        }
     }
 
     dlog!("walked pid {pid}: {} node(s)", visited.len());
@@ -1196,7 +1292,12 @@ fn render(visited: &[Visited<'_>], only_frame: Option<usize>) -> (String, Vec<At
             current_frame = Some(v.frame_ordinal);
             parent_at_depth.clear();
         }
-        let emit = only_frame.is_none_or(|frame| frame == v.frame_ordinal);
+        // Every visited sibling retires deeper ancestry, including passive or
+        // hidden containers. Otherwise a following field can inherit a prior
+        // sibling checkbox as its parent.
+        parent_at_depth.truncate(v.depth);
+        let emit = only_frame.is_none_or(|frame| frame == v.frame_ordinal)
+            && is_observed(v.showing, v.visible);
         let indent = "  ".repeat(v.depth);
         // Resolve parent: walk parent_at_depth from v.depth-1 down to 0.
         let parent_element_index = if v.depth == 0 {
@@ -1277,6 +1378,12 @@ fn render(visited: &[Visited<'_>], only_frame: Option<usize>) -> (String, Vec<At
 /// (e.g. `1.0`), so `value="..."` fields stay byte-compatible.
 fn format_value(v: f64) -> String {
     format!("{v:?}")
+}
+
+/// Unknown state is not evidence of invisibility. Keep the actuator index
+/// predicate unchanged: filtering presentation must never renumber targets.
+fn is_observed(showing: Option<bool>, visible: Option<bool>) -> bool {
+    showing != Some(false) && visible != Some(false)
 }
 
 /// Interpret the positive AT-SPI states that establish user operability.
@@ -1409,18 +1516,14 @@ pub(super) fn walk_tree_bounded_with_timeout(
                 Vec::new()
             }
         };
-        // Bounds are keyed by the application-wide element index, so drop the
-        // entries for windows this snapshot no longer shows.
-        let bounds = if scoped_frame.is_some() {
-            let emitted: std::collections::HashSet<usize> =
-                nodes.iter().filter_map(|node| node.element_index).collect();
-            bounds
-                .into_iter()
-                .filter(|(index, ..)| emitted.contains(index))
-                .collect()
-        } else {
-            bounds
-        };
+        // Bounds use application-wide indices; retain only controls emitted
+        // in this observation, including unscoped snapshots.
+        let emitted: std::collections::HashSet<usize> =
+            nodes.iter().filter_map(|node| node.element_index).collect();
+        let bounds = bounds
+            .into_iter()
+            .filter(|(index, ..)| emitted.contains(index))
+            .collect();
         Ok(Some(WalkedTree {
             markdown,
             nodes,
@@ -2180,6 +2283,39 @@ impl IndexedClickTarget {
     pub fn needs_foreground_pointer(&self) -> bool {
         let target = &self.visited[self.target_position];
         target.has_editable || target.role == "table cell"
+    }
+
+    /// LibreOffice GTK3 updates its drawing-area screen origin on pointer
+    /// motion. A plain indexed cell click must refresh this same accessible
+    /// after positioning the pointer, before its one button gesture.
+    pub fn needs_pointer_geometry_refresh(&self) -> bool {
+        let target = &self.visited[self.target_position];
+        target.role == "table cell"
+            && has_spreadsheet_ancestor(&self.visited, self.target_position)
+            && std::fs::read_link(format!("/proc/{}/exe", self.pid))
+                .ok()
+                .and_then(|path| path.file_name().map(|name| name == "soffice.bin"))
+                .unwrap_or(false)
+    }
+
+    pub fn verify_pointer_refresh_identity(&self) -> Result<()> {
+        self.verify_live()?;
+        bounded(
+            async {
+                let target = &self.visited[self.target_position];
+                let (name, role) =
+                    tokio::join!(call(target.acc.name()), call(target.acc.get_role_name()));
+                if !matches!(name, Some(Ok(ref value)) if value == &target.name)
+                    || !matches!(role, Some(Ok(ref value)) if value == &target.role)
+                {
+                    return Err(anyhow!(
+                        "retained Calc cell changed during pointer preparation"
+                    ));
+                }
+                Ok(())
+            },
+            || Err(anyhow!("Calc pointer preparation identity check timed out")),
+        )
     }
 
     /// Refresh Component extents through the retained proxies. No tree walk is
@@ -3491,6 +3627,55 @@ fn screen_extent_rebase(
     }
 }
 
+// A near-zero frame may be a correctly positioned maximized window. Component
+// Screen/Window agreement with the X11 client origin proves Screen is already
+// translated. Keep the existing renderer correction when evidence is missing.
+fn component_screen_rebase(
+    candidate: (i32, i32),
+    client_origin: (i32, i32),
+    screen_origin: (i32, i32),
+    window_origin: Option<(i32, i32)>,
+) -> (i32, i32) {
+    if let Some(window) = window_origin {
+        let translated = |screen: i32, local: i32, client: i32| {
+            (i64::from(screen) - i64::from(local) - i64::from(client)).abs() <= 2
+        };
+        if translated(screen_origin.0, window.0, client_origin.0)
+            && translated(screen_origin.1, window.1, client_origin.1)
+        {
+            return (0, 0);
+        }
+    }
+    candidate
+}
+
+/// Calc may supply a grid-window Screen translation that differs from the
+/// X11 client origin. Suppress only axes already translated by that provider;
+/// equal Screen/Window axes retain the existing compatibility correction.
+fn calc_screen_rebase(fallback: (i32, i32), screen: (i32, i32), window: (i32, i32)) -> (i32, i32) {
+    (
+        if screen.0 != window.0 { 0 } else { fallback.0 },
+        if screen.1 != window.1 { 0 } else { fallback.1 },
+    )
+}
+
+fn has_spreadsheet_ancestor(visited: &[Visited<'_>], position: usize) -> bool {
+    let target = &visited[position];
+    let mut depth = target.depth;
+    for ancestor in visited[..position].iter().rev() {
+        if ancestor.depth < depth {
+            if ancestor.frame_ordinal != target.frame_ordinal {
+                return false;
+            }
+            if ancestor.role == "document spreadsheet" {
+                return true;
+            }
+            depth = ancestor.depth;
+        }
+    }
+    false
+}
+
 fn rebase_renderer_window_offset(
     mut offset: (i32, i32),
     frame_origin: Option<(i32, i32)>,
@@ -3562,8 +3747,12 @@ async fn element_bounds_for_visited(
     // produce a zero delta; Chromium's local (0,0) frame produces the
     // required window-origin delta. GTK's explicit Window-coordinate
     // path above remains authoritative when available.
-    let screen_rebase = if offset.is_none() && !crate::wayland::is_wayland() && xid != 0 {
-        let x11_origin = x11_window_origin(xid);
+    let screen_client_origin = if offset.is_none() && !crate::wayland::is_wayland() && xid != 0 {
+        x11_window_origin(xid)
+    } else {
+        None
+    };
+    let screen_rebase = if let Some(origin) = screen_client_origin {
         let frame = visited.iter().filter(in_frame).find(|node| {
             node.has_component
                 && matches!(
@@ -3571,7 +3760,7 @@ async fn element_bounds_for_visited(
                     "frame" | "window" | "dialog" | "alert" | "file chooser"
                 )
         });
-        if let (Some(origin), Some(frame)) = (x11_origin, frame) {
+        if let Some(frame) = frame {
             let accessible_origin = match call(frame.acc.proxies()).await {
                 Some(Ok(proxies)) => match call(proxies.component()).await {
                     Some(Ok(component)) => {
@@ -3638,10 +3827,19 @@ async fn element_bounds_for_visited(
     if let Some((ox, oy)) = offset {
         dlog!("element bounds: WINDOW coords + screen offset ({ox},{oy})");
     } else if let Some((ox, oy)) = screen_rebase {
-        dlog!("element bounds: SCREEN coords + X11 frame rebase ({ox},{oy})");
+        dlog!("element bounds: SCREEN coords with candidate X11 frame rebase ({ox},{oy})");
     }
 
-    let action_nodes: Vec<&Visited> = visited.iter().filter(|v| is_indexable(v)).collect();
+    let calc_process = screen_rebase.is_some()
+        && std::fs::read_link(format!("/proc/{pid}/exe"))
+            .ok()
+            .and_then(|path| path.file_name().map(|name| name == "soffice.bin"))
+            .unwrap_or(false);
+    let action_nodes: Vec<(usize, &Visited)> = visited
+        .iter()
+        .enumerate()
+        .filter(|(_, node)| is_indexable(node))
+        .collect();
     // Hard wall-clock budget for the whole collection: on pathological
     // trees individual D-Bus calls each burn up to CALL_TIMEOUT (geany's
     // unrealized nodes did exactly that). Return whatever was collected
@@ -3650,7 +3848,7 @@ async fn element_bounds_for_visited(
     // made PX targeting depend on DOM order.
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
     let mut out = Vec::with_capacity(action_nodes.len());
-    for (idx, node) in action_nodes.iter().enumerate() {
+    for (idx, (position, node)) in action_nodes.iter().enumerate() {
         if element_index.is_some_and(|target| idx != target)
             || frame_ordinal.is_some_and(|frame| node.frame_ordinal != frame)
         {
@@ -3690,10 +3888,49 @@ async fn element_bounds_for_visited(
             } else {
                 (0, 0)
             };
+            let (component_x, component_y) = if let (Some(candidate), Some(client_origin)) = (
+                screen_rebase.filter(|delta| *delta != (0, 0)),
+                screen_client_origin,
+            ) {
+                let calc_cell = calc_process
+                    && node.role == "table cell"
+                    && has_spreadsheet_ancestor(visited, *position);
+                let window_origin = match call(comp.get_extents(CoordType::Window)).await {
+                    Some(Ok((wx, wy, ww, wh)))
+                        if wx > -16384
+                            && wy > -16384
+                            && ww > 1
+                            && wh > 1
+                            && (!calc_cell || (ww == w && wh == h)) =>
+                    {
+                        Some((wx, wy))
+                    }
+                    _ => None,
+                };
+                let fallback =
+                    component_screen_rebase(candidate, client_origin, (x, y), window_origin);
+                if calc_cell {
+                    let Some(window) = window_origin else {
+                        continue;
+                    };
+                    // Do not compare origins across a changing layout. Omit
+                    // unstable bounds before any pointer input is submitted.
+                    if !matches!(call(comp.get_extents(CoordType::Screen)).await,
+                        Some(Ok(bounds)) if bounds == (x, y, w, h))
+                    {
+                        continue;
+                    }
+                    calc_screen_rebase(fallback, (x, y), window)
+                } else {
+                    fallback
+                }
+            } else {
+                (offset_x, offset_y)
+            };
             out.push((
                 idx,
-                x + offset_x + document_x,
-                y + offset_y + document_y,
+                x + component_x + document_x,
+                y + component_y + document_y,
                 w as u32,
                 h as u32,
             ));
@@ -3807,6 +4044,32 @@ mod frame_correlation_tests {
 
 #[cfg(test)]
 mod coord_tests {
+    #[test]
+    fn calc_cell_translation_is_not_applied_twice() {
+        // Exact observed first/post-edit geometry; public SDK tests establish
+        // the physical click and saved-document behavior independently.
+        assert_eq!(
+            super::calc_screen_rebase((0, 17), (213, 363), (213, 363)),
+            (0, 17)
+        );
+        assert_eq!(
+            super::calc_screen_rebase((0, 17), (213, 387), (213, 363)),
+            (0, 0)
+        );
+        assert_eq!(
+            super::calc_screen_rebase((200, 17), (213, 387), (213, 363)),
+            (200, 0)
+        );
+        assert_eq!(
+            super::calc_screen_rebase((200, 100), (413, 463), (213, 363)),
+            (0, 0)
+        );
+        assert_eq!(
+            super::component_screen_rebase((0, 17), (0, 17), (213, 387), Some((213, 363))),
+            (0, 17)
+        );
+    }
+
     use super::parse_gtk_frame_extents;
     use super::{
         activation_index, before_snapshot_deadline, combine_wayland_content_offsets,
@@ -4014,6 +4277,36 @@ mod coord_tests {
         assert_eq!(screen_extent_rebase((604, 80), (0, 0)), Some((604, 80)));
         assert_eq!(screen_extent_rebase((604, 100), (604, 80)), None);
         assert_eq!(screen_extent_rebase((604, 80), (604, 80)), None);
+    }
+
+    #[test]
+    fn component_screen_coordinates_do_not_receive_the_client_origin_twice() {
+        // Retained maximized LibreOffice field: outer frame0,0; client0,17.
+        assert_eq!(
+            super::component_screen_rebase((0, 17), (0, 17), (1197, 173), Some((1197, 156))),
+            (0, 0)
+        );
+        assert_eq!(
+            super::component_screen_rebase((-604, 80), (-604, 80), (-504, 180), Some((100, 100))),
+            (0, 0)
+        );
+    }
+
+    #[test]
+    fn renderer_local_screen_coordinates_retain_their_origin_correction() {
+        assert_eq!(
+            super::component_screen_rebase((604, 80), (604, 80), (100, 100), Some((100, 100))),
+            (604, 80)
+        );
+        assert_eq!(
+            super::component_screen_rebase((604, 80), (604, 80), (100, 100), None),
+            (604, 80)
+        );
+        // Agreement on only one axis does not establish correct translation.
+        assert_eq!(
+            super::component_screen_rebase((0, 17), (0, 17), (100, 100), Some((100, 100))),
+            (0, 17)
+        );
     }
 
     #[test]

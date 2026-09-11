@@ -2434,36 +2434,7 @@ pub fn try_click_xtest_already_focused(
     let root = conn.setup().roots[screen_num].root;
     let target = u32::try_from(xid).context("X11 target window exceeds 32 bits")?;
     let active_atom = conn.intern_atom(true, b"_NET_ACTIVE_WINDOW")?.reply()?.atom;
-    let check = || -> Result<Option<(i32, i32)>> {
-        let geometry = conn.get_geometry(target)?.reply()?;
-        if x < 0 || y < 0 || x >= i32::from(geometry.width) || y >= i32::from(geometry.height) {
-            bail!("X11 click point is outside the requested client window");
-        }
-        if !x11_target_already_focused(&conn, root, active_atom, target)? {
-            return Ok(None);
-        }
-        let local_x =
-            i16::try_from(x).context("X11 click x exceeds the protocol coordinate range")?;
-        let local_y =
-            i16::try_from(y).context("X11 click y exceeds the protocol coordinate range")?;
-        let translated = conn
-            .translate_coordinates(target, root, local_x, local_y)?
-            .reply()?;
-        let (sx, sy) = (i32::from(translated.dst_x), i32::from(translated.dst_y));
-        if !translated.same_screen
-            || sx < 0
-            || sy < 0
-            || sx >= i32::from(conn.setup().roots[screen_num].width_in_pixels)
-            || sy >= i32::from(conn.setup().roots[screen_num].height_in_pixels)
-        {
-            bail!("X11 click point cannot be represented on the target screen");
-        }
-        if !x11_input_point_within_target(&conn, root, target, translated.dst_x, translated.dst_y)?
-        {
-            return Ok(None);
-        }
-        Ok(Some((sx, sy)))
-    };
+    let check = || checked_focused_click_point(&conn, screen_num, active_atom, target, x, y);
     let Some((sx, sy)) = check()? else {
         return Ok(false);
     };
@@ -2475,6 +2446,93 @@ pub fn try_click_xtest_already_focused(
     })
     .context("X11 click interrupted; pointer/key input may have been delivered and must not be automatically replayed")?;
     Ok(true)
+}
+
+/// Refresh a retained target's window-local point after a real pointer motion.
+/// The caller must resolve the same observed object, never another ordinal.
+/// `false` is possible only before any input is submitted. Once the preliminary
+/// motion is attempted, errors must not cause a fallback or automatic replay.
+///
+/// The server round-trip and 50 ms settling interval give native UI event
+/// processing an opportunity to update bounds; they are not an application
+/// acknowledgement. The caller must keep its identity/staleness guards, and
+/// focus/stacking can still change between checks and input requests.
+pub fn try_click_xtest_already_focused_refreshed(
+    xid: u64,
+    x: i32,
+    y: i32,
+    button: u8,
+    count: usize,
+    modifiers: &[&str],
+    refresh: impl Fn() -> Result<(i32, i32)>,
+) -> Result<bool> {
+    use x11rb::protocol::xtest::ConnectionExt as _;
+    let (conn, screen_num) = connect_x11_for_input()?;
+    let root = conn.setup().roots[screen_num].root;
+    let target = u32::try_from(xid).context("X11 target window exceeds 32 bits")?;
+    let active_atom = conn.intern_atom(true, b"_NET_ACTIVE_WINDOW")?.reply()?.atom;
+    let check = |x, y| checked_focused_click_point(&conn, screen_num, active_atom, target, x, y);
+    let Some((sx, sy)) = check(x, y)? else {
+        return Ok(false);
+    };
+    (|| -> Result<()> {
+        conn.xtest_fake_input(MOTION_NOTIFY_EVENT, 0, 0, root, sx as i16, sy as i16, 0)?;
+        conn.flush()?;
+        conn.get_input_focus()?.reply()?;
+        sleep(Duration::from_millis(50));
+        let (refreshed_x, refreshed_y) = refresh()?;
+        let Some((refreshed_sx, refreshed_sy)) = check(refreshed_x, refreshed_y)? else {
+            bail!("exact target focus or input surface changed after pointer motion");
+        };
+        send_click_xtest_on_connection(
+            &conn, root, refreshed_sx, refreshed_sy, button, count, modifiers, || {
+                if check(refreshed_x, refreshed_y)? != Some((refreshed_sx, refreshed_sy)) {
+                    bail!("exact target focus, geometry, or input surface changed");
+                }
+                Ok(())
+            },
+        )
+    })()
+    .context("X11 refreshed click interrupted; pointer/key input may have been delivered and must not be automatically replayed")?;
+    Ok(true)
+}
+
+/// Return a screen point only for the exact active client and visible input
+/// surface. This helper performs read-only checks and injects no input.
+fn checked_focused_click_point(
+    conn: &RustConnection,
+    screen_num: usize,
+    active_atom: Atom,
+    target: Window,
+    x: i32,
+    y: i32,
+) -> Result<Option<(i32, i32)>> {
+    let root = conn.setup().roots[screen_num].root;
+    let geometry = conn.get_geometry(target)?.reply()?;
+    if x < 0 || y < 0 || x >= i32::from(geometry.width) || y >= i32::from(geometry.height) {
+        bail!("X11 click point is outside the requested client window");
+    }
+    if !x11_target_already_focused(conn, root, active_atom, target)? {
+        return Ok(None);
+    }
+    let local_x = i16::try_from(x).context("X11 click x exceeds the protocol coordinate range")?;
+    let local_y = i16::try_from(y).context("X11 click y exceeds the protocol coordinate range")?;
+    let translated = conn
+        .translate_coordinates(target, root, local_x, local_y)?
+        .reply()?;
+    let (sx, sy) = (i32::from(translated.dst_x), i32::from(translated.dst_y));
+    if !translated.same_screen
+        || sx < 0
+        || sy < 0
+        || sx >= i32::from(conn.setup().roots[screen_num].width_in_pixels)
+        || sy >= i32::from(conn.setup().roots[screen_num].height_in_pixels)
+    {
+        bail!("X11 click point cannot be represented on the target screen");
+    }
+    if !x11_input_point_within_target(conn, root, target, translated.dst_x, translated.dst_y)? {
+        return Ok(None);
+    }
+    Ok(Some((sx, sy)))
 }
 
 /// Walk the actual stacking order from the root toward the requested client.
