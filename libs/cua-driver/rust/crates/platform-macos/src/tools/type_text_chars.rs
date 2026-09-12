@@ -90,6 +90,7 @@ impl Tool for TypeTextCharsTool {
                 window_id: wid,
                 element_index: idx,
                 via_token: _,
+                element_token: _,
             } => (Some(idx), wid),
         };
         let type_chars_only = args.bool_or("type_chars_only", false);

@@ -248,6 +248,7 @@ impl Tool for HotkeyTool {
                 window_id,
                 element_index,
                 via_token: _,
+                element_token: _,
             } => (Some(element_index), window_id),
         };
         // delivery_mode gates whether we raise: background (default) never fronts

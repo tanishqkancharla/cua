@@ -52,6 +52,13 @@ impl McpDriver {
         Self::spawn_internal(&[], &[], Some(recording_label), false, true)
     }
 
+    /// Spawn a source-tree driver that performs auxiliary observations without
+    /// allocating a behavioral recording. The primary driver for the case owns
+    /// the visible trajectory and must start recording before its action.
+    pub fn spawn_unrecorded() -> Option<Self> {
+        Self::spawn_internal(&[], &[], None, false, false)
+    }
+
     /// Spawn a named driver with the native cursor overlay enabled.
     ///
     /// Most testkit daemons disable the overlay so unrelated behavior tests

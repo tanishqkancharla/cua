@@ -2448,6 +2448,100 @@ pub fn resolve_indexed_click_target(
     )
 }
 
+/// Resolve the observed text accessible by stable identity. Selection ranges
+/// are valid only for the object that was observed; a current ordinal can move
+/// when a toolkit rebuilds siblings such as toolbar controls.
+fn resolve_selection_target<'a>(
+    visited: &'a [Visited<'a>],
+    frame: usize,
+    identity: &AtspiIdentity,
+) -> Result<&'a Visited<'a>> {
+    let position = resolve_selection_target_position(
+        visited.iter().enumerate().map(|(position, node)| {
+            (
+                position,
+                node.identity.as_ref(),
+                node.frame_ordinal,
+                is_indexable(node),
+            )
+        }),
+        frame,
+        identity,
+    )?;
+    Ok(&visited[position])
+}
+
+fn resolve_selection_target_position<'a>(
+    candidates: impl Iterator<Item = (usize, Option<&'a AtspiIdentity>, usize, bool)>,
+    frame: usize,
+    identity: &AtspiIdentity,
+) -> Result<usize> {
+    let mut matches = candidates.filter(|(_, candidate, _, _)| *candidate == Some(identity));
+    let (position, _, candidate_frame, indexable) = matches.next().ok_or_else(|| {
+        anyhow!(
+            "{}: observed AT-SPI selection object is no longer present",
+            cua_driver_core::element_token::STALE_TOKEN_ERROR
+        )
+    })?;
+    if matches.next().is_some() || candidate_frame != frame || !indexable {
+        return Err(anyhow!(
+            "{}: observed selection object is ambiguous, disabled or outside the target window",
+            cua_driver_core::element_token::STALE_TOKEN_ERROR
+        ));
+    }
+    Ok(position)
+}
+
+#[cfg(test)]
+mod selection_identity_tests {
+    use super::resolve_selection_target_position;
+    use crate::atspi::AtspiIdentity;
+
+    fn identity(path: &str) -> AtspiIdentity {
+        AtspiIdentity {
+            bus_name: ":1.42".into(),
+            path: path.into(),
+            frame_bus_name: ":1.42".into(),
+            frame_path: "/frame".into(),
+        }
+    }
+
+    #[test]
+    fn index_drift_with_duplicate_text_keeps_the_observed_identity() {
+        let original = identity("/entry/original");
+        let replacement = identity("/entry/replacement");
+        // The old ordinal now names the replacement. Both entries may contain
+        // the same requested text/context, so text matching cannot establish
+        // which one was originally observed.
+        let live = [
+            (41, Some(&replacement), 3, true),
+            (97, Some(&original), 3, true),
+        ];
+        assert_eq!(
+            resolve_selection_target_position(live.into_iter(), 3, &original).unwrap(),
+            97
+        );
+    }
+
+    #[test]
+    fn missing_or_cross_frame_identity_refuses_before_selection() {
+        let original = identity("/entry/original");
+        let replacement = identity("/entry/replacement");
+        assert!(resolve_selection_target_position(
+            [(41, Some(&replacement), 3, true)].into_iter(),
+            3,
+            &original,
+        )
+        .is_err());
+        assert!(resolve_selection_target_position(
+            [(41, Some(&original), 4, true)].into_iter(),
+            3,
+            &original,
+        )
+        .is_err());
+    }
+}
+
 /// Text selection never uses activation, pointer events, or keyboard replay.
 /// All errors after the first selection/caret request are marked uncertain,
 /// including negative replies and read-back failures: callers must observe.
@@ -2480,16 +2574,10 @@ pub fn select_text(
                 .await?
                 .ok_or_else(|| anyhow!("no AT-SPI application for selection"))?;
             let frame = frame.ok_or_else(|| anyhow!("selection window identity is ambiguous"))?;
-            // Do not filter by frame before numbering: snapshot indices are
-            // application-wide, including other top-levels in this process.
-            let target = visited
-                .iter()
-                .filter(|node| is_indexable(node))
-                .nth(request.element_index)
-                .ok_or_else(|| anyhow!("selection element is no longer present"))?;
-            if target.frame_ordinal != frame {
-                return Err(anyhow!("selection element belongs to another window"));
-            }
+            // The observed ordinal authorizes an object only in that snapshot.
+            // A fresh traversal must resolve the retained accessible identity,
+            // otherwise unrelated toolbar/tree churn can retarget selection.
+            let target = resolve_selection_target(&visited, frame, &request.observed_identity)?;
             verify_selection_window(&visited, pid, xid, frame, &window_topology).await?;
             let proxies = target
                 .acc

@@ -8772,7 +8772,9 @@ pub fn build_registry_with_provider(
     let pid_window_candidates: WindowTargetCandidates = Arc::new(pid_window_target_candidates);
     r.register(pid_window_guarded(BringToFrontTool, &pid_window_candidates));
     r.register(pid_window_guarded(
-        super::text_selection::SelectTextTool,
+        super::text_selection::SelectTextTool {
+            element_cache: state.element_cache.clone(),
+        },
         &pid_window_candidates,
     ));
     r.register(pid_window_guarded(

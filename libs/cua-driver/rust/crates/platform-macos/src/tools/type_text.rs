@@ -227,6 +227,7 @@ impl Tool for TypeTextTool {
                 window_id: wid,
                 element_index: idx,
                 via_token: _,
+                element_token: _,
             } => (Some(idx), wid),
         };
         let delay_ms = args.u64_or("delay_ms", 30);

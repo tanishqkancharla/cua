@@ -207,6 +207,7 @@ impl Tool for ScrollTool {
                 window_id: wid,
                 element_index: idx,
                 via_token: _,
+                element_token: _,
             } => (Some(idx), wid),
         };
 

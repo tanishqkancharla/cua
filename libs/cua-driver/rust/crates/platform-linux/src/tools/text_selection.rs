@@ -1,5 +1,8 @@
 //! Exact native Text-interface selection. No pointer/keyboard fallback.
-use crate::text_selection::{SelectionKind, SelectionRequest};
+use crate::{
+    atspi::ElementCache,
+    text_selection::{SelectionKind, SelectionRequest},
+};
 use async_trait::async_trait;
 use cua_driver_core::{
     element_token::{resolve_element_args, ResolvedElement},
@@ -8,9 +11,11 @@ use cua_driver_core::{
     tool_args::ArgsExt,
 };
 use serde_json::{json, Value};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
-pub(super) struct SelectTextTool;
+pub(super) struct SelectTextTool {
+    pub element_cache: Arc<ElementCache>,
+}
 static DEF: OnceLock<ToolDef> = OnceLock::new();
 
 fn refused(message: impl Into<String>) -> ToolResult {
@@ -111,7 +116,7 @@ impl Tool for SelectTextTool {
         };
         let token = args.opt_str("element_token");
         let snapshot = args.opt_str("snapshot_id");
-        let (index, window) = match resolve_element_args(
+        let (index, window, resolved_token) = match resolve_element_args(
             pid as i32,
             index,
             token.as_deref(),
@@ -122,17 +127,27 @@ impl Tool for SelectTextTool {
             Ok(ResolvedElement::Element {
                 element_index,
                 window_id: Some(window_id),
+                element_token,
                 ..
-            }) => (element_index, window_id),
+            }) => (element_index, window_id, element_token),
             Ok(_) => return refused("select_text requires an exact snapshot-bound element"),
             Err(error) => return error,
         };
+        let observed_identity =
+            match self
+                .element_cache
+                .observed_identity(pid, window as u64, index, &resolved_token)
+            {
+                Ok(identity) => identity,
+                Err(error) => return refused(error),
+            };
         let request = SelectionRequest {
             pid,
             window_id: window as u64,
             element_index: index,
             element_token: token,
             snapshot_id: snapshot,
+            observed_identity,
             text,
             prefix: args.opt_str("prefix"),
             suffix: args.opt_str("suffix"),
