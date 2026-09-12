@@ -552,8 +552,8 @@ fn harness_gtk3_select_text_binds_the_observed_identity_after_index_drift() {
         // A separate driver owns the visible fixture action and its snapshot
         // registry. It therefore proves real index drift without refreshing
         // the primary driver's token or cached observed identity.
-        let mut observer = McpDriver::spawn_named(&format!("{cell_id}-independent-observer"))
-            .expect("start independent source-built Linux driver");
+        let mut observer =
+            McpDriver::spawn_unrecorded().expect("start independent source-built Linux driver");
         let before_drift = snapshot(&mut observer, pid, window_id);
         let insert = observer.call(
             "click",
