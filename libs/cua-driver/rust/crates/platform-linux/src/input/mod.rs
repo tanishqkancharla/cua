@@ -2372,6 +2372,10 @@ pub fn send_key_xtest(key: &str, modifiers: &[&str]) -> Result<()> {
         conn.xtest_fake_input(KEY_PRESS_EVENT, sk, 0, x11rb::NONE, 0, 0, 0)?;
     }
     conn.xtest_fake_input(KEY_PRESS_EVENT, keycode, 0, x11rb::NONE, 0, 0, 0)?;
+    // Begin the existing hold interval only after the server has processed
+    // key-down. Sleeping with buffered requests sent press and release
+    // together, producing a zero-duration tap instead of KEY_DELAY_MS.
+    conn.get_input_focus()?.reply()?;
     sleep(Duration::from_millis(KEY_DELAY_MS));
     conn.xtest_fake_input(KEY_RELEASE_EVENT, keycode, 0, x11rb::NONE, 0, 0, 0)?;
     if let Some(sk) = auto_shift_kc {
