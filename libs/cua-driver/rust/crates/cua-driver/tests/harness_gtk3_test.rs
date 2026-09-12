@@ -580,17 +580,29 @@ fn harness_gtk3_select_text_binds_the_observed_identity_after_index_drift() {
             "the old ordinal must now resolve to the inserted duplicate"
         );
 
-        driver.start_behavior_recording();
-        let selected = driver.call(
-            "select_text",
-            serde_json::json!({
-                "pid": pid,
-                "window_id": window_id,
-                "element_index": index,
-                "element_token": token,
-                "text": "SELECTION_IDENTITY_DUPLICATE_v1"
-            }),
-        );
+        // The primary snapshot and token stay intact until this action. The
+        // background helper uses native desktop observations for this target;
+        // it does not refresh the primary driver's AT-SPI snapshot.
+        let (selected, passed) = run_with_background_oracles(
+            &mut driver,
+            TargetWindow {
+                pid,
+                native_id: window_id,
+            },
+            |driver| {
+                driver.call(
+                    "select_text",
+                    serde_json::json!({
+                        "pid": pid,
+                        "window_id": window_id,
+                        "element_index": index,
+                        "element_token": token,
+                        "text": "SELECTION_IDENTITY_DUPLICATE_v1"
+                    }),
+                )
+            },
+        )
+        .unwrap_or_else(|error| panic!("background selection oracles failed: {error}"));
         assert!(
             !selected.is_error(),
             "select_text rejected the preserved observed Entry: {}",
@@ -602,7 +614,7 @@ fn harness_gtk3_select_text_binds_the_observed_identity_after_index_drift() {
             window_id,
             "selection_drift=applied selection_target=selection-original",
         );
-        Observation::delivered_with_fixture_state(Vec::new())
+        Observation::delivered_with_fixture_state(passed)
     });
 }
 

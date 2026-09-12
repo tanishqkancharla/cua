@@ -194,7 +194,7 @@ jobs:
           workspaces: "libs/cua-driver/rust -> target"
           key: linux-selection-identity
           cache-on-failure: true
-      - name: Install focused GTK3 build dependencies
+      - name: Install focused GTK3 and Electron sentinel dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
