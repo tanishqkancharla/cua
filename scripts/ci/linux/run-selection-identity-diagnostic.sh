@@ -118,7 +118,7 @@ jq -n \
   --arg baseline_actual_sha256 "${actual_baseline_sha256}" \
   --arg baseline_status "${baseline_status}" \
   --arg test_name "${TEST_NAME}" \
-  '{schema:$schema,test_source_sha:$test_source_sha,candidate_driver_sha256:$candidate_sha256,test_executable_sha256:$test_sha256,gtk3_fixture_sha256:$fixture_sha256,electron_sentinel_launcher_sha256:$sentinel_sha256,electron_sentinel_fixture_sha256:$sentinel_fixture_sha256,baseline:{label:$baseline_label,expected_driver_sha256:$baseline_expected_sha256,actual_driver_sha256:$actual_baseline_sha256,status:$baseline_status},test_name:$test_name}' \
+  '{schema:$schema,test_source_sha:$test_source_sha,candidate_driver_sha256:$candidate_sha256,test_executable_sha256:$test_sha256,gtk3_fixture_sha256:$fixture_sha256,electron_sentinel_launcher_sha256:$sentinel_sha256,electron_sentinel_fixture_sha256:$sentinel_fixture_sha256,baseline:{label:$baseline_label,expected_driver_sha256:$baseline_expected_sha256,actual_driver_sha256:$baseline_actual_sha256,status:$baseline_status},test_name:$test_name}' \
   > "${ARTIFACT_DIR}/identity-receipt.json"
 {
   sha256sum \
