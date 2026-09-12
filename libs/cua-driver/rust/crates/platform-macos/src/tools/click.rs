@@ -367,6 +367,7 @@ impl Tool for ClickTool {
                 window_id: wid,
                 element_index: idx,
                 via_token,
+                element_token: _,
             } => (Some(idx), wid, via_token),
         };
         let x = args

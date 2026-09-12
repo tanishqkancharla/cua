@@ -132,6 +132,7 @@ impl Tool for SetValueTool {
                 window_id: Some(wid),
                 element_index: idx,
                 via_token: _,
+                element_token: _,
             } => (idx, wid),
             cua_driver_core::element_token::ResolvedElement::Element {
                 window_id: None, ..
