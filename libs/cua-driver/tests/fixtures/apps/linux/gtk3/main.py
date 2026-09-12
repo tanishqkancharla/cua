@@ -118,6 +118,7 @@ class HarnessWindow(Gtk.Window):
                 (self.selection_drift_replacement, "selection-replacement"),
             ):
                 entry.connect("notify::selection-bound", self.on_selection_drift, name)
+                entry.connect("notify::cursor-position", self.on_selection_drift, name)
                 self.selection_drift_box.pack_start(entry, False, False, 0)
             self.selection_drift_box.pack_start(self.selection_drift_button, False, False, 0)
             self.selection_drift_box.pack_start(self.selection_drift_status, False, False, 0)
@@ -244,6 +245,9 @@ class HarnessWindow(Gtk.Window):
         self.selection_drift_insert.connect(
             "notify::selection-bound", self.on_selection_drift, "selection-drift-insert"
         )
+        self.selection_drift_insert.connect(
+            "notify::cursor-position", self.on_selection_drift, "selection-drift-insert"
+        )
         self.selection_drift_box.pack_start(self.selection_drift_insert, False, False, 0)
         self.selection_drift_box.reorder_child(self.selection_drift_insert, 0)
         self.selection_drift_insert.show()
@@ -251,6 +255,8 @@ class HarnessWindow(Gtk.Window):
         self.selection_drift_status.set_text("selection_drift=applied")
 
     def on_selection_drift(self, entry, _property, name):
+        # Selection beginning at zero can keep selection-bound unchanged and
+        # move only cursor-position; observe both ends of the real selection.
         # PyGObject versions expose GtkEditable.get_selection_bounds() as
         # either `(start, end)` / `()` or `(selected, start, end)`.
         bounds = entry.get_selection_bounds()
