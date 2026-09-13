@@ -70,6 +70,7 @@
       "mouse_button_down",
       "mouse_button_up",
       "mouse_drag",
+      "native_paste",
       "parallel_mouse_drag",
       "select_text"
     ]
