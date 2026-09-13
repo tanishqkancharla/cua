@@ -2505,6 +2505,11 @@ pub fn try_click_xtest_already_focused_refreshed(
 
 /// Return a screen point only for the exact active client and visible input
 /// surface. This helper performs read-only checks and injects no input.
+///
+/// A transient popup can be a root sibling of its active owner rather than a
+/// child of that window. When the visible hit is such a popup, accept it only
+/// when its X11 client identity matches the active target. This keeps the
+/// exposed popup on the XTest delivery path.
 fn checked_focused_click_point(
     conn: &RustConnection,
     screen_num: usize,
@@ -2546,6 +2551,12 @@ fn checked_focused_click_point(
 /// an always-on-top sibling can cover the pixel while keyboard focus stays put.
 /// Respect both bounding and input shapes so an input-transparent cursor
 /// overlay does not hide the app, and a shaped window's hole is not a hit.
+///
+/// A root-sibling popup is accepted only if it meets the same exact ownership
+/// and combo-popup criteria used for its composed screenshot. An ordinary
+/// sibling from the same process is still excluded: it must be the target's
+/// input-bearing, transient X11 combo popup before a coordinate click can cross
+/// the original toplevel.
 fn x11_input_point_within_target(
     conn: &RustConnection,
     root: Window,
@@ -2557,6 +2568,9 @@ fn x11_input_point_within_target(
     let mut current = root;
     for _ in 0..64 {
         if current == target {
+            return Ok(true);
+        }
+        if current != root && x11_owned_combo_popup_for_target(conn, target, current)? {
             return Ok(true);
         }
         let tree = conn.query_tree(current)?.reply()?;
@@ -2607,6 +2621,86 @@ fn x11_input_point_within_target(
         current = child;
     }
     Ok(false)
+}
+
+/// Return whether `candidate` is the target's visible X11 combo popup. This
+/// mirrors the ownership boundary used by popup capture: explicit transient
+/// owner, matching PID, exact COMBO type, and override-redirect. Matching a
+/// process alone would allow a click into another normal document window from
+/// the same multi-window application.
+fn x11_owned_combo_popup_for_target(
+    conn: &RustConnection,
+    target: Window,
+    candidate: Window,
+) -> Result<bool> {
+    let attributes = conn.get_window_attributes(candidate)?.reply()?;
+    if !attributes.override_redirect {
+        return Ok(false);
+    }
+    let transient =
+        x11_window_property_values(conn, candidate, b"WM_TRANSIENT_FOR", AtomEnum::WINDOW)?;
+    let target_pid = x11_window_property_values(conn, target, b"_NET_WM_PID", AtomEnum::CARDINAL)?;
+    let candidate_pid =
+        x11_window_property_values(conn, candidate, b"_NET_WM_PID", AtomEnum::CARDINAL)?;
+    let combo = conn
+        .intern_atom(true, b"_NET_WM_WINDOW_TYPE_COMBO")?
+        .reply()?
+        .atom;
+    if combo == x11rb::NONE {
+        return Ok(false);
+    }
+    let types =
+        x11_window_property_values(conn, candidate, b"_NET_WM_WINDOW_TYPE", AtomEnum::ATOM)?;
+    Ok(x11_owned_combo_popup_properties_match(
+        target,
+        &transient,
+        &target_pid,
+        &candidate_pid,
+        combo,
+        &types,
+    ))
+}
+
+fn x11_owned_combo_popup_properties_match(
+    target: Window,
+    transient: &[u32],
+    target_pid: &[u32],
+    candidate_pid: &[u32],
+    combo: Atom,
+    types: &[u32],
+) -> bool {
+    transient == [target]
+        && target_pid.len() == 1
+        && target_pid == candidate_pid
+        && types == [combo]
+}
+
+/// Read a short typed X11 ownership property. Absence is an empty list;
+/// malformed or longer property data is an error so ownership checks fail
+/// closed. All current callers require exactly one value.
+fn x11_window_property_values(
+    conn: &RustConnection,
+    window: Window,
+    name: &[u8],
+    kind: AtomEnum,
+) -> Result<Vec<u32>> {
+    let atom = conn.intern_atom(true, name)?.reply()?.atom;
+    if atom == x11rb::NONE {
+        return Ok(Vec::new());
+    }
+    let reply = conn
+        .get_property(false, window, atom, kind, 0, 2)?
+        .reply()?;
+    if reply.type_ == x11rb::NONE {
+        return Ok(Vec::new());
+    }
+    if reply.type_ != u32::from(kind) || reply.format != 32 || reply.bytes_after != 0 {
+        bail!("unsupported X11 popup ownership property format");
+    }
+    reply
+        .value32()
+        .map(|values| values.collect())
+        .ok_or_else(|| anyhow!("missing X11 popup ownership property values"))
 }
 
 /// Real XTest click with physical modifier down/up transitions around the
@@ -3262,7 +3356,7 @@ mod path_tests {
         is_uinput_unavailable, kde_x11_uinput_hotplug_is_unsafe, master_pointer_name,
         modifiers_to_state, normalize_uinput_device_name, path_cumulative, point_on_path,
         real_pointer_capabilities_available, sample_function, slave_pointer_name,
-        EVDEV_UINPUT_NAME_MAX_BYTES, UINPUT_POINTER_SUFFIX,
+        x11_owned_combo_popup_properties_match, EVDEV_UINPUT_NAME_MAX_BYTES, UINPUT_POINTER_SUFFIX,
     };
     use x11rb::protocol::xproto::KeyButMask;
 
@@ -3456,6 +3550,46 @@ mod path_tests {
             .expect_err("the creation choke point must refuse before opening X11 or uinput");
         assert!(is_uinput_unavailable(&error));
         assert!(error.to_string().contains("delivery_mode='foreground'"));
+    }
+
+    #[test]
+    fn owned_combo_popup_properties_require_exact_owner_and_type() {
+        assert!(x11_owned_combo_popup_properties_match(
+            42,
+            &[42],
+            &[99],
+            &[99],
+            77,
+            &[77],
+        ));
+    }
+
+    #[test]
+    fn foreign_root_sibling_does_not_match_owned_combo_properties() {
+        assert!(!x11_owned_combo_popup_properties_match(
+            42,
+            &[42],
+            &[99],
+            &[100],
+            77,
+            &[77],
+        ));
+        assert!(!x11_owned_combo_popup_properties_match(
+            42,
+            &[43],
+            &[99],
+            &[99],
+            77,
+            &[77],
+        ));
+        assert!(!x11_owned_combo_popup_properties_match(
+            42,
+            &[42],
+            &[99],
+            &[99],
+            77,
+            &[77, 78],
+        ));
     }
 
     #[test]
