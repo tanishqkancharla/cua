@@ -16,7 +16,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
-use atspi::connection::{AccessibilityConnection, P2P};
+use atspi::connection::AccessibilityConnection;
 use atspi::proxy::accessible::AccessibleProxy;
 use atspi::proxy::proxy_ext::ProxyExt;
 use atspi::{CoordType, Interface, RelationType, State, StateSet};
@@ -301,25 +301,13 @@ async fn accessible_for<'a>(
     conn: &'a AccessibilityConnection,
     oref: &RawObjectRef,
 ) -> Result<AccessibleProxy<'a>> {
-    // Keep the atspi crate's peer-to-peer path when this connection actually
-    // knows the peer. Late WebKit WebProcess children are not in the initial
-    // peer snapshot; object_as_accessible's bus fallback omits their destination
-    // and targets the Accessible interface name instead. Build an explicit bus
-    // proxy below for those late peers and for well-known references.
-    if oref.name.starts_with(':') {
-        let name = atspi::zbus::names::UniqueName::try_from(oref.name.clone())
-            .map_err(|e| anyhow!("bad a11y unique name: {e}"))?;
-        let bus_name = atspi::zbus::names::BusName::Unique(name.as_ref());
-        if conn.get_peer(&bus_name).is_some() {
-            let path = atspi::zbus::zvariant::ObjectPath::try_from(oref.path.clone())
-                .map_err(|e| anyhow!("bad a11y path: {e}"))?;
-            let object = atspi::ObjectRef::new_owned(name, path);
-            return conn
-                .object_as_accessible(&object)
-                .await
-                .map_err(|e| anyhow!("AccessibleProxy build failed: {e}"));
-        }
-    }
+    // Always build an explicit destination proxy. `object_as_accessible` takes
+    // the AT-SPI peer path when a peer is known, but does not let this caller
+    // enforce CacheProperties::No. That makes a previously discovered peer
+    // observably different from a late WebKit peer: zbus can issue the unsafe
+    // lazy Properties.GetAll described above. `oref` already carries the
+    // unique owner when one was resolved (or its valid well-known WebKit name),
+    // so the explicit destination preserves object identity for both paths.
     AccessibleProxy::builder(conn.connection())
         .cache_properties(atspi::zbus::proxy::CacheProperties::No)
         .destination(oref.name.clone())
