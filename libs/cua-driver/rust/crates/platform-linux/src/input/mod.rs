@@ -28,15 +28,19 @@ use std::ptr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::sleep;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::*;
+use x11rb::protocol::Event;
 use x11rb::rust_connection::RustConnection;
 
 const CLICK_DELAY_MS: u64 = 35;
 const DOUBLE_CLICK_DELAY_MS: u64 = 50;
 const XTEST_BUTTON_HOLD_MS: u64 = 50;
 const KEY_DELAY_MS: u64 = 10;
+// Bounds a participating client's event-loop acknowledgement. It is not a
+// replacement for that acknowledgement.
+const X11_REMAP_PING_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Debug)]
 pub struct VirtualPointerDrag {
@@ -2212,6 +2216,10 @@ pub(crate) fn x11_target_already_focused(
     {
         return Ok(false);
     }
+    x11_core_focus_within(conn, root, target)
+}
+
+fn x11_core_focus_within(conn: &RustConnection, root: Window, target: Window) -> Result<bool> {
     let mut focused = conn.get_input_focus()?.reply()?.focus;
     // Core focus may be in a child widget, but a sibling toplevel or modal is
     // not within this exact target. Never use PID or stale AX focus as proof.
@@ -2229,6 +2237,184 @@ pub(crate) fn x11_target_already_focused(
         focused = parent;
     }
     Ok(false)
+}
+
+#[derive(Clone, Copy)]
+struct X11RemapPingAtoms {
+    wm_protocols: Atom,
+    net_wm_ping: Atom,
+}
+
+#[derive(Clone, Copy)]
+struct X11RemapPing {
+    client: Window,
+    timestamp: u32,
+    atoms: X11RemapPingAtoms,
+}
+
+fn x11_remap_ping_atoms(conn: &RustConnection) -> Result<Option<X11RemapPingAtoms>> {
+    let wm_protocols = conn.intern_atom(true, b"WM_PROTOCOLS")?.reply()?.atom;
+    let net_wm_ping = conn.intern_atom(true, b"_NET_WM_PING")?.reply()?.atom;
+    if wm_protocols == x11rb::NONE || net_wm_ping == x11rb::NONE {
+        return Ok(None);
+    }
+    Ok(Some(X11RemapPingAtoms {
+        wm_protocols,
+        net_wm_ping,
+    }))
+}
+
+fn x11_window_advertises_ping(
+    conn: &RustConnection,
+    window: Window,
+    atoms: X11RemapPingAtoms,
+) -> Result<bool> {
+    let protocols = conn
+        .get_property(
+            false,
+            window,
+            atoms.wm_protocols,
+            AtomEnum::ATOM,
+            0,
+            u32::MAX,
+        )?
+        .reply()?;
+    Ok(protocols.type_ == u32::from(AtomEnum::ATOM)
+        && protocols.format == 32
+        && protocols
+            .value32()
+            .is_some_and(|mut values| values.any(|atom| atom == atoms.net_wm_ping)))
+}
+
+/// An exact target is tested as-is; it must never be replaced by a parent such
+/// as a WM decoration. Unindexed typing walks the focused child to its client.
+fn x11_remap_ping_client(
+    conn: &RustConnection,
+    root: Window,
+    target: Option<Window>,
+    atoms: X11RemapPingAtoms,
+) -> Result<Option<Window>> {
+    if let Some(target) = target {
+        return x11_window_advertises_ping(conn, target, atoms)
+            .map(|advertises| advertises.then_some(target));
+    }
+
+    let wm_state = conn.intern_atom(true, b"WM_STATE")?.reply()?.atom;
+    let mut candidate = conn.get_input_focus()?.reply()?.focus;
+    for _ in 0..64 {
+        if candidate == x11rb::NONE || candidate == 1 || candidate == root {
+            return Ok(None);
+        }
+        if x11_window_advertises_ping(conn, candidate, atoms)? {
+            return Ok(Some(candidate));
+        }
+        // A managed client without PING must not borrow an acknowledgement
+        // from its window manager's decoration parent.
+        if wm_state != x11rb::NONE
+            && conn
+                .get_property(false, candidate, wm_state, AtomEnum::ANY, 0, 0)?
+                .reply()?
+                .type_
+                != x11rb::NONE
+        {
+            return Ok(None);
+        }
+        let parent = conn.query_tree(candidate)?.reply()?.parent;
+        if parent == candidate {
+            return Ok(None);
+        }
+        candidate = parent;
+    }
+    Ok(None)
+}
+
+/// EWMH requires a timestamp. The input connection still carries both the
+/// XTEST input and PING in order; this separate standard time probe only makes
+/// the returned PING unambiguous.
+fn x11_remap_ping_timestamp() -> Result<u32> {
+    let display = unsafe { x11::xlib::XOpenDisplay(ptr::null()) };
+    if display.is_null() {
+        bail!("cannot open DISPLAY for _NET_WM_PING timestamp");
+    }
+    let timestamp = x_server_time(display) as u32;
+    unsafe { x11::xlib::XCloseDisplay(display) };
+    if timestamp == x11rb::CURRENT_TIME {
+        bail!("X11 server did not provide a _NET_WM_PING timestamp");
+    }
+    Ok(timestamp)
+}
+
+/// Observe the required root-directed reply with a non-exclusive
+/// SubstructureNotify selection before emitting the key.
+fn prepare_x11_remap_ping(
+    conn: &RustConnection,
+    root: Window,
+    target: Option<Window>,
+    atoms: X11RemapPingAtoms,
+) -> Result<Option<X11RemapPing>> {
+    let Some(client) = x11_remap_ping_client(conn, root, target, atoms)? else {
+        return Ok(None);
+    };
+    conn.change_window_attributes(
+        root,
+        &ChangeWindowAttributesAux::new().event_mask(EventMask::SUBSTRUCTURE_NOTIFY),
+    )?
+    .check()?;
+    Ok(Some(X11RemapPing {
+        client,
+        timestamp: x11_remap_ping_timestamp()?,
+        atoms,
+    }))
+}
+
+fn x11_remap_ping_reply_matches(
+    window: Window,
+    type_: Atom,
+    format: u8,
+    data: [u32; 5],
+    root: Window,
+    ping: X11RemapPing,
+) -> bool {
+    window == root
+        && type_ == ping.atoms.wm_protocols
+        && format == 32
+        && data == [ping.atoms.net_wm_ping, ping.timestamp, ping.client, 0, 0]
+}
+
+fn await_x11_remap_ping(conn: &RustConnection, root: Window, ping: X11RemapPing) -> Result<()> {
+    let message = ClientMessageEvent::new(
+        32,
+        ping.client,
+        ping.atoms.wm_protocols,
+        ClientMessageData::from([ping.atoms.net_wm_ping, ping.timestamp, ping.client, 0, 0]),
+    );
+    conn.send_event(false, ping.client, EventMask::NO_EVENT, message)?
+        .check()
+        .context("X11 remapped key delivery is uncertain: _NET_WM_PING request failed after key injection")?;
+    conn.flush()?;
+
+    let deadline = Instant::now() + X11_REMAP_PING_TIMEOUT;
+    while Instant::now() < deadline {
+        if let Some(Event::ClientMessage(event)) = conn.poll_for_event()? {
+            if x11_remap_ping_reply_matches(
+                event.window,
+                event.type_,
+                event.format,
+                event.data.as_data32(),
+                root,
+                ping,
+            ) {
+                return Ok(());
+            }
+        } else {
+            sleep(Duration::from_millis(2));
+        }
+    }
+    bail!(
+        "X11 remapped key delivery is uncertain: _NET_WM_PING reply from client 0x{:x} timed out after {}ms; text may be partially delivered and must not be automatically replayed",
+        ping.client,
+        X11_REMAP_PING_TIMEOUT.as_millis()
+    )
 }
 
 fn send_type_text_xtest_checked(text: &str, target: Option<Window>) -> Result<bool> {
@@ -2257,6 +2443,16 @@ fn send_type_text_xtest_checked(text: &str, target: Option<Window>) -> Result<bo
     let mut sent_any = false;
     for ch in text.chars() {
         let (keycode, needs_shift, remapped) = text_keycode(&conn, &mapping, ch)?;
+        let remap_ping = if remapped.is_some() {
+            // Do this before the final focus check so its round trips do not
+            // widen the checked-target race immediately before injection.
+            match x11_remap_ping_atoms(&conn)? {
+                Some(atoms) => prepare_x11_remap_ping(&conn, root, target, atoms)?,
+                None => None,
+            }
+        } else {
+            None
+        };
         if let Some(target) = target {
             if !x11_target_already_focused(&conn, root, active_atom, target).unwrap_or(false) {
                 if !sent_any {
@@ -2266,6 +2462,19 @@ fn send_type_text_xtest_checked(text: &str, target: Option<Window>) -> Result<bo
                     "X11 typing interrupted: exact target focus was lost or could not be verified; \
                      text may be partially delivered and must not be automatically replayed"
                 );
+            }
+        }
+        if target.is_none() {
+            if let Some(ping) = remap_ping {
+                // Unindexed foreground typing must still acknowledge the actual
+                // recipient. Preparation can take several round trips, during
+                // which focus may move to a different application's window.
+                if !x11_core_focus_within(&conn, root, ping.client).unwrap_or(false) {
+                    bail!(
+                        "X11 typing interrupted: keyboard focus left the Unicode acknowledgement client; \
+                         text may be partially delivered and must not be automatically replayed"
+                    );
+                }
             }
         }
         // From this point an error has unknown/partial delivery. Never return
@@ -2281,13 +2490,21 @@ fn send_type_text_xtest_checked(text: &str, target: Option<Window>) -> Result<bo
         }
         conn.flush()?;
         if remapped.is_some() {
-            // The final round-trip below runs after per-character guards drop.
-            // Each temporary binding needs its own delivery barrier first.
+            // This confirms the XTEST device event reached server delivery
+            // before the direct client-message PING is sent on this same
+            // connection. It does not wait for client-side translation.
             conn.get_input_focus()?.reply()?;
-            // Server delivery does not mean the client has translated the
-            // keycode yet. Keep this mapping stable while the app processes
-            // it; immediately reusing the spare code turned é into the later —.
-            sleep(Duration::from_millis(200));
+            if let Some(ping) = remap_ping {
+                // The reply proves this client is processing X events. GTK3's
+                // normal event source dispatches the earlier key before this
+                // later PING; other client loops and document saves are not
+                // established by this protocol.
+                await_x11_remap_ping(&conn, root, ping)?;
+            } else {
+                // Non-participating clients retain the conservative legacy
+                // delay. It is not proof of client consumption.
+                sleep(Duration::from_millis(200));
+            }
         }
         sleep(Duration::from_millis(KEY_DELAY_MS));
     }
@@ -3356,9 +3573,46 @@ mod path_tests {
         is_uinput_unavailable, kde_x11_uinput_hotplug_is_unsafe, master_pointer_name,
         modifiers_to_state, normalize_uinput_device_name, path_cumulative, point_on_path,
         real_pointer_capabilities_available, sample_function, slave_pointer_name,
-        x11_owned_combo_popup_properties_match, EVDEV_UINPUT_NAME_MAX_BYTES, UINPUT_POINTER_SUFFIX,
+        x11_owned_combo_popup_properties_match, x11_remap_ping_reply_matches, X11RemapPing,
+        X11RemapPingAtoms, EVDEV_UINPUT_NAME_MAX_BYTES, UINPUT_POINTER_SUFFIX,
     };
     use x11rb::protocol::xproto::KeyButMask;
+
+    #[test]
+    fn remap_ping_reply_requires_the_exact_root_client_and_payload() {
+        let ping = X11RemapPing {
+            client: 40,
+            timestamp: 77,
+            atoms: X11RemapPingAtoms {
+                wm_protocols: 11,
+                net_wm_ping: 12,
+            },
+        };
+        assert!(x11_remap_ping_reply_matches(
+            1,
+            11,
+            32,
+            [12, 77, 40, 0, 0],
+            1,
+            ping,
+        ));
+        assert!(!x11_remap_ping_reply_matches(
+            2,
+            11,
+            32,
+            [12, 77, 40, 0, 0],
+            1,
+            ping,
+        ));
+        assert!(!x11_remap_ping_reply_matches(
+            1,
+            11,
+            32,
+            [12, 77, 41, 0, 0],
+            1,
+            ping,
+        ));
+    }
 
     #[test]
     fn text_keysyms_cover_latin1_unicode_and_control_keys() {

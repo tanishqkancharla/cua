@@ -83,6 +83,10 @@ jobs:
         run: |
           mkdir -p ../../../artifacts/opensky-build
           cargo build --locked -p cua-driver 2>&1 | tee ../../../artifacts/opensky-build/build.log
+      - name: Linux input unit tests
+        if: runner.os == 'Linux' && steps.compile.outcome == 'success'
+        working-directory: libs/cua-driver/rust
+        run: cargo test --locked -p platform-linux --lib input::path_tests -- --test-threads=1 2>&1 | tee ../../../artifacts/opensky-build/linux-input-unit.log
       - name: Driver unit tests
         if: always() && steps.compile.outcome == 'success'
         working-directory: libs/cua-driver/rust
