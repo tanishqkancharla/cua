@@ -51,7 +51,7 @@ static DEF: std::sync::OnceLock<ToolDef> = std::sync::OnceLock::new();
 fn def() -> &'static ToolDef {
     DEF.get_or_init(|| ToolDef {
         name: "native_paste".into(),
-        description: "Paste plaintext into one exact macOS native accessibility control with Cmd+V. Requires an exact pid and window_id, verifies the same focused AX element before the clipboard write and key dispatch, and succeeds only when AXValue read-back equals the expected UTF-16-range insertion. Only clipboard_policy:\"leave\" is supported: the supplied plaintext remains on the system clipboard and is never restored. This tool never raises, fronts, or otherwise steals focus; it refuses when the target cannot be proven before mutation. After dispatch, any unverified result is reported as effect:\"unknown\" and must not be replayed automatically.".into(),
+        description: "Paste plaintext into one exact macOS native accessibility control with Cmd+V. Requires an exact pid and window_id, verifies the same focused AX element before the clipboard write and key dispatch, and succeeds only when AXValue read-back equals the expected UTF-16-range insertion. Only clipboard_policy:\"leave\" is supported: the supplied plaintext remains on the system clipboard and is never restored. delivery_mode:\"background\" (default) never fronts the target. delivery_mode:\"foreground\" briefly fronts the exact target for one physical HID Cmd+V chord, revalidates the AX target and clipboard immediately before that chord, then restores the prior frontmost app. After dispatch, any unverified result is reported as effect:\"unknown\" and must not be replayed automatically.".into(),
         input_schema: serde_json::json!({
             "type": "object",
             "required": ["pid", "window_id", "text", "clipboard_policy"],
@@ -61,7 +61,8 @@ fn def() -> &'static ToolDef {
                 "window_id": { "type": "integer", "description": "Exact target CGWindowID." },
                 "text": { "type": "string", "description": "Plaintext to paste (at most 16 KiB UTF-8)." },
                 "format": { "type": "string", "enum": ["text", "md", "html"], "default": "text", "description": "Only text is implemented; md and html are refused before clipboard mutation." },
-                "clipboard_policy": { "type": "string", "enum": ["leave"], "description": "Required. leave writes the plaintext to NSPasteboard and never restores prior clipboard content." }
+                "clipboard_policy": { "type": "string", "enum": ["leave"], "description": "Required. leave writes the plaintext to NSPasteboard and never restores prior clipboard content." },
+                "delivery_mode": cua_driver_core::tool_schema::delivery_mode_schema_with("Best-effort-background ladder rung (default \"background\"). \"background\": posts one PID-routed Cmd+V without fronting the target. \"foreground\": briefly front the exact target, revalidate the retained AX target and clipboard immediately before one physical HID Cmd+V chord, then restore the prior frontmost app. Choose the delivery mode before dispatch; never replay an uncertain paste.")
             },
             "additionalProperties": false
         }),
@@ -94,6 +95,12 @@ struct PasteboardToken {
 
 enum ClipboardWriteFailure {
     MayHaveMutated(String),
+}
+
+enum PasteDispatch {
+    Dispatched,
+    NoInputAfterClipboardWrite(String),
+    MayHaveDispatched(String),
 }
 
 fn refusal(code: &str, reason: impl Into<String>, pid: i32, window_id: u32) -> ToolResult {
@@ -390,6 +397,7 @@ impl Tool for NativePasteTool {
                 window_id,
             );
         }
+        let delivery_mode = super::DeliveryMode::parse(args.opt_str("delivery_mode").as_deref());
 
         let text_for_prepare = text.clone();
         let prepared = match tokio::task::spawn_blocking(move || {
@@ -410,16 +418,23 @@ impl Tool for NativePasteTool {
             );
         }
 
-        let _mutation_lease = match gate_background_window_action(
-            pid,
-            window_id,
-            Some(prepared.element.0),
-            BackgroundAction::GenericKey,
-        )
-        .await
-        {
-            Ok(lease) => lease,
-            Err(result) => return result,
+        let _mutation_lease = if delivery_mode.is_foreground() {
+            // Foreground intentionally bypasses the background eligibility
+            // decision, but still serializes mutations to this process while
+            // activation, revalidation, and the single chord are in flight.
+            Some(super::acquire_background_mutation(pid).await)
+        } else {
+            match gate_background_window_action(
+                pid,
+                window_id,
+                Some(prepared.element.0),
+                BackgroundAction::GenericKey,
+            )
+            .await
+            {
+                Ok(lease) => Some(lease),
+                Err(result) => return result,
+            }
         };
         let _clipboard_guard = CLIPBOARD_WRITE_LOCK.lock().await;
 
@@ -473,19 +488,61 @@ impl Tool for NativePasteTool {
             );
         }
 
-        // `press_key` posts one authenticated Cmd+V chord to this PID. The
-        // GenericKey exact-window gate above is its addressing guard: this
-        // PID-routed transport has no window-id field of its own. There is no
-        // foreground fallback and this operation is never replayed.
+        // Background posts exactly one PID-routed chord guarded above. The
+        // explicit foreground rung instead performs exactly one physical HID
+        // chord inside the exact-window activation interval. It does not try
+        // the background transport first and never replays either transport.
+        let payload = text.clone();
+        let element = prepared.element.0;
+        let before = prepared.before.clone();
+        let selection = prepared.selection;
+        let foreground = delivery_mode.is_foreground();
         let dispatch = tokio::task::spawn_blocking(move || {
-            crate::input::keyboard::press_key(pid, "v", &["cmd"])
+            if !foreground {
+                return match crate::input::keyboard::press_key(pid, "v", &["cmd"]) {
+                    Ok(()) => PasteDispatch::Dispatched,
+                    Err(error) => PasteDispatch::MayHaveDispatched(error.to_string()),
+                };
+            }
+
+            let mut input_started = false;
+            let activation = crate::input::skylight::with_foreground_hid_activation(
+                pid as libc::pid_t,
+                window_id,
+                || {
+                    // Activation can change the first responder or selection.
+                    // This is deliberately the final check before the only
+                    // global HID chord, while the activation guard still owns
+                    // the exact target window.
+                    if !target_still_matches_prepared(element, pid, window_id, &before, selection)
+                        || !pasteboard_still_has(token, &payload)
+                    {
+                        anyhow::bail!(
+                            "Target focus, value, selection, or clipboard content changed during foreground activation"
+                        );
+                    }
+                    // The chord can fail after posting some transitions.
+                    // Mark the attempt before entering the input primitive.
+                    input_started = true;
+                    crate::input::keyboard::press_key_bare_global("v", &["cmd"])?;
+                    Ok(())
+                },
+            );
+            match activation {
+                Ok(()) => PasteDispatch::Dispatched,
+                Err(error) if input_started => PasteDispatch::MayHaveDispatched(error.to_string()),
+                Err(error) => PasteDispatch::NoInputAfterClipboardWrite(error.to_string()),
+            }
         })
         .await;
         match dispatch {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
+            Ok(PasteDispatch::Dispatched) => {}
+            Ok(PasteDispatch::NoInputAfterClipboardWrite(reason)) => {
+                return input_refused_after_clipboard_write(reason, pid, window_id)
+            }
+            Ok(PasteDispatch::MayHaveDispatched(reason)) => {
                 return unknown(
-                    format!("Cmd+V may have been dispatched: {error}"),
+                    format!("Cmd+V may have been dispatched: {reason}"),
                     pid,
                     window_id,
                 )
@@ -597,5 +654,14 @@ mod tests {
             },
             "value"
         ));
+    }
+
+    #[test]
+    fn schema_exposes_background_and_foreground_delivery_modes() {
+        let mode = &def().input_schema["properties"]["delivery_mode"];
+        assert_eq!(
+            mode["enum"],
+            serde_json::json!(["background", "foreground"])
+        );
     }
 }
