@@ -2216,6 +2216,10 @@ pub(crate) fn x11_target_already_focused(
     {
         return Ok(false);
     }
+    x11_core_focus_within(conn, root, target)
+}
+
+fn x11_core_focus_within(conn: &RustConnection, root: Window, target: Window) -> Result<bool> {
     let mut focused = conn.get_input_focus()?.reply()?.focus;
     // Core focus may be in a child widget, but a sibling toplevel or modal is
     // not within this exact target. Never use PID or stale AX focus as proof.
@@ -2295,6 +2299,7 @@ fn x11_remap_ping_client(
             .map(|advertises| advertises.then_some(target));
     }
 
+    let wm_state = conn.intern_atom(true, b"WM_STATE")?.reply()?.atom;
     let mut candidate = conn.get_input_focus()?.reply()?.focus;
     for _ in 0..64 {
         if candidate == x11rb::NONE || candidate == 1 || candidate == root {
@@ -2302,6 +2307,17 @@ fn x11_remap_ping_client(
         }
         if x11_window_advertises_ping(conn, candidate, atoms)? {
             return Ok(Some(candidate));
+        }
+        // A managed client without PING must not borrow an acknowledgement
+        // from its window manager's decoration parent.
+        if wm_state != x11rb::NONE
+            && conn
+                .get_property(false, candidate, wm_state, AtomEnum::ANY, 0, 0)?
+                .reply()?
+                .type_
+                != x11rb::NONE
+        {
+            return Ok(None);
         }
         let parent = conn.query_tree(candidate)?.reply()?.parent;
         if parent == candidate {
@@ -2446,6 +2462,19 @@ fn send_type_text_xtest_checked(text: &str, target: Option<Window>) -> Result<bo
                     "X11 typing interrupted: exact target focus was lost or could not be verified; \
                      text may be partially delivered and must not be automatically replayed"
                 );
+            }
+        }
+        if target.is_none() {
+            if let Some(ping) = remap_ping {
+                // Unindexed foreground typing must still acknowledge the actual
+                // recipient. Preparation can take several round trips, during
+                // which focus may move to a different application's window.
+                if !x11_core_focus_within(&conn, root, ping.client).unwrap_or(false) {
+                    bail!(
+                        "X11 typing interrupted: keyboard focus left the Unicode acknowledgement client; \
+                         text may be partially delivered and must not be automatically replayed"
+                    );
+                }
             }
         }
         // From this point an error has unknown/partial delivery. Never return
