@@ -92,7 +92,7 @@ enum ClipboardWriteFailure {
 }
 
 enum PasteDispatch {
-    Dispatched,
+    Dispatched { foreground_verified: Option<bool> },
     NoInputAfterClipboardWrite(String),
     MayHaveDispatched(String),
 }
@@ -468,16 +468,22 @@ impl Tool for NativePasteTool {
         let element = prepared.element.0;
         let before = prepared.before.clone();
         let selection = prepared.selection;
+        let expected = prepared.expected.clone();
+        let expected_selection = expected_post_selection(prepared.selection, &text);
+        let require_selection_proof = prepared.expected == prepared.before;
         let foreground = delivery_mode.is_foreground();
         let dispatch = tokio::task::spawn_blocking(move || {
             if !foreground {
                 return match crate::input::keyboard::press_key(pid, "v", &["cmd"]) {
-                    Ok(()) => PasteDispatch::Dispatched,
+                    Ok(()) => PasteDispatch::Dispatched {
+                        foreground_verified: None,
+                    },
                     Err(error) => PasteDispatch::MayHaveDispatched(error.to_string()),
                 };
             }
 
             let mut input_started = false;
+            let mut foreground_verified = None;
             let activation = crate::input::skylight::with_foreground_hid_activation(
                 pid as libc::pid_t,
                 window_id,
@@ -497,18 +503,33 @@ impl Tool for NativePasteTool {
                     // Mark the attempt before entering the input primitive.
                     input_started = true;
                     crate::input::keyboard::press_key_bare_global("v", &["cmd"])?;
+                    // Keep the exact target frontmost through the existing
+                    // bounded read-back so focus restoration does not race
+                    // the observation of the single dispatched chord.
+                    foreground_verified = Some(observe_after_dispatch(
+                        element,
+                        &expected,
+                        expected_selection,
+                        require_selection_proof,
+                        token,
+                        &payload,
+                    ));
                     Ok(())
                 },
             );
             match activation {
-                Ok(()) => PasteDispatch::Dispatched,
+                Ok(()) => PasteDispatch::Dispatched {
+                    foreground_verified,
+                },
                 Err(error) if input_started => PasteDispatch::MayHaveDispatched(error.to_string()),
                 Err(error) => PasteDispatch::NoInputAfterClipboardWrite(error.to_string()),
             }
         })
         .await;
-        match dispatch {
-            Ok(PasteDispatch::Dispatched) => {}
+        let foreground_verified = match dispatch {
+            Ok(PasteDispatch::Dispatched {
+                foreground_verified,
+            }) => foreground_verified,
             Ok(PasteDispatch::NoInputAfterClipboardWrite(reason)) => {
                 return input_refused_after_clipboard_write(reason, pid, window_id)
             }
@@ -526,25 +547,30 @@ impl Tool for NativePasteTool {
                     window_id,
                 )
             }
-        }
+        };
 
-        let element = prepared.element.0;
-        let expected = prepared.expected.clone();
-        let expected_selection = expected_post_selection(prepared.selection, &text);
-        let require_selection_proof = prepared.expected == prepared.before;
-        let payload = text.clone();
-        let verified = tokio::task::spawn_blocking(move || {
-            observe_after_dispatch(
-                element,
-                &expected,
-                expected_selection,
-                require_selection_proof,
-                token,
-                &payload,
-            )
-        })
-        .await
-        .unwrap_or(false);
+        let verified = match foreground_verified {
+            Some(verified) => verified,
+            None => {
+                let element = prepared.element.0;
+                let expected = prepared.expected.clone();
+                let expected_selection = expected_post_selection(prepared.selection, &text);
+                let require_selection_proof = prepared.expected == prepared.before;
+                let payload = text.clone();
+                tokio::task::spawn_blocking(move || {
+                    observe_after_dispatch(
+                        element,
+                        &expected,
+                        expected_selection,
+                        require_selection_proof,
+                        token,
+                        &payload,
+                    )
+                })
+                .await
+                .unwrap_or(false)
+            }
+        };
         if !verified {
             return unknown(
                 "Cmd+V was dispatched but the retained AX target and clipboard token did not provide the expected bounded observation. Observe before deciding what to do next.",

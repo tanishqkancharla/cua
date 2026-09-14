@@ -23,7 +23,9 @@ fn def() -> &'static ToolDef {
             WindowServer's main/global active Space and can differ from a record's \
             current_space_id when displays use independent Spaces. To select a frontmost candidate, take the \
             maximum integer z_index; if every value is null, use an explicit fallback instead of \
-            relying on array order.".into(),
+            relying on array order. With an explicit positive pid, focused_window_id reports \
+            the exact AXFocusedWindow when it belongs to that pid and the returned inventory, \
+            or null when unavailable. Accessibility focus can differ from stacking order.".into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -84,12 +86,19 @@ impl Tool for ListWindowsTool {
             }
         }
 
-        ToolResult::text(format!("Found {} window(s).", windows_json.len())).with_structured(
-            serde_json::json!({
-                "windows": windows_json,
-                "current_space_id": current_space_id
-            }),
-        )
+        let mut result = serde_json::json!({
+            "windows": windows_json,
+            "current_space_id": current_space_id
+        });
+        if let Some(pid) = pid_filter.filter(|pid| *pid > 0) {
+            let focused = crate::ax::bindings::focused_window_id_of_pid(pid).filter(|id| {
+                windows
+                    .iter()
+                    .any(|row| row.pid == pid && row.window_id == *id)
+            });
+            result["focused_window_id"] = serde_json::json!(focused);
+        }
+        ToolResult::text(format!("Found {} window(s).", windows_json.len())).with_structured(result)
     }
 }
 

@@ -21,6 +21,66 @@ use crate::windows::{all_windows, resolve_window_owner, WindowOwner};
 /// Bounded `AXParent` ascent used when an element does not expose `AXWindow`.
 const MAX_ANCESTRY_DEPTH: usize = 40;
 
+/// Prove that `element` is in an attached sheet of `target_window_id`.
+///
+/// An attached sheet can have its own CGWindowID, so [`element_window_id`]
+/// correctly reports a different window for controls inside it. That identity
+/// is not interchangeable with its document window. The only accepted bridge
+/// is a bounded, same-process AX parent chain from an `AXSheet` to the exact
+/// target `AXWindow`; a top-level sheet, a sibling window, or any unreadable
+/// edge remains unproven.
+unsafe fn element_is_in_attached_sheet_of(
+    element: AXUIElementRef,
+    pid: i32,
+    target_window_id: u32,
+) -> bool {
+    let mut current = element;
+    let mut owned = false;
+    let mut saw_sheet = false;
+
+    for _ in 0..MAX_ANCESTRY_DEPTH {
+        let mut owner = 0;
+        if super::bindings::AXUIElementGetPid(current, &mut owner)
+            != super::bindings::kAXErrorSuccess
+            || owner != pid
+        {
+            break;
+        }
+        match copy_string_attr(current, "AXRole").as_deref() {
+            Some("AXSheet") => saw_sheet = true,
+            Some("AXWindow")
+                if saw_sheet && ax_get_window_id(current) == Some(target_window_id) =>
+            {
+                if owned {
+                    CFRelease(current as CFTypeRef);
+                }
+                return true;
+            }
+            Some("AXWindow") | Some("AXApplication") | None => break,
+            _ => {}
+        }
+
+        let Some(parent) = copy_element_attr(current, "AXParent") else {
+            break;
+        };
+        let repeated =
+            core_foundation::base::CFEqual(parent as CFTypeRef, current as CFTypeRef) != 0;
+        if owned {
+            CFRelease(current as CFTypeRef);
+        }
+        if repeated {
+            CFRelease(parent as CFTypeRef);
+            return false;
+        }
+        current = parent;
+        owned = true;
+    }
+    if owned {
+        CFRelease(current as CFTypeRef);
+    }
+    false
+}
+
 /// Resolve the CGWindowID of the top-level AX window that owns `element`.
 ///
 /// Prefers the element's `AXWindow` attribute and falls back to a bounded
@@ -175,10 +235,16 @@ pub fn gather_background_facts(
             super::enablement::ensure_chromium_ax_enabled(pid, app);
             let records = ax_window_records(app);
             let app_hidden = copy_bool_attr(app, "AXHidden");
-            let element = element_ptr.map(|ptr| match element_window_id(ptr as AXUIElementRef) {
-                Some(id) if id == window_id => ElementAncestry::ProvenDescendant,
-                Some(_) => ElementAncestry::OutsideTargetWindow,
-                None => ElementAncestry::Unproven,
+            let element = element_ptr.map(|ptr| {
+                let element = ptr as AXUIElementRef;
+                match element_window_id(element) {
+                    Some(id) if id == window_id => ElementAncestry::ProvenDescendant,
+                    _ if element_is_in_attached_sheet_of(element, pid, window_id) => {
+                        ElementAncestry::ProvenAttachedSheet
+                    }
+                    Some(_) => ElementAncestry::OutsideTargetWindow,
+                    None => ElementAncestry::Unproven,
+                }
             });
             CFRelease(app as CFTypeRef);
             (records, app_hidden, element)
