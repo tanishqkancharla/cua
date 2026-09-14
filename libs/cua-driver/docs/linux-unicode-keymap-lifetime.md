@@ -33,11 +33,22 @@ input. Replace elapsed-time-only temporary-map release with a supported client
 processing barrier. Do not merely lengthen the fixed sleep or substitute paste,
 AX text replacement, app-specific input recipes, or success-shaped acknowledgments.
 
-The candidate mechanism is not yet selected. EWMH `_NET_WM_PING` establishes that
-a client processes X events; the specification alone does not guarantee toolkit
-key translation or document consumption. Check toolkit ordering and real saved
-outcomes before relying on it. Unsupported clients and timeout behavior must
-retain honest delivery uncertainty rather than silently dropping text.
+The candidate uses EWMH `_NET_WM_PING` only when the exact client advertises it
+in `WM_PROTOCOLS`. Its reply establishes client event processing, not document
+consumption. GTK 3.24.43 queues/translates a preceding key event and emits that
+event before pulling the following ping from X11; this provides the relevant
+translation boundary on that event loop. Other toolkits are not certified by
+that source inspection. The real saved document remains the acceptance oracle.
+
+Clients without the protocol retain the existing 200 ms fallback; that path
+still has an unverified mapping-lifetime limitation. A participating client
+which does not reply within the bounded wait must produce a partial-delivery
+error, restore the keymap, and never trigger replay. Synthetic typing and named
+key injection are outside this focused XTEST text correction.
+
+Sources: [EWMH ping protocol](https://specifications.freedesktop.org/wm/latest-single/)
+and [GTK 3.24.43 event source](https://github.com/GNOME/gtk/blob/3.24.43/gdk/x11/gdkeventsource.c)
+(`_gdk_x11_display_queue_events`, `gdk_event_source_dispatch`).
 
 First acceptance is the same controlled stall through the public SDK, with the
 complete saved sentence and restored keymap, followed by ordinary Unicode typing
