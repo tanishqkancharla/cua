@@ -42,6 +42,10 @@ pub enum ElementAncestry {
     /// The live element ascends to an AX window whose CGWindowID is the
     /// requested one.
     ProvenDescendant,
+    /// The element is in an AXSheet whose bounded, same-process parent chain
+    /// reaches the requested AXWindow. This proves ownership for an exact AX
+    /// semantic action, but never for process-scoped keyboard delivery.
+    ProvenAttachedSheet,
     /// The live element ascends to a different window of the same process.
     OutsideTargetWindow,
     /// Ancestry could not be resolved (dead element, SPI failure). An address
@@ -212,8 +216,14 @@ pub fn decide_background_input(
     }
 
     match facts.element {
+        ElementAncestry::NotAddressed
+        | ElementAncestry::ProvenDescendant
+        | ElementAncestry::ProvenAttachedSheet
+            if matches!(action, BackgroundAction::AxSemantic) => {}
         ElementAncestry::NotAddressed | ElementAncestry::ProvenDescendant => {}
-        ElementAncestry::OutsideTargetWindow | ElementAncestry::Unproven => {
+        ElementAncestry::ProvenAttachedSheet
+        | ElementAncestry::OutsideTargetWindow
+        | ElementAncestry::Unproven => {
             return refuse(
                 refusal_codes::ELEMENT_OUTSIDE_TARGET_WINDOW,
                 format!(
@@ -594,6 +604,26 @@ mod tests {
             ..matched_facts()
         };
         assert!(decide_background_input(TARGET, &facts, BackgroundAction::AxSemantic).is_execute());
+    }
+
+    #[test]
+    fn attached_sheet_ancestry_allows_only_semantic_ax() {
+        let facts = BackgroundTargetFacts {
+            element: ElementAncestry::ProvenAttachedSheet,
+            ..matched_facts()
+        };
+        assert!(decide_background_input(TARGET, &facts, BackgroundAction::AxSemantic).is_execute());
+        for action in [
+            BackgroundAction::WindowPointer,
+            BackgroundAction::InsertText,
+            BackgroundAction::GenericKey,
+        ] {
+            assert_eq!(
+                code_of(decide_background_input(TARGET, &facts, action)),
+                refusal_codes::ELEMENT_OUTSIDE_TARGET_WINDOW,
+                "{action:?} must not use attached-sheet ancestry as keyboard/pointer proof"
+            );
+        }
     }
 
     /// Refusal precedence: exactness failures are reported before state or
