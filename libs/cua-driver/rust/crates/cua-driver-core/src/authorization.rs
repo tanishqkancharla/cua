@@ -282,6 +282,7 @@ const DESKTOP_INPUT_OPERATIONS: &[&str] = &[
     "press_key",
     "hotkey",
     "native_paste",
+    "select_text",
     "set_value",
     "bring_to_front",
     "close_window",
@@ -894,6 +895,7 @@ pub fn advertised_risk_for(tool: &str) -> RiskAssessment {
         | "press_key"
         | "hotkey"
         | "set_value"
+        | "select_text"
         | "invoke_menu"
         | "launch_app"
         | "bring_to_front"
@@ -1070,6 +1072,11 @@ pub fn classify_tool_call(tool: &str, args: &Value) -> RiskAssessment {
             } else {
                 RiskClass::R1
             },
+            enforcement: RiskEnforcement::Active,
+            operation_sensitive: true,
+        },
+        "select_text" => RiskAssessment {
+            class: RiskClass::R1,
             enforcement: RiskEnforcement::Active,
             operation_sensitive: true,
         },

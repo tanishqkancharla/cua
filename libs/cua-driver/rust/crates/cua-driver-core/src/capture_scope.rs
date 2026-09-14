@@ -175,6 +175,7 @@ fn is_scoped_action(tool_name: &str) -> bool {
             | "press_key"
             | "hotkey"
             | "native_paste"
+            | "select_text"
             | "set_value"
     )
 }

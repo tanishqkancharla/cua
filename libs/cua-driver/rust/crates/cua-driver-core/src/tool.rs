@@ -334,6 +334,7 @@ pub fn default_capabilities_for(tool_name: &str) -> Vec<String> {
             "clipboard.write",
             "accessibility.element_tokens",
         ],
+        "select_text" => &["input.keyboard.select", "accessibility.element_tokens"],
 
         // ── screen / capture ─────────────────────────────────────────
         // Note: the regular `screenshot` tool was removed from the
