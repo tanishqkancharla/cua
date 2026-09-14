@@ -111,7 +111,7 @@ def _noisy_status_bin(tmp_path: Path) -> Path:
     check that short-circuits the producer turns a match into a failure under
     ``pipefail``.
     """
-    fake = tmp_path / "fake-bin/cua-driver-local"
+    fake = tmp_path / "fake-bin/opensky-driver"
     _write_executable(
         fake,
         """printf 'permission mode: unrestricted\n'
@@ -229,13 +229,13 @@ def test_tcc_guest_seed_grants_both_driver_permissions() -> None:
     assert "csreq" in sql_body
     assert "allowed" not in sql_body
     assert "auth_value=2" in text
-    assert "com.trycua.driver.local" in text
+    assert "com.opensky.driver" in text
 
 
 def test_tcc_guest_seed_sql_executes_against_modern_tcc_schema(tmp_path: Path) -> None:
     sql_body = _guest_seed_assignment("SQL")
     verify_sql = _guest_seed_assignment("VERIFY_SQL")
-    client = "com.trycua.driver.local"
+    client = "com.opensky.driver"
     client_type = "0"
     csreq_hex = "01020304"
     substitutions = {
@@ -1137,7 +1137,7 @@ def _daemon_fakes(tmp_path: Path, initial_mode: str = "standard") -> tuple[Path,
     calls = tmp_path / "calls.txt"
 
     _write_executable(
-        fake_bin / "cua-driver-local",
+        fake_bin / "opensky-driver",
         """case "${1:-}" in
     status) printf 'permission mode: %s\n' "$(cat "$CUA_TEST_MODE_FILE")" ;;
     stop) printf 'stop\n' >> "$CUA_TEST_CALLS"; printf 'stopped\n' > "$CUA_TEST_MODE_FILE" ;;
@@ -1167,7 +1167,7 @@ exit 0
     )
     env = {
         "PATH": f"{fake_bin}:{os.environ['PATH']}",
-        "TEST_INSTALLED_BIN": str(fake_bin / "cua-driver-local"),
+        "TEST_INSTALLED_BIN": str(fake_bin / "opensky-driver"),
         "CUA_TEST_MODE_FILE": str(mode_file),
         "CUA_TEST_CALLS": str(calls),
         "CUA_E2E_DAEMON_WAIT_ATTEMPTS": "1",
@@ -1373,7 +1373,7 @@ def test_sigterm_restores_standard_daemon_and_preserves_signal_status(tmp_path: 
 def test_sighup_defers_standard_daemon_until_the_next_gui_login(tmp_path: Path) -> None:
     artifact_dir = tmp_path / "artifacts"
     artifact_dir.mkdir()
-    plist = tmp_path / "com.trycua.cua-driver-local.plist"
+    plist = tmp_path / "com.opensky.driver.plist"
     plist.write_text("launch agent", encoding="utf-8")
     calls, env = _daemon_fakes(tmp_path, initial_mode="unrestricted")
     env.update(
