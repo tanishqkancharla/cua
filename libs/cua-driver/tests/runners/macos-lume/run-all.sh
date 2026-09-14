@@ -13,11 +13,11 @@ SOURCE_MARKER="${CUA_E2E_SOURCE_MARKER:-${REPO_ROOT}/.cua-e2e-source-sha}"
 SIGNING_KEYCHAIN="${CUA_E2E_SIGNING_KEYCHAIN:-${HOME}/Library/Keychains/cua-driver-signing.keychain-db}"
 LOGIN_KEYCHAIN="${CUA_E2E_LOGIN_KEYCHAIN:-${HOME}/Library/Keychains/login.keychain-db}"
 SIGNING_CN="${CUA_E2E_SIGNING_CN:-CuaDriver Local Signing (cua-driver-rs)}"
-LOCAL_APP="/Applications/CuaDriverLocal.app"
-# install-local.sh intentionally uses a separate namespace from release installs.
-INSTALLED_BIN="${HOME}/.local/bin/cua-driver-local"
-LOCAL_PLIST="${HOME}/Library/LaunchAgents/com.trycua.cua-driver-local.plist"
-CUA_E2E_MACOS_DAEMON_SOCKET="${CUA_E2E_MACOS_DAEMON_SOCKET:-${HOME}/Library/Caches/cua-driver-local/cua-driver-local.sock}"
+LOCAL_APP="/Applications/OpenSkyDriver.app"
+# Match the namespace created by the public OpenSky source installer.
+INSTALLED_BIN="${HOME}/.local/bin/opensky-driver"
+LOCAL_PLIST="${HOME}/Library/LaunchAgents/com.opensky.driver.plist"
+CUA_E2E_MACOS_DAEMON_SOCKET="${CUA_E2E_MACOS_DAEMON_SOCKET:-${HOME}/Library/Caches/opensky-driver/opensky-driver.sock}"
 # A run-owned Cargo namespace keeps a certification build off the seed image's
 # and any other commit's target state without deleting a shared cache.
 CARGO_TARGET_ROOT="${CUA_E2E_CARGO_TARGET_ROOT:-${HOME}/Library/Caches/cua-driver-e2e/cargo-target}"
@@ -852,7 +852,7 @@ bash "${DRIVER_ROOT}/scripts/install-local.sh" \
 codesign -d -r- "${LOCAL_APP}" \
   > "${ARTIFACT_DIR}/codesign-requirement.txt" 2>&1
 if ! grep -Fq "certificate leaf" "${ARTIFACT_DIR}/codesign-requirement.txt"; then
-  echo "CuaDriverLocal.app is not signed with the golden image's stable certificate identity" >&2
+  echo "OpenSkyDriver.app is not signed with the golden image's stable certificate identity" >&2
   exit 1
 fi
 

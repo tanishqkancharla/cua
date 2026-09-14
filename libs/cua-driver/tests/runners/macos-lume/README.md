@@ -31,7 +31,7 @@ that exact commit.
 - Put no repository credentials, signing secrets, or maintainer private SSH
   keys in the guest. A host public key is sufficient for source sync.
 - For reusable private seeds, request the app-owned Accessibility and Screen
-  Recording grants through `CuaDriverLocal.app`. For disposable SIP-off workers
+  Recording grants through `OpenSkyDriver.app`. For disposable SIP-off workers
   that are not cloned from a granted seed, use the checked-in `seed-tcc.sh`
   helper below. Do not hand-edit `TCC.db`.
 - Require a certificate-backed local signature. An ad-hoc signature invalidates
@@ -40,7 +40,7 @@ that exact commit.
 
 SIP-off alone does not grant Accessibility, Screen Recording, Automation, or
 direct-capture consent. The reusable private seed still carries grants approved
-through the normal `CuaDriverLocal.app` prompt flow. The helper below is only for
+through the normal `OpenSkyDriver.app` prompt flow. The helper below is only for
 disposable SIP-off workers that need the same app-owned Accessibility and Screen
 Recording grants without preserving a granted seed. The SIP-on check below proves
 the normal user-facing permission flow still works with platform protection.
@@ -193,7 +193,7 @@ identity` message before granting permissions through the app-owned flow:
 ```bash
 bash libs/cua-driver/scripts/install-local.sh \
   --release --autostart --require-stable-signing
-~/.local/bin/cua-driver-local permissions grant
+~/.local/bin/opensky-driver permissions grant
 ```
 
 Record the certificate hash after the successful install and keep that identity
@@ -202,12 +202,18 @@ for the life of the seed:
 ```bash
 security find-certificate \
   -c 'CuaDriver Local Signing (cua-driver-rs)' -Z "$SIGNING_KEYCHAIN"
-codesign -d -r- /Applications/CuaDriverLocal.app 2>&1 \
+codesign -d -r- /Applications/OpenSkyDriver.app 2>&1 \
   | grep 'certificate leaf'
 ```
 
 Recreating the certificate changes the app identity and invalidates inherited
 TCC grants, even when the bundle identifier stays the same.
+
+OpenSky uses `com.opensky.driver` and `/Applications/OpenSkyDriver.app`. The
+historical signing certificate name above is retained for existing seeds; the
+name need not match the app name. For another existing certificate, configure
+`CUA_E2E_SIGNING_KEYCHAIN` and `CUA_E2E_SIGNING_IDENTITY` for the runner instead
+of creating a new certificate.
 
 Complete the Accessibility and Screen Recording prompts. Tahoe 26 also asks
 separately for Automation and direct ScreenCaptureKit access. Trigger all
@@ -220,15 +226,15 @@ osascript -e \
 
 # The installed app owns driver-side app enumeration. This uses NSWorkspace and
 # must not require Automation access to System Events.
-~/.local/bin/cua-driver-local list_apps '{}'
+~/.local/bin/opensky-driver list_apps '{}'
 
 # The app-owned grant flow probes a desktop capture and triggers Tahoe's
 # direct-capture/private-window prompt.
-~/.local/bin/cua-driver-local permissions grant
+~/.local/bin/opensky-driver permissions grant
 ```
 
-Choose Allow for `Terminal` -> `System Events` and on the CuaDriverLocal
-direct-capture prompt. CuaDriverLocal app enumeration must not ask for System
+Choose Allow for `Terminal` -> `System Events` and on the OpenSkyDriver
+direct-capture prompt. OpenSkyDriver app enumeration must not ask for System
 Events. Target-specific Automation prompts may still appear later when a user
 explicitly requests an Apple Events-backed browser or app operation; do not
 pre-grant those in the seed. These are normal macOS consent flows; do not edit
@@ -240,8 +246,8 @@ restart the app-owned daemon once before checking status so the live process
 observes the new grant:
 
 ```bash
-~/.local/bin/cua-driver-local stop
-open -a CuaDriverLocal
+~/.local/bin/opensky-driver stop
+open -a OpenSkyDriver
 ```
 
 Then verify the daemon's own identity and the read-only status contract before
@@ -250,24 +256,24 @@ LaunchServices-hosted grant flow. The first command must not raise a dialog;
 the second is intentionally prompt-capable and must be run by the human:
 
 ```bash
-~/.local/bin/cua-driver-local permissions status --json | jq -e '
+~/.local/bin/opensky-driver permissions status --json | jq -e '
   .accessibility == true
   and .screen_recording == true
   and .screen_recording_capturable == null
   and .direct_capture_status == "not_checked"
   and .source.attribution == "driver-daemon"
 '
-~/.local/bin/cua-driver-local permissions grant
-~/.local/bin/cua-driver-local permissions status --json | jq -e '
+~/.local/bin/opensky-driver permissions grant
+~/.local/bin/opensky-driver permissions status --json | jq -e '
   .accessibility == true
   and .screen_recording == true
   and .screen_recording_capturable == null
   and .direct_capture_status == "not_checked"
   and .direct_capture_verification.source == "permissions_grant"
   and (.direct_capture_verification.verified_at | endswith("Z"))
-  and .direct_capture_verification.bundle_id == "com.trycua.driver.local"
+  and .direct_capture_verification.bundle_id == "com.opensky.driver"
 '
-codesign -d -r- /Applications/CuaDriverLocal.app 2>&1 | grep 'certificate leaf'
+codesign -d -r- /Applications/OpenSkyDriver.app 2>&1 | grep 'certificate leaf'
 csrutil status
 ```
 
@@ -278,7 +284,7 @@ All five commands must succeed, and `csrutil status` must report disabled.
 The public [Run Cua Driver in a macOS Lume VM](https://cua.ai/docs/how-to-guides/driver/run-in-macos-lume-vm)
 guide grants macOS consent through the VM display. Keep using that prompt flow
 for reusable private seeds. For automated disposable workers that are not cloned
-from a granted seed, run the host helper after `CuaDriverLocal.app` is installed
+from a granted seed, run the host helper after `OpenSkyDriver.app` is installed
 in each running worker with a certificate-backed identity:
 
 ```bash
@@ -297,16 +303,16 @@ Use the default `lume` SSH password, set `LUME_SSH_PASSWORD`, or pass
 empty when the VM accepts host SSH keys.
 The guest helper refuses to write unless `sysctl -n hw.model` reports a
 `VirtualMac*` VM and `csrutil status` reports disabled SIP. It derives the
-permission identity from `/Applications/CuaDriverLocal.app`, writes only the
+permission identity from `/Applications/OpenSkyDriver.app`, writes only the
 Accessibility and Screen Recording entries for that app, restarts `tccd`, and
 verifies both entries.
 
-After seeding, restart `CuaDriverLocal.app` before checking permission status if
+After seeding, restart `OpenSkyDriver.app` before checking permission status if
 `install-local --autostart` or an earlier probe may have started the daemon:
 
 ```bash
-~/.local/bin/cua-driver-local stop
-open -a CuaDriverLocal
+~/.local/bin/opensky-driver stop
+open -a OpenSkyDriver
 ```
 
 If the VM sudo password is not the default `lume`, pass it without putting it
@@ -341,9 +347,9 @@ Lume version, CLT version, Rust version, Node version, and signing-certificate
 hash in the maintainer log. Also record that the following consent paths were
 granted and then rerun without prompts:
 
-- `CuaDriverLocal.app`: Accessibility and Screen Recording
+- `OpenSkyDriver.app`: Accessibility and Screen Recording
 - Terminal controlling System Events
-- CuaDriverLocal direct screen capture without the system picker. macOS labels
+- OpenSkyDriver direct screen capture without the system picker. macOS labels
   this combined consent as screen and system-audio access even though Cua
   Driver's current ScreenCaptureKit recorder does not enable audio capture.
 
@@ -573,9 +579,9 @@ golden image's inherited grants.
 4. In the VM display, reset only the disposable worker's grants:
 
    ```bash
-   tccutil reset Accessibility com.trycua.driver.local
-   tccutil reset ScreenCapture com.trycua.driver.local
-   ~/.local/bin/cua-driver-local permissions grant
+   tccutil reset Accessibility com.opensky.driver
+   tccutil reset ScreenCapture com.opensky.driver
+   ~/.local/bin/opensky-driver permissions grant
    ```
 
 5. Complete the prompts and require the same four-field

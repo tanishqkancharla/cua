@@ -3,9 +3,9 @@
 set -euo pipefail
 
 TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
-APP_PATH="${CUA_TCC_APP_PATH:-/Applications/CuaDriverLocal.app}"
+APP_PATH="${CUA_TCC_APP_PATH:-/Applications/OpenSkyDriver.app}"
 BINARY_PATH="${CUA_TCC_BINARY_PATH:-}"
-EXPECTED_CLIENT="${CUA_TCC_EXPECTED_CLIENT:-com.trycua.driver.local}"
+EXPECTED_CLIENT="${CUA_TCC_EXPECTED_CLIENT:-com.opensky.driver}"
 ALLOW_ADHOC="${CUA_TCC_ALLOW_ADHOC:-0}"
 READ_SUDO_PASSWORD="${CUA_TCC_READ_SUDO_PASSWORD:-0}"
 
@@ -222,7 +222,7 @@ else
 fi
 
 echo "seeded kTCCServiceAccessibility and kTCCServiceScreenCapture for ${CLIENT} (client_type=${CLIENT_TYPE})"
-echo "restart CuaDriverLocal.app before checking permissions if it was already running"
+echo "restart OpenSkyDriver.app before checking permissions if it was already running"
 echo "model: ${MODEL}"
 echo "sip: ${SIP_STATUS}"
 echo "csreq_bytes: $(( ${#CSREQ_HEX} / 2 ))"
