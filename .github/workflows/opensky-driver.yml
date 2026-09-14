@@ -7,6 +7,8 @@ on:
       - 'libs/cua-driver/**'
       - 'scripts/ci/**'
       - '.github/workflows/opensky-driver.yml'
+      - '.github/workflows/e2e-rust-linux.yml'
+      - '.github/workflows/e2e-rust-windows.yml'
   workflow_dispatch:
     inputs:
       desktop:
@@ -17,6 +19,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   # A routine build must not cancel an explicitly requested desktop run.
@@ -32,6 +35,23 @@ env:
   RUST_BACKTRACE: '1'
 
 jobs:
+  linux-installer:
+    needs: desktop-plan
+    if: needs.desktop-plan.outputs.lane == 'all'
+    uses: ./.github/workflows/e2e-rust-linux.yml
+    with:
+      ref: ${{ github.sha }}
+      lane: installer
+
+  windows-installer:
+    needs: desktop-plan
+    if: needs.desktop-plan.outputs.lane == 'all'
+    uses: ./.github/workflows/e2e-rust-windows.yml
+    with:
+      ref: ${{ github.sha }}
+      runner: windows-2025
+      lane: installer
+
   build:
     name: Build and unit tests / ${{ matrix.os }}
     strategy:
@@ -88,6 +108,7 @@ jobs:
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
       enabled: ${{ steps.plan.outputs.enabled }}
+      lane: ${{ steps.plan.outputs.lane }}
     steps:
       - id: plan
         name: Select explicitly requested desktop lanes
@@ -108,6 +129,7 @@ jobs:
           enabled = lane != 'none'
           matrix = {'os': ['ubuntu-24.04', 'windows-2025'], 'lane': lanes}
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f'lane={lane}\n')
               f.write(f'enabled={str(enabled).lower()}\n')
               f.write(f'matrix={json.dumps(matrix)}\n')
           PY
