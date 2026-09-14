@@ -1,6 +1,17 @@
 name: "E2E: Rust Linux interactive"
 
 on:
+  workflow_call:
+    inputs:
+      ref:
+        type: string
+        default: ""
+      lane:
+        type: string
+        default: all
+      cell_filter:
+        type: string
+        default: ""
   workflow_dispatch:
     inputs:
       ref:
@@ -196,7 +207,7 @@ jobs:
         run: |
           set -euo pipefail
           bash libs/cua-driver/scripts/install-local.sh --release
-          installed="$CUA_DRIVER_LOCAL_INSTALL_DIR/cua-driver-local"
+          installed="$CUA_DRIVER_LOCAL_INSTALL_DIR/opensky-driver"
           test -x "$installed"
           "$installed" --version | tee "$RUNNER_TEMP/cua-driver-local-version.txt"
 
