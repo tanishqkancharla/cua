@@ -56,7 +56,7 @@ unsafe fn element_is_in_attached_sheet_of(
                 }
                 return true;
             }
-            Some("AXApplication") | None => break,
+            Some("AXWindow") | Some("AXApplication") | None => break,
             _ => {}
         }
 
@@ -239,7 +239,7 @@ pub fn gather_background_facts(
                 let element = ptr as AXUIElementRef;
                 match element_window_id(element) {
                     Some(id) if id == window_id => ElementAncestry::ProvenDescendant,
-                    Some(_) if element_is_in_attached_sheet_of(element, pid, window_id) => {
+                    _ if element_is_in_attached_sheet_of(element, pid, window_id) => {
                         ElementAncestry::ProvenAttachedSheet
                     }
                     Some(_) => ElementAncestry::OutsideTargetWindow,
