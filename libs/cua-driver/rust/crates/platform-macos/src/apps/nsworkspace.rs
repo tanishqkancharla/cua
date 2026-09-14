@@ -83,7 +83,7 @@ pub enum LaunchError {
     #[error("NSWorkspace launch returned no NSRunningApplication and no NSError")]
     NoApp,
     #[error(
-        "NSWorkspace launch callback did not complete within {:?}, and no matching running application was observed",
+        "NSWorkspace launch did not produce a verified result within {:?}; the request may still complete and must not be replayed automatically",
         COMPLETION_TIMEOUT
     )]
     Timeout,

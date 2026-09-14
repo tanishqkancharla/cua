@@ -80,7 +80,8 @@ fn def() -> &'static ToolDef {
         }),
         read_only: false,
         destructive: false,
-        idempotent: true,
+        // A URL handoff or a fresh-instance launch can create additional state.
+        idempotent: false,
         open_world: true,
     })
 }
@@ -639,7 +640,20 @@ fn structured_launch_failure(error: &anyhow::Error) -> ToolResult {
         code,
         format!("Launch failed: {error:#}"),
         serde_json::json!({
-            "launch_state": launch_state(requested, false, false),
+            "launch_state": if requested {
+                // The callback timeout does not cancel NSWorkspace. Its serial
+                // launch queue can remain blocked after this RPC ends. A missing
+                // result does not prove that no process or window exists.
+                serde_json::json!({
+                    "requested": true,
+                    "process_running": null,
+                    "window_ready": null,
+                    "outcome": "unknown",
+                    "do_not_replay": true,
+                })
+            } else {
+                launch_state(false, false, false)
+            },
         }),
     )
 }
@@ -818,7 +832,7 @@ mod tests {
     }
 
     #[test]
-    fn launch_timeout_reports_requested_without_process_or_window() {
+    fn launch_timeout_preserves_unknown_effect_and_forbids_automatic_replay() {
         let error = anyhow::Error::new(crate::apps::nsworkspace::LaunchError::Timeout)
             .context("Failed to launch com.example.App");
         let result = structured_launch_failure(&error);
@@ -827,8 +841,11 @@ mod tests {
         assert_eq!(result.is_error, Some(true));
         assert_eq!(structured["error"], "LAUNCH_CALLBACK_TIMEOUT");
         assert_eq!(structured["launch_state"]["requested"], true);
-        assert_eq!(structured["launch_state"]["process_running"], false);
-        assert_eq!(structured["launch_state"]["window_ready"], false);
+        assert!(structured["launch_state"]["process_running"].is_null());
+        assert!(structured["launch_state"]["window_ready"].is_null());
+        assert_eq!(structured["launch_state"]["outcome"], "unknown");
+        assert_eq!(structured["launch_state"]["do_not_replay"], true);
+        assert!(!super::def().idempotent);
     }
 
     #[test]
