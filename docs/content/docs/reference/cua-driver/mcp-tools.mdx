@@ -12,7 +12,7 @@ description: Reference for every MCP tool Cua Driver exposes
 
 import { Callout } from 'fumadocs-ui/components/callout';
 
-`cua-driver` exposes 58 MCP tools through a single stdio server (`cua-driver mcp`). Every tool is also callable from the shell as `cua-driver <name> '<JSON-args>'`.
+`cua-driver` exposes 59 MCP tools through a single stdio server (`cua-driver mcp`). Every tool is also callable from the shell as `cua-driver <name> '<JSON-args>'`.
 
 Tool names are `snake_case`. Responses are MCP `CallTool.Result` envelopes: a text content block prefixed with a `✅` summary (or the error reason on failure), plus optional image or structured-content blocks on tools that produce them. See the [CLI reference](/reference/cua-driver/cli-reference) for CLI-specific options like `--socket` and `--screenshot-out-file`.
 
@@ -866,6 +866,24 @@ accepts it. Omit it to use the authenticated transport's implicit lifecycle sess
 
 ```json
 {"path":["example"],"pid":844,"window_id":10725}
+```
+
+### `native_paste`
+
+Paste plaintext into one exact macOS native accessibility control with Cmd+V. Requires an exact pid and window_id, verifies the same focused AX element before the clipboard write and key dispatch, and succeeds only when AXValue read-back equals the expected UTF-16-range insertion. Only clipboard_policy:"leave" is supported: the supplied plaintext remains on the system clipboard and is never restored. delivery_mode:"background" (default) never fronts the target. delivery_mode:"foreground" briefly fronts the exact target for one physical HID Cmd+V chord, revalidates the AX target and clipboard immediately before that chord, then restores the prior frontmost app. After dispatch, any unverified result is reported as effect:"unknown" and must not be replayed automatically.
+
+**Arguments:**
+
+- `clipboard_policy` (string, required): Required. leave writes the plaintext to NSPasteboard and never restores prior clipboard content.
+- `delivery_mode` (string, optional): Best-effort-background ladder rung (default "background"). "background": posts one PID-routed Cmd+V without fronting the target. "foreground": briefly front the exact target, revalidate the retained AX target and clipboard immediately before one physical HID Cmd+V chord, then restore the prior frontmost app. Choose the delivery mode before dispatch; never replay an uncertain paste.
+- `format` (string, optional): Only text is implemented; md and html are refused before clipboard mutation. default: `"text"`
+- `pid` (integer, required): Exact target process ID.
+- `session` (string, optional): Public session label for window-scope authorization.
+- `text` (string, required): Plaintext to paste (at most 16 KiB UTF-8).
+- `window_id` (integer, required): Exact target CGWindowID.
+
+```json
+{"clipboard_policy":"leave","pid":844,"text":"hello","window_id":10725}
 ```
 
 ### `set_agent_cursor_theme`
