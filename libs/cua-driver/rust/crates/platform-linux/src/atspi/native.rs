@@ -19,9 +19,9 @@ use anyhow::{anyhow, Result};
 use atspi::connection::{AccessibilityConnection, P2P};
 use atspi::proxy::accessible::AccessibleProxy;
 use atspi::proxy::proxy_ext::ProxyExt;
-use atspi::{CoordType, Interface, State, StateSet};
+use atspi::{CoordType, Interface, RelationType, State, StateSet};
 
-use super::AtspiNode;
+use super::{AtspiIdentity, AtspiNode};
 
 /// Per-call D-Bus timeout: a single unresponsive accessible (common in large,
 /// lazily-built trees like Chromium's) must not stall the whole walk.
@@ -233,9 +233,13 @@ struct Visited<'a> {
     /// Display text: the accessible `name`, or — for editable/text widgets that
     /// expose no name — the Text-interface content (where typed text lives).
     name: String,
+    has_native_name: bool,
+    observed_text: Option<String>,
     value: Option<String>,
     checked: Option<bool>,
     enabled: Option<bool>,
+    showing: Option<bool>,
+    visible: Option<bool>,
     selected: Option<bool>,
     selectable: bool,
     actions: Vec<String>,
@@ -257,6 +261,7 @@ struct Visited<'a> {
     /// tree; this is what lets a caller that named an exact native window prove
     /// which of those windows a node actually lives in.
     frame_ordinal: usize,
+    identity: Option<AtspiIdentity>,
     acc: AccessibleProxy<'a>,
 }
 
@@ -343,6 +348,38 @@ impl RawObjectRef {
             path: oref.path_as_str().to_owned(),
         })
     }
+}
+
+/// Pin well-known names to their current unique owner. A missing owner is
+/// discovery-only: indexed clicks cannot use an unproven persistent identity.
+async fn identity_ref(
+    conn: &AccessibilityConnection,
+    raw: &RawObjectRef,
+    owners: &mut std::collections::HashMap<String, Option<String>>,
+) -> Option<RawObjectRef> {
+    let owner = if raw.name.starts_with(':') {
+        raw.name.clone()
+    } else if let Some(owner) = owners.get(&raw.name) {
+        owner.clone()?
+    } else {
+        let owner = async {
+            let bus = atspi::zbus::fdo::DBusProxy::new(conn.connection())
+                .await
+                .ok()?;
+            let name = atspi::zbus::names::BusName::try_from(raw.name.as_str()).ok()?;
+            call(bus.get_name_owner(name))
+                .await?
+                .ok()
+                .map(|name| name.to_string())
+        }
+        .await;
+        owners.insert(raw.name.clone(), owner.clone());
+        owner?
+    };
+    Some(RawObjectRef {
+        name: owner,
+        path: raw.path.clone(),
+    })
 }
 
 type WireRef = (String, atspi::zbus::zvariant::OwnedObjectPath);
@@ -795,159 +832,6 @@ async fn resolve_window_frame(
     resolved
 }
 
-/// Structural discovery remains sequential; only metadata that cannot change
-/// the DFS stack is deferred. These nodes must be enriched before indexing:
-/// action availability participates in the global element-index predicate.
-struct PendingVisited<'a> {
-    node: Visited<'a>,
-    has_action: bool,
-    has_text: bool,
-}
-
-const METADATA_BATCH_SIZE: usize = 8;
-
-async fn enrich_visited(pending: PendingVisited<'_>) -> Visited<'_> {
-    let PendingVisited {
-        mut node,
-        has_action,
-        has_text,
-    } = pending;
-    let acc = &node.acc;
-    let has_value = node.has_value;
-    // Collect action names, numeric value, and (crucially) Text-interface
-    // content. Only touch `proxies` when an interface is actually present.
-    let mut actions: Vec<String> = Vec::new();
-    let mut value: Option<String> = None;
-    let mut text_content = String::new();
-    let mut observed_text = None;
-    if has_action || has_value || has_text {
-        if let Some(Ok(proxies)) = call(acc.proxies()).await {
-            // These interfaces expose independent metadata. Fetch them in
-            // parallel while keeping each interface's dependent calls and
-            // action-name slots ordered. The surrounding tree traversal
-            // remains sequential, so window identity and global indices do
-            // not change.
-            tokio::join!(
-                async {
-                    if has_action {
-                        if let Some(Ok(ap)) = call(proxies.action()).await {
-                            let n = call(ap.n_actions()).await.and_then(|r| r.ok()).unwrap_or(0);
-                            for i in 0..n {
-                                // Preserve the AT-SPI action index even when an
-                                // individual name lookup fails. `do_action` takes
-                                // this original index, so compacting the vector
-                                // could otherwise actuate a different action than
-                                // the name we selected.
-                                actions.push(
-                                    call(ap.get_name(i))
-                                        .await
-                                        .and_then(|result| result.ok())
-                                        .unwrap_or_default(),
-                                );
-                            }
-                        }
-                    }
-                },
-                async {
-                    if has_value {
-                        if let Some(Ok(vp)) = call(proxies.value()).await {
-                            value = call(vp.current_value())
-                                .await
-                                .and_then(|r| r.ok())
-                                .map(format_value);
-                        }
-                    }
-                },
-                async {
-                    // Text content is where editable/entry text (the typed string)
-                    // lives; `name` is usually empty for such widgets.
-                    if has_text {
-                        if let Some(Ok(tp)) = call(proxies.text()).await {
-                            if let Some(Ok(count)) = call(tp.character_count()).await {
-                                if count == 0 {
-                                    observed_text = Some(String::new());
-                                } else if count > 0 {
-                                    if let Some(Ok(t)) = call(tp.get_text(0, count.min(4096))).await
-                                    {
-                                        text_content = t.clone();
-                                        observed_text = Some(t);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                },
-            );
-        }
-    }
-
-    // Spreadsheet cell names identify coordinates (e.g. E1), while Text
-    // contains the displayed content. Preserve both. Value often reports
-    // zero for a string/empty cell and must not replace its actual text.
-    if node.role.eq_ignore_ascii_case("table cell") {
-        if let Some(text) = observed_text {
-            value = if text.is_empty() { None } else { Some(text) };
-        }
-    }
-
-    // Surface Text content as the display name when the widget has no name.
-    if node.name.trim().is_empty() && !text_content.trim().is_empty() {
-        node.name = text_content;
-    }
-    node.actions = actions;
-    node.value = value;
-    node
-}
-
-/// Poll a bounded batch of borrowed reads without detached tasks or a new
-/// timeout budget. Completion order cannot reorder nodes. On deadline expiry,
-/// only the fully enriched preorder prefix is retained: an unenriched action
-/// list could otherwise renumber every later element.
-async fn enrich_visited_batch<'a>(
-    pending: &mut Vec<PendingVisited<'a>>,
-    visited: &mut Vec<Visited<'a>>,
-    deadline: std::time::Instant,
-) -> bool {
-    use std::future::Future;
-    use std::task::Poll;
-
-    if pending.is_empty() {
-        return true;
-    }
-    if std::time::Instant::now() >= deadline {
-        return false;
-    }
-    let mut reads: Vec<_> = std::mem::take(pending)
-        .into_iter()
-        .map(|node| Some(Box::pin(enrich_visited(node))))
-        .collect();
-    let mut completed: Vec<Option<Visited<'a>>> =
-        std::iter::repeat_with(|| None).take(reads.len()).collect();
-    let batch = std::future::poll_fn(|cx| {
-        let mut all_complete = true;
-        for (index, slot) in reads.iter_mut().enumerate() {
-            let Some(read) = slot.as_mut() else { continue };
-            match read.as_mut().poll(cx) {
-                Poll::Ready(node) => {
-                    completed[index] = Some(node);
-                    *slot = None;
-                }
-                Poll::Pending => all_complete = false,
-            }
-        }
-        if all_complete {
-            Poll::Ready(())
-        } else {
-            Poll::Pending
-        }
-    });
-    let finished = tokio::time::timeout_at(deadline.into(), batch)
-        .await
-        .is_ok();
-    visited.extend(completed.into_iter().take_while(Option::is_some).flatten());
-    finished
-}
-
 /// `collect_visited` with caller-supplied caps.
 /// - `max_elements = None` keeps the historical 5 000-node budget.
 /// - `max_depth = None` keeps depth uncapped (the historical behaviour);
@@ -1001,7 +885,9 @@ async fn collect_visited_bounded<'a>(
         .collect();
 
     let mut visited: Vec<Visited<'a>> = Vec::new();
-    let mut pending = Vec::with_capacity(METADATA_BATCH_SIZE);
+    let mut identity_owners = std::collections::HashMap::new();
+    let mut labels: std::collections::HashMap<(String, String), Vec<String>> =
+        std::collections::HashMap::new();
     // Guard against pathological/looping trees. Defaults to 5 000 (the
     // historical hard-coded budget); callers can override via max_elements.
     let mut budget = max_elements.unwrap_or(5000usize);
@@ -1043,7 +929,15 @@ async fn collect_visited_bounded<'a>(
         // otherwise the loop never returns to the deadline check at the top and
         // the walk stalls past OP_TIMEOUT for callers without an outer guard
         // (snapshot bounds, insert_text). That was the residual #1936 hang.
-        let acc = match call(accessible_for(conn, &oref)).await {
+        let object_identity = identity_ref(conn, &oref, &mut identity_owners).await;
+        let frame_identity = identity_ref(conn, &seeds[frame_ordinal], &mut identity_owners).await;
+        // Use the pinned owner for metadata and the retained actuation proxy.
+        let acc = match call(accessible_for(
+            conn,
+            object_identity.as_ref().unwrap_or(&oref),
+        ))
+        .await
+        {
             Some(Ok(a)) => a,
             Some(Err(error)) => {
                 dlog!("  accessible_for failed: {error:#}");
@@ -1113,10 +1007,19 @@ async fn collect_visited_bounded<'a>(
             Some(Ok(r)) => r,
             _ => String::new(),
         };
-        let name = match name_r {
+        let mut name = match name_r {
             Some(Ok(n)) => n,
             _ => String::new(),
         };
+        let has_native_name = !name.trim().is_empty();
+        let showing = state_r
+            .as_ref()
+            .and_then(|r| r.as_ref().ok())
+            .map(|state| state.contains(State::Showing));
+        let visible = state_r
+            .as_ref()
+            .and_then(|r| r.as_ref().ok())
+            .map(|state| state.contains(State::Visible));
         let focused = matches!(state_r.as_ref(), Some(Ok(s)) if s.contains(State::Focused));
         let role_lower = role.to_ascii_lowercase();
         let checked = if role_lower.contains("check") {
@@ -1150,6 +1053,133 @@ async fn collect_visited_bounded<'a>(
             None
         };
 
+        // Collect action names, numeric value, and (crucially) Text-interface
+        // content. Only touch `proxies` when an interface is actually present,
+        // and drop the borrow before `acc` moves into `visited`.
+        let mut actions: Vec<String> = Vec::new();
+        let mut value: Option<String> = None;
+        let mut text_content = String::new();
+        let mut observed_text = None;
+        if has_action || has_value || has_text {
+            if let Some(Ok(proxies)) = call(acc.proxies()).await {
+                if has_action {
+                    if let Some(Ok(ap)) = call(proxies.action()).await {
+                        let n = call(ap.n_actions()).await.and_then(|r| r.ok()).unwrap_or(0);
+                        for i in 0..n {
+                            // Preserve the AT-SPI action index even when an
+                            // individual name lookup fails. `do_action` takes
+                            // this original index, so compacting the vector
+                            // could otherwise actuate a different action than
+                            // the name we selected.
+                            actions.push(
+                                call(ap.get_name(i))
+                                    .await
+                                    .and_then(|result| result.ok())
+                                    .unwrap_or_default(),
+                            );
+                        }
+                    }
+                }
+                if has_value {
+                    if let Some(Ok(vp)) = call(proxies.value()).await {
+                        value = call(vp.current_value())
+                            .await
+                            .and_then(|r| r.ok())
+                            .map(format_value);
+                    }
+                }
+                // Text content is where editable/entry text (the typed string)
+                // lives; `name` is usually empty for such widgets.
+                if has_text {
+                    if let Some(Ok(tp)) = call(proxies.text()).await {
+                        if let Some(Ok(count)) = call(tp.character_count()).await {
+                            if count == 0 {
+                                observed_text = Some(String::new());
+                            } else if count > 0 {
+                                if let Some(Ok(t)) = call(tp.get_text(0, count.min(4096))).await {
+                                    text_content = t.clone();
+                                    observed_text = Some(t);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Spreadsheet cell names identify coordinates (e.g. E1), while Text
+        // contains the displayed content. Preserve both. Value often reports
+        // zero for a string/empty cell and must not replace its actual text.
+        if role_lower == "table cell" {
+            if let Some(text) = observed_text.as_ref() {
+                value = if text.is_empty() {
+                    None
+                } else {
+                    Some(text.clone())
+                };
+            }
+        }
+
+        // Surface Text content as the display name when the widget has no name.
+        if name.trim().is_empty() && !text_content.trim().is_empty() {
+            name = text_content;
+        }
+
+        // GTK sometimes exports only one direction of the label relationship.
+        // Collect both, using object identity rather than sibling proximity.
+        // Only observed targets or reverse-label sources initiate discovery.
+        // Explicit LabelledBy may refer to a non-showing semantic label.
+        if is_observed(showing, visible)
+            && (!has_native_name || role_lower == "label")
+            && std::time::Instant::now() < deadline
+        {
+            if let Some(Ok(relations)) = call(acc.get_relation_set()).await {
+                for (kind, references) in relations {
+                    if kind != RelationType::LabelFor && kind != RelationType::LabelledBy {
+                        continue;
+                    }
+                    for reference in references.into_iter().take(8) {
+                        if std::time::Instant::now() >= deadline {
+                            break;
+                        }
+                        let Some(raw) = RawObjectRef::from_atspi(&reference) else {
+                            continue;
+                        };
+                        let Some(other) = identity_ref(conn, &raw, &mut identity_owners).await
+                        else {
+                            continue;
+                        };
+                        let binding = if kind == RelationType::LabelFor && !name.trim().is_empty() {
+                            Some(((other.name, other.path), name.clone()))
+                        } else if kind == RelationType::LabelledBy && !has_native_name {
+                            if let (Some(object), Some(Ok(label))) = (
+                                object_identity.as_ref(),
+                                call(accessible_for(conn, &other)).await,
+                            ) {
+                                call(label.name())
+                                    .await
+                                    .and_then(|r| r.ok())
+                                    .filter(|label| !label.trim().is_empty())
+                                    .map(|label| {
+                                        ((object.name.clone(), object.path.clone()), label)
+                                    })
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+                        if let Some((key, label)) = binding {
+                            let names = labels.entry(key).or_default();
+                            if !names.contains(&label) {
+                                names.push(label);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Children inherit web-document context, plus this node's own role.
         let child_in_web_doc = in_web_doc || is_document_role(&role);
 
@@ -1172,41 +1202,58 @@ async fn collect_visited_bounded<'a>(
             }
         }
 
-        pending.push(PendingVisited {
-            node: Visited {
-                depth,
-                role,
-                name,
-                value: None,
-                checked,
-                enabled,
-                selected,
-                selectable,
-                actions: Vec::new(),
-                has_editable,
-                has_value,
-                has_component,
-                focused,
-                children_limited,
-                in_web_doc,
-                on_web_process_bus: is_web_process_bus(&oref.name),
-                frame_ordinal,
-                acc,
-            },
-            has_action,
-            has_text,
+        visited.push(Visited {
+            depth,
+            role,
+            name,
+            has_native_name,
+            observed_text,
+            value,
+            checked,
+            enabled,
+            showing,
+            visible,
+            selected,
+            selectable,
+            actions,
+            has_editable,
+            has_value,
+            has_component,
+            focused,
+            children_limited,
+            in_web_doc,
+            on_web_process_bus: is_web_process_bus(&oref.name),
+            frame_ordinal,
+            identity: object_identity
+                .zip(frame_identity)
+                .map(|(object, frame)| AtspiIdentity {
+                    bus_name: object.name,
+                    path: object.path,
+                    frame_bus_name: frame.name,
+                    frame_path: frame.path,
+                }),
+            acc,
         });
-        if pending.len() == METADATA_BATCH_SIZE
-            && !enrich_visited_batch(&mut pending, &mut visited, deadline).await
+    }
+
+    for node in &mut visited {
+        if node.has_native_name {
+            continue;
+        }
+        if let Some(names) = node
+            .identity
+            .as_ref()
+            .and_then(|id| labels.get(&(id.bus_name.clone(), id.path.clone())))
         {
-            dlog!("collect_visited metadata deadline exhausted; returning enriched prefix");
-            break;
+            // A related label names the field; preserve its actual Text
+            // content as a value, including read-only text widgets.
+            if let Some(text) = node.observed_text.as_ref().filter(|text| !text.is_empty()) {
+                node.value = Some(text.clone());
+            }
+            node.name = names.join(" ");
         }
     }
 
-    // Flush a final short chunk after a node/depth limit or exhausted stack.
-    // The same deadline applies even when discovery stopped on an error.
-    enrich_visited_batch(&mut pending, &mut visited, deadline).await;
     dlog!("walked pid {pid}: {} node(s)", visited.len());
     Ok(Some((visited, scoped_frame)))
 }
@@ -1245,7 +1292,12 @@ fn render(visited: &[Visited<'_>], only_frame: Option<usize>) -> (String, Vec<At
             current_frame = Some(v.frame_ordinal);
             parent_at_depth.clear();
         }
-        let emit = only_frame.is_none_or(|frame| frame == v.frame_ordinal);
+        // Every visited sibling retires deeper ancestry, including passive or
+        // hidden containers. Otherwise a following field can inherit a prior
+        // sibling checkbox as its parent.
+        parent_at_depth.truncate(v.depth);
+        let emit = only_frame.is_none_or(|frame| frame == v.frame_ordinal)
+            && is_observed(v.showing, v.visible);
         let indent = "  ".repeat(v.depth);
         // Resolve parent: walk parent_at_depth from v.depth-1 down to 0.
         let parent_element_index = if v.depth == 0 {
@@ -1290,6 +1342,7 @@ fn render(visited: &[Visited<'_>], only_frame: Option<usize>) -> (String, Vec<At
                 }),
                 actions: v.actions.clone(),
                 element_key: idx as u64,
+                identity: v.identity.clone(),
                 depth: v.depth,
                 parent_element_index,
                 in_web_content: v.in_web_doc,
@@ -1325,6 +1378,12 @@ fn render(visited: &[Visited<'_>], only_frame: Option<usize>) -> (String, Vec<At
 /// (e.g. `1.0`), so `value="..."` fields stay byte-compatible.
 fn format_value(v: f64) -> String {
     format!("{v:?}")
+}
+
+/// Unknown state is not evidence of invisibility. Keep the actuator index
+/// predicate unchanged: filtering presentation must never renumber targets.
+fn is_observed(showing: Option<bool>, visible: Option<bool>) -> bool {
+    showing != Some(false) && visible != Some(false)
 }
 
 /// Interpret the positive AT-SPI states that establish user operability.
@@ -1457,18 +1516,14 @@ pub(super) fn walk_tree_bounded_with_timeout(
                 Vec::new()
             }
         };
-        // Bounds are keyed by the application-wide element index, so drop the
-        // entries for windows this snapshot no longer shows.
-        let bounds = if scoped_frame.is_some() {
-            let emitted: std::collections::HashSet<usize> =
-                nodes.iter().filter_map(|node| node.element_index).collect();
-            bounds
-                .into_iter()
-                .filter(|(index, ..)| emitted.contains(index))
-                .collect()
-        } else {
-            bounds
-        };
+        // Bounds use application-wide indices; retain only controls emitted
+        // in this observation, including unscoped snapshots.
+        let emitted: std::collections::HashSet<usize> =
+            nodes.iter().filter_map(|node| node.element_index).collect();
+        let bounds = bounds
+            .into_iter()
+            .filter(|(index, ..)| emitted.contains(index))
+            .collect();
         Ok(Some(WalkedTree {
             markdown,
             nodes,
@@ -2180,15 +2235,87 @@ pub struct IndexedClickTarget {
     pid: u32,
     xid: u64,
     index: usize,
+    bounds_index: usize,
     target_position: usize,
     frame_ordinal: usize,
     visited: Vec<Visited<'static>>,
 }
 
 impl IndexedClickTarget {
+    /// Final pre-input liveness check on the retained proxy. A defunct or
+    /// disabled object must never fall back to another object's coordinates.
+    pub fn verify_live(&self) -> Result<()> {
+        if !crate::x11::window_belongs_to_pid(self.xid, self.pid) {
+            return Err(anyhow!(
+                "{}: window no longer belongs to process",
+                cua_driver_core::element_token::STALE_TOKEN_ERROR
+            ));
+        }
+        bounded(
+            async {
+                let target = &self.visited[self.target_position];
+                let state = call(target.acc.get_state())
+                    .await
+                    .and_then(|reply| reply.ok())
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "{}: observed object no longer responds",
+                            cua_driver_core::element_token::STALE_TOKEN_ERROR
+                        )
+                    })?;
+                if state.contains(State::Defunct) || !is_enabled_state(&state) {
+                    return Err(anyhow!(
+                        "{}: observed object is defunct or disabled",
+                        cua_driver_core::element_token::STALE_TOKEN_ERROR
+                    ));
+                }
+                Ok(())
+            },
+            || {
+                Err(anyhow!(
+                    "{}: object liveness check timed out",
+                    cua_driver_core::element_token::STALE_TOKEN_ERROR
+                ))
+            },
+        )
+    }
+
     pub fn needs_foreground_pointer(&self) -> bool {
         let target = &self.visited[self.target_position];
         target.has_editable || target.role == "table cell"
+    }
+
+    /// LibreOffice GTK3 updates its drawing-area screen origin on pointer
+    /// motion. A plain indexed cell click must refresh this same accessible
+    /// after positioning the pointer, before its one button gesture.
+    pub fn needs_pointer_geometry_refresh(&self) -> bool {
+        let target = &self.visited[self.target_position];
+        target.role == "table cell"
+            && has_spreadsheet_ancestor(&self.visited, self.target_position)
+            && std::fs::read_link(format!("/proc/{}/exe", self.pid))
+                .ok()
+                .and_then(|path| path.file_name().map(|name| name == "soffice.bin"))
+                .unwrap_or(false)
+    }
+
+    pub fn verify_pointer_refresh_identity(&self) -> Result<()> {
+        self.verify_live()?;
+        bounded(
+            async {
+                let target = &self.visited[self.target_position];
+                let (name, role) =
+                    tokio::join!(call(target.acc.name()), call(target.acc.get_role_name()));
+                if !matches!(name, Some(Ok(ref value)) if value == &target.name)
+                    || !matches!(role, Some(Ok(ref value)) if value == &target.role)
+                {
+                    return Err(anyhow!(
+                        "retained Calc cell changed during pointer preparation"
+                    ));
+                }
+                Ok(())
+            },
+            || Err(anyhow!("Calc pointer preparation identity check timed out")),
+        )
     }
 
     /// Refresh Component extents through the retained proxies. No tree walk is
@@ -2201,7 +2328,7 @@ impl IndexedClickTarget {
                     self.pid,
                     self.xid,
                     Some(self.frame_ordinal),
-                    Some(self.index),
+                    Some(self.bounds_index),
                 )
                 .await
                 .into_iter()
@@ -2251,9 +2378,15 @@ impl IndexedClickTarget {
     }
 }
 
-/// Resolve exactly once, retaining application-wide index ordering while
-/// requiring the selected element to belong to the explicitly named X11 window.
-pub fn resolve_indexed_click_target(pid: u32, idx: usize, xid: u64) -> Result<IndexedClickTarget> {
+/// Resolve the snapshot's stable object identity exactly once, requiring its
+/// original frame to belong to the explicitly named live X11 window. Ordinal
+/// changes do not retarget the click; disappearance fails before input.
+pub fn resolve_indexed_click_target(
+    pid: u32,
+    idx: usize,
+    xid: u64,
+    identity: &AtspiIdentity,
+) -> Result<IndexedClickTarget> {
     if xid == 0 {
         return Err(anyhow!(
             "indexed click resolution requires an exact X11 window"
@@ -2268,22 +2401,44 @@ pub fn resolve_indexed_click_target(pid: u32, idx: usize, xid: u64) -> Result<In
             let frame_ordinal = scoped_frame.ok_or_else(|| {
                 anyhow!("cannot correlate window {xid} to an AT-SPI frame for pid {pid}")
             })?;
-            // Snapshot indices are application-wide even when only one frame
-            // is emitted. Filtering to the frame first would reinterpret them.
-            let target_position = visited
+            if !crate::x11::window_belongs_to_pid(xid, pid) {
+                return Err(anyhow!(
+                    "{}: window no longer belongs to process",
+                    cua_driver_core::element_token::STALE_TOKEN_ERROR
+                ));
+            }
+            // The observed ordinal is only a snapshot address, never a live
+            // selector. Match the exact object and its original owning frame.
+            let mut matches = visited
                 .iter()
                 .enumerate()
-                .filter(|(_, node)| is_indexable(node))
-                .nth(idx)
-                .map(|(position, _)| position)
-                .ok_or_else(|| anyhow!("element {idx} not found"))?;
-            if visited[target_position].frame_ordinal != frame_ordinal {
-                return Err(anyhow!("element {idx} does not belong to window {xid}"));
+                .filter(|(_, node)| node.identity.as_ref() == Some(identity));
+            let (target_position, target) = matches.next().ok_or_else(|| {
+                anyhow!(
+                    "{}: observed AT-SPI object is no longer present",
+                    cua_driver_core::element_token::STALE_TOKEN_ERROR
+                )
+            })?;
+            if matches.next().is_some()
+                || target.frame_ordinal != frame_ordinal
+                || !is_indexable(target)
+            {
+                return Err(anyhow!(
+                    "{}: observed object is ambiguous, disabled or outside the target window",
+                    cua_driver_core::element_token::STALE_TOKEN_ERROR
+                ));
             }
+            // Geometry's existing helper takes a CURRENT application-wide
+            // ordinal. Derive it from the already matched retained object.
+            let live_index = visited[..target_position]
+                .iter()
+                .filter(|node| is_indexable(node))
+                .count();
             Ok(IndexedClickTarget {
                 pid,
                 xid,
                 index: idx,
+                bounds_index: live_index,
                 target_position,
                 frame_ordinal,
                 visited,
@@ -2291,6 +2446,325 @@ pub fn resolve_indexed_click_target(pid: u32, idx: usize, xid: u64) -> Result<In
         },
         || Err(anyhow!("indexed click resolution timed out for pid {pid}")),
     )
+}
+
+/// Text selection never uses activation, pointer events, or keyboard replay.
+/// All errors after the first selection/caret request are marked uncertain,
+/// including negative replies and read-back failures: callers must observe.
+pub fn select_text(
+    request: &crate::text_selection::SelectionRequest,
+) -> std::result::Result<
+    crate::text_selection::SelectionResult,
+    crate::text_selection::SelectionFailure,
+> {
+    use crate::text_selection::{
+        matching_range, OffsetUnit, SelectionFailure, SelectionKind, SelectionResult,
+    };
+    let submitted = std::cell::Cell::new(false);
+    let result = bounded(
+        async {
+            if crate::wayland::is_wayland() {
+                return Err(anyhow!("select_text currently requires X11 exact-window verification; native Wayland is unsupported"));
+            }
+            let pid = request.pid;
+            let xid = request.window_id;
+            if !crate::x11::window_belongs_to_pid(xid, pid) {
+                return Err(anyhow!(
+                    "select_text window no longer belongs to the requested process"
+                ));
+            }
+            validate_selection_snapshot(request)?;
+            let window_topology = selection_window_topology(pid);
+            let conn = shared_connection().await?;
+            let (visited, frame) = collect_visited_bounded(conn, pid, xid, None, None)
+                .await?
+                .ok_or_else(|| anyhow!("no AT-SPI application for selection"))?;
+            let frame = frame.ok_or_else(|| anyhow!("selection window identity is ambiguous"))?;
+            // Do not filter by frame before numbering: snapshot indices are
+            // application-wide, including other top-levels in this process.
+            let target = visited
+                .iter()
+                .filter(|node| is_indexable(node))
+                .nth(request.element_index)
+                .ok_or_else(|| anyhow!("selection element is no longer present"))?;
+            if target.frame_ordinal != frame {
+                return Err(anyhow!("selection element belongs to another window"));
+            }
+            verify_selection_window(&visited, pid, xid, frame, &window_topology).await?;
+            let proxies = target
+                .acc
+                .proxies()
+                .await
+                .map_err(|e| anyhow!("selection interfaces unavailable: {e}"))?;
+            let text = proxies
+                .text()
+                .await
+                .map_err(|e| anyhow!("element has no Text selection interface: {e}"))?;
+            let count = call(text.character_count())
+                .await
+                .ok_or_else(|| anyhow!("Text character count timed out"))??;
+            if !(0..=1_000_000).contains(&count) {
+                return Err(anyhow!(
+                    "Text character count exceeds selection inspection bound"
+                ));
+            }
+            let live = call(text.get_text(0, count))
+                .await
+                .ok_or_else(|| anyhow!("Text content read timed out"))??;
+            let unit = OffsetUnit::infer(&live, count).map_err(anyhow::Error::msg)?;
+            // Always resolve a full noncollapsed match. Caret mode collapses
+            // only after the native substring probe confirms toolkit offsets.
+            let scalar_match = matching_range(
+                &live,
+                &request.text,
+                request.prefix.as_deref(),
+                request.suffix.as_deref(),
+                SelectionKind::Text,
+            )
+            .map_err(anyhow::Error::msg)?;
+            let matched = unit
+                .convert(&live, scalar_match)
+                .map_err(anyhow::Error::msg)?;
+            let selections = call(text.get_n_selections())
+                .await
+                .ok_or_else(|| anyhow!("selection count timed out"))??;
+            if !(0..=1).contains(&selections) {
+                return Err(anyhow!(
+                    "multiple or invalid existing selections are unsupported"
+                ));
+            }
+            let prior_focus = selection_focus()?;
+            // Recheck ownership, token, modality and text at the mutation seam.
+            // No re-enumeration or fallback may retarget the selected proxy.
+            verify_selection_window(&visited, pid, xid, frame, &window_topology).await?;
+            validate_selection_snapshot(request)?;
+            let latest = call(text.get_text(0, count))
+                .await
+                .ok_or_else(|| anyhow!("Text recheck timed out"))??;
+            if latest != live {
+                return Err(anyhow!(
+                    "element text changed during selection; observe again"
+                ));
+            }
+            let latest_count = call(text.character_count())
+                .await
+                .ok_or_else(|| anyhow!("Text character count recheck timed out"))??;
+            let matched_text = call(text.get_text(matched.start, matched.end))
+                .await
+                .ok_or_else(|| anyhow!("Text offset-unit substring verification timed out"))??;
+            if matched_text != request.text {
+                return Err(anyhow!(
+                    "Text offset-unit substring verification failed before mutation (unit={})",
+                    unit.name()
+                ));
+            }
+            let latest_selections = call(text.get_n_selections())
+                .await
+                .ok_or_else(|| anyhow!("selection count recheck timed out"))??;
+            if latest_count != count
+                || latest_selections != selections
+                || selection_focus()? != prior_focus
+            {
+                return Err(anyhow!(
+                    "selection or desktop state changed before input; observe again"
+                ));
+            }
+            // Use the standard Text D-Bus method names through its existing
+            // proxy; no new transport, external command, or EditableText write.
+            let range = matched.for_kind(request.kind);
+            submitted.set(true);
+            // Native selection/caret changes can enable menu actions and shift
+            // application-wide indexable ordinals, including sibling windows.
+            // Invalidate only after all pre-input checks, then again on return,
+            // bounded timeout/cancellation, or unwind. Never reuse this token.
+            let _snapshot_mutation = cua_driver_core::element_token::global()
+                .invalidate_pid_snapshots_for_mutation(pid as i32);
+            let accepted: bool = match request.kind {
+                SelectionKind::Text if selections == 0 => {
+                    call(text.inner().call("AddSelection", &(range.start, range.end)))
+                        .await
+                        .ok_or_else(|| anyhow!("AddSelection timed out"))??
+                }
+                SelectionKind::Text => call(
+                    text.inner()
+                        .call("SetSelection", &(0i32, range.start, range.end)),
+                )
+                .await
+                .ok_or_else(|| anyhow!("SetSelection timed out"))??,
+                SelectionKind::CursorBefore | SelectionKind::CursorAfter => {
+                    call(text.inner().call("SetCaretOffset", &(range.start,)))
+                        .await
+                        .ok_or_else(|| anyhow!("SetCaretOffset timed out"))??
+                }
+            };
+            if !accepted {
+                return Err(anyhow!("Text selection request was not accepted"));
+            }
+            let selected_count = call(text.get_n_selections())
+                .await
+                .ok_or_else(|| anyhow!("selection read-back timed out"))??;
+            let selected: Option<(i32, i32)> = if selected_count == 1 {
+                Some(
+                    call(text.inner().call("GetSelection", &(0i32,)))
+                        .await
+                        .ok_or_else(|| anyhow!("GetSelection read-back timed out"))??,
+                )
+            } else {
+                None
+            };
+            let matches = match request.kind {
+                SelectionKind::Text => selected == Some((range.start, range.end)),
+                SelectionKind::CursorBefore | SelectionKind::CursorAfter => {
+                    let caret = call(text.caret_offset())
+                        .await
+                        .ok_or_else(|| anyhow!("caret read-back timed out"))??;
+                    caret == range.start
+                        && (selected_count == 0 || selected == Some((range.start, range.start)))
+                }
+            };
+            if !matches {
+                return Err(anyhow!(
+                    "Text selection/caret read-back differs from the requested range"
+                ));
+            }
+            if selection_focus()? != prior_focus {
+                return Err(anyhow!(
+                    "Text selection changed desktop focus; inspect before continuing"
+                ));
+            }
+            let after = call(text.get_text(0, count))
+                .await
+                .ok_or_else(|| anyhow!("Text read-back timed out"))??;
+            let after_count = call(text.character_count())
+                .await
+                .ok_or_else(|| anyhow!("Text character count read-back timed out"))??;
+            if after != live || after_count != count {
+                return Err(anyhow!(
+                    "element text changed during selection; inspect before continuing"
+                ));
+            }
+            Ok(SelectionResult { range, unit })
+        },
+        || Err(anyhow!("select_text operation timed out")),
+    );
+    result.map_err(|error| SelectionFailure {
+        mutation_submitted: submitted.get(),
+        message: if submitted.get() {
+            format!("select_text result is uncertain after mutation: {error}. Observe before continuing; do not replay automatically.")
+        } else { format!("select_text refused before mutation: {error}") },
+    })
+}
+
+fn validate_selection_snapshot(request: &crate::text_selection::SelectionRequest) -> Result<()> {
+    use cua_driver_core::element_token::{resolve_element_args, ResolvedElement};
+    let pid = i32::try_from(request.pid).map_err(|_| anyhow!("invalid selection process id"))?;
+    let xid =
+        u32::try_from(request.window_id).map_err(|_| anyhow!("invalid selection window id"))?;
+    match resolve_element_args(
+        pid,
+        Some(request.element_index),
+        request.element_token.as_deref(),
+        request.snapshot_id.as_deref(),
+        Some(xid),
+        "select_text",
+    ) {
+        Ok(ResolvedElement::Element {
+            element_index,
+            window_id: Some(window_id),
+            ..
+        }) if element_index == request.element_index && window_id == xid => Ok(()),
+        _ => Err(anyhow!(
+            "selection snapshot is stale or its target no longer agrees; observe again"
+        )),
+    }
+}
+
+async fn verify_selection_window(
+    visited: &[Visited<'_>],
+    pid: u32,
+    xid: u64,
+    frame: usize,
+    window_topology: &[u64],
+) -> Result<()> {
+    if selection_window_topology(pid) != window_topology {
+        return Err(anyhow!(
+            "application window topology changed; observe again before selection"
+        ));
+    }
+    if !crate::x11::window_belongs_to_pid(xid, pid) {
+        return Err(anyhow!("selection window ownership changed"));
+    }
+    let window = crate::x11::list_windows(Some(pid))
+        .into_iter()
+        .find(|w| w.xid == xid)
+        .ok_or_else(|| anyhow!("selection window no longer exists"))?;
+    let root = visited
+        .iter()
+        .find(|n| n.frame_ordinal == frame && n.depth == 0)
+        .ok_or_else(|| anyhow!("selection frame was not observed"))?;
+    let proxies = root.acc.proxies().await?;
+    let component = proxies.component().await?;
+    let geometry = call(component.get_extents(CoordType::Screen))
+        .await
+        .ok_or_else(|| anyhow!("selection frame geometry timed out"))??;
+    if frame_geometry_distance(geometry, &window).is_none_or(|d| d > FRAME_MATCH_TOLERANCE_PX) {
+        return Err(anyhow!(
+            "selection accessibility frame differs from the native window"
+        ));
+    }
+    if visited
+        .iter()
+        .any(|n| n.focused && n.frame_ordinal != frame)
+    {
+        return Err(anyhow!(
+            "selection refused: another window in this application owns the focused widget"
+        ));
+    }
+    for other in visited
+        .iter()
+        .filter(|n| n.depth == 0 && n.frame_ordinal != frame)
+    {
+        let state = call(other.acc.get_state())
+            .await
+            .ok_or_else(|| anyhow!("selection modal-state check timed out"))??;
+        if state.contains(State::Modal) && state.contains(State::Showing) {
+            return Err(anyhow!(
+                "selection refused: another modal window is showing"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn selection_window_topology(pid: u32) -> Vec<u64> {
+    let mut windows: Vec<u64> = crate::x11::list_windows(Some(pid))
+        .into_iter()
+        .map(|window| window.xid)
+        .collect();
+    windows.sort_unstable();
+    windows
+}
+
+/// Read-only X11 focus snapshot. Selection must not activate another app or
+/// switch its focused widget; a toolkit that does so produces an uncertain result.
+fn selection_focus() -> Result<(u32, u32)> {
+    use x11rb::connection::Connection;
+    use x11rb::protocol::xproto::{AtomEnum, ConnectionExt};
+    let (conn, screen) = x11rb::rust_connection::RustConnection::connect(None)?;
+    let root = conn.setup().roots[screen].root;
+    let atom = conn
+        .intern_atom(false, b"_NET_ACTIVE_WINDOW")?
+        .reply()?
+        .atom;
+    let property = conn
+        .get_property(false, root, atom, AtomEnum::WINDOW, 0, 1)?
+        .reply()?;
+    let active = property
+        .value32()
+        .and_then(|mut values| values.next())
+        .ok_or_else(|| anyhow!("cannot verify active X11 window before selection"))?;
+    let focus = conn.get_input_focus()?.reply()?.focus;
+    Ok((active, focus))
 }
 
 async fn activate_visited(
@@ -3153,6 +3627,55 @@ fn screen_extent_rebase(
     }
 }
 
+// A near-zero frame may be a correctly positioned maximized window. Component
+// Screen/Window agreement with the X11 client origin proves Screen is already
+// translated. Keep the existing renderer correction when evidence is missing.
+fn component_screen_rebase(
+    candidate: (i32, i32),
+    client_origin: (i32, i32),
+    screen_origin: (i32, i32),
+    window_origin: Option<(i32, i32)>,
+) -> (i32, i32) {
+    if let Some(window) = window_origin {
+        let translated = |screen: i32, local: i32, client: i32| {
+            (i64::from(screen) - i64::from(local) - i64::from(client)).abs() <= 2
+        };
+        if translated(screen_origin.0, window.0, client_origin.0)
+            && translated(screen_origin.1, window.1, client_origin.1)
+        {
+            return (0, 0);
+        }
+    }
+    candidate
+}
+
+/// Calc may supply a grid-window Screen translation that differs from the
+/// X11 client origin. Suppress only axes already translated by that provider;
+/// equal Screen/Window axes retain the existing compatibility correction.
+fn calc_screen_rebase(fallback: (i32, i32), screen: (i32, i32), window: (i32, i32)) -> (i32, i32) {
+    (
+        if screen.0 != window.0 { 0 } else { fallback.0 },
+        if screen.1 != window.1 { 0 } else { fallback.1 },
+    )
+}
+
+fn has_spreadsheet_ancestor(visited: &[Visited<'_>], position: usize) -> bool {
+    let target = &visited[position];
+    let mut depth = target.depth;
+    for ancestor in visited[..position].iter().rev() {
+        if ancestor.depth < depth {
+            if ancestor.frame_ordinal != target.frame_ordinal {
+                return false;
+            }
+            if ancestor.role == "document spreadsheet" {
+                return true;
+            }
+            depth = ancestor.depth;
+        }
+    }
+    false
+}
+
 fn rebase_renderer_window_offset(
     mut offset: (i32, i32),
     frame_origin: Option<(i32, i32)>,
@@ -3224,8 +3747,12 @@ async fn element_bounds_for_visited(
     // produce a zero delta; Chromium's local (0,0) frame produces the
     // required window-origin delta. GTK's explicit Window-coordinate
     // path above remains authoritative when available.
-    let screen_rebase = if offset.is_none() && !crate::wayland::is_wayland() && xid != 0 {
-        let x11_origin = x11_window_origin(xid);
+    let screen_client_origin = if offset.is_none() && !crate::wayland::is_wayland() && xid != 0 {
+        x11_window_origin(xid)
+    } else {
+        None
+    };
+    let screen_rebase = if let Some(origin) = screen_client_origin {
         let frame = visited.iter().filter(in_frame).find(|node| {
             node.has_component
                 && matches!(
@@ -3233,7 +3760,7 @@ async fn element_bounds_for_visited(
                     "frame" | "window" | "dialog" | "alert" | "file chooser"
                 )
         });
-        if let (Some(origin), Some(frame)) = (x11_origin, frame) {
+        if let Some(frame) = frame {
             let accessible_origin = match call(frame.acc.proxies()).await {
                 Some(Ok(proxies)) => match call(proxies.component()).await {
                     Some(Ok(component)) => {
@@ -3300,10 +3827,19 @@ async fn element_bounds_for_visited(
     if let Some((ox, oy)) = offset {
         dlog!("element bounds: WINDOW coords + screen offset ({ox},{oy})");
     } else if let Some((ox, oy)) = screen_rebase {
-        dlog!("element bounds: SCREEN coords + X11 frame rebase ({ox},{oy})");
+        dlog!("element bounds: SCREEN coords with candidate X11 frame rebase ({ox},{oy})");
     }
 
-    let action_nodes: Vec<&Visited> = visited.iter().filter(|v| is_indexable(v)).collect();
+    let calc_process = screen_rebase.is_some()
+        && std::fs::read_link(format!("/proc/{pid}/exe"))
+            .ok()
+            .and_then(|path| path.file_name().map(|name| name == "soffice.bin"))
+            .unwrap_or(false);
+    let action_nodes: Vec<(usize, &Visited)> = visited
+        .iter()
+        .enumerate()
+        .filter(|(_, node)| is_indexable(node))
+        .collect();
     // Hard wall-clock budget for the whole collection: on pathological
     // trees individual D-Bus calls each burn up to CALL_TIMEOUT (geany's
     // unrealized nodes did exactly that). Return whatever was collected
@@ -3312,7 +3848,7 @@ async fn element_bounds_for_visited(
     // made PX targeting depend on DOM order.
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
     let mut out = Vec::with_capacity(action_nodes.len());
-    for (idx, node) in action_nodes.iter().enumerate() {
+    for (idx, (position, node)) in action_nodes.iter().enumerate() {
         if element_index.is_some_and(|target| idx != target)
             || frame_ordinal.is_some_and(|frame| node.frame_ordinal != frame)
         {
@@ -3352,10 +3888,49 @@ async fn element_bounds_for_visited(
             } else {
                 (0, 0)
             };
+            let (component_x, component_y) = if let (Some(candidate), Some(client_origin)) = (
+                screen_rebase.filter(|delta| *delta != (0, 0)),
+                screen_client_origin,
+            ) {
+                let calc_cell = calc_process
+                    && node.role == "table cell"
+                    && has_spreadsheet_ancestor(visited, *position);
+                let window_origin = match call(comp.get_extents(CoordType::Window)).await {
+                    Some(Ok((wx, wy, ww, wh)))
+                        if wx > -16384
+                            && wy > -16384
+                            && ww > 1
+                            && wh > 1
+                            && (!calc_cell || (ww == w && wh == h)) =>
+                    {
+                        Some((wx, wy))
+                    }
+                    _ => None,
+                };
+                let fallback =
+                    component_screen_rebase(candidate, client_origin, (x, y), window_origin);
+                if calc_cell {
+                    let Some(window) = window_origin else {
+                        continue;
+                    };
+                    // Do not compare origins across a changing layout. Omit
+                    // unstable bounds before any pointer input is submitted.
+                    if !matches!(call(comp.get_extents(CoordType::Screen)).await,
+                        Some(Ok(bounds)) if bounds == (x, y, w, h))
+                    {
+                        continue;
+                    }
+                    calc_screen_rebase(fallback, (x, y), window)
+                } else {
+                    fallback
+                }
+            } else {
+                (offset_x, offset_y)
+            };
             out.push((
                 idx,
-                x + offset_x + document_x,
-                y + offset_y + document_y,
+                x + component_x + document_x,
+                y + component_y + document_y,
                 w as u32,
                 h as u32,
             ));
@@ -3469,6 +4044,32 @@ mod frame_correlation_tests {
 
 #[cfg(test)]
 mod coord_tests {
+    #[test]
+    fn calc_cell_translation_is_not_applied_twice() {
+        // Exact observed first/post-edit geometry; public SDK tests establish
+        // the physical click and saved-document behavior independently.
+        assert_eq!(
+            super::calc_screen_rebase((0, 17), (213, 363), (213, 363)),
+            (0, 17)
+        );
+        assert_eq!(
+            super::calc_screen_rebase((0, 17), (213, 387), (213, 363)),
+            (0, 0)
+        );
+        assert_eq!(
+            super::calc_screen_rebase((200, 17), (213, 387), (213, 363)),
+            (200, 0)
+        );
+        assert_eq!(
+            super::calc_screen_rebase((200, 100), (413, 463), (213, 363)),
+            (0, 0)
+        );
+        assert_eq!(
+            super::component_screen_rebase((0, 17), (0, 17), (213, 387), Some((213, 363))),
+            (0, 17)
+        );
+    }
+
     use super::parse_gtk_frame_extents;
     use super::{
         activation_index, before_snapshot_deadline, combine_wayland_content_offsets,
@@ -3676,6 +4277,36 @@ mod coord_tests {
         assert_eq!(screen_extent_rebase((604, 80), (0, 0)), Some((604, 80)));
         assert_eq!(screen_extent_rebase((604, 100), (604, 80)), None);
         assert_eq!(screen_extent_rebase((604, 80), (604, 80)), None);
+    }
+
+    #[test]
+    fn component_screen_coordinates_do_not_receive_the_client_origin_twice() {
+        // Retained maximized LibreOffice field: outer frame0,0; client0,17.
+        assert_eq!(
+            super::component_screen_rebase((0, 17), (0, 17), (1197, 173), Some((1197, 156))),
+            (0, 0)
+        );
+        assert_eq!(
+            super::component_screen_rebase((-604, 80), (-604, 80), (-504, 180), Some((100, 100))),
+            (0, 0)
+        );
+    }
+
+    #[test]
+    fn renderer_local_screen_coordinates_retain_their_origin_correction() {
+        assert_eq!(
+            super::component_screen_rebase((604, 80), (604, 80), (100, 100), Some((100, 100))),
+            (604, 80)
+        );
+        assert_eq!(
+            super::component_screen_rebase((604, 80), (604, 80), (100, 100), None),
+            (604, 80)
+        );
+        // Agreement on only one axis does not establish correct translation.
+        assert_eq!(
+            super::component_screen_rebase((0, 17), (0, 17), (100, 100), Some((100, 100))),
+            (0, 17)
+        );
     }
 
     #[test]

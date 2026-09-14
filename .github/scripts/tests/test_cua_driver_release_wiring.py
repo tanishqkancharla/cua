@@ -641,7 +641,10 @@ class TestCuaDriverReleaseWiring(unittest.TestCase):
 
         windows = self.read(".github/workflows/e2e-rust-windows.yml")
         self.assertIn('name: "Windows / installer and update smoke"', windows)
-        self.assertIn("install-local.ps1 -NoAutoStart -NoPathUpdate", windows)
+        self.assertEqual(windows.count("scripts\\install.ps1 -NoPathUpdate"), 2)
+        self.assertNotIn("-NoAutoStart", windows)
+        self.assertIn("initial source install did not register $taskName", windows)
+        self.assertIn("source reinstall did not preserve $taskName", windows)
         self.assertIn('CUA_DRIVER_LOCAL_HOME = Join-Path $env:RUNNER_TEMP', windows)
 
     def test_driver_release_publishes_checksums_for_python_wheels(self) -> None:
@@ -714,11 +717,14 @@ class TestCuaDriverReleaseWiring(unittest.TestCase):
         self.assertEqual(
             expected["platformTools"],
             {
+                "darwin": ["native_paste", "select_text"],
                 "linux": [
                     "mouse_button_down",
                     "mouse_button_up",
                     "mouse_drag",
+                    "native_paste",
                     "parallel_mouse_drag",
+                    "select_text",
                 ]
             },
         )

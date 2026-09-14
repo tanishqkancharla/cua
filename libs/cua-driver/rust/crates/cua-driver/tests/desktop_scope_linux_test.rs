@@ -19,12 +19,15 @@
 
 #![cfg(target_os = "linux")]
 
+#[path = "support/linux_visible_fixture.rs"]
+mod linux_visible_fixture;
+
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use cua_driver_testkit::e2e::{
-    execute_case, recording_evidence, CaseSpec, Delivery, DriverRoute, Evidence, Observation,
-    OracleKind, Scope, Targeting,
+    execute_case, recording_evidence, CaseSpec, Delivery, DisplayServer, DriverRoute, Evidence,
+    Observation, OracleKind, Scope, Targeting,
 };
 use cua_driver_testkit::{harness_app, Driver, McpDriver};
 
@@ -301,6 +304,12 @@ fn desktop_scope_windowless_scroll_lands_on_control() {
         start_scope(&mut driver, &window_session, "window");
         start_scope(&mut driver, &desktop_session, "desktop");
         let (pid, wid) = launch(&mut driver).expect("required GTK3 harness did not launch");
+        linux_visible_fixture::prepare_visible_controls(
+            &mut driver,
+            pid,
+            wid,
+            &["scroll-tall-viewport", "scroll_offset=0"],
+        );
         let posture = driver.call(
             "bring_to_front",
             serde_json::json!({"session": window_session, "pid": pid as i64, "window_id": wid}),
@@ -324,7 +333,14 @@ fn desktop_scope_windowless_scroll_lands_on_control() {
             std::thread::sleep(Duration::from_millis(300));
             snap = ax_snapshot(&mut driver, &window_session, pid, wid);
         };
-        let before = marker_value(&snap, "scroll_offset=").unwrap_or(0);
+        let before = if DisplayServer::current() == DisplayServer::X11 {
+            marker_value(&snap, "scroll_offset=")
+                .expect("scroll_offset must be visible before the desktop scroll action")
+        } else {
+            // Preserve existing native Wayland behavior; visible-window setup
+            // currently requires X11's public geometry mutation.
+            marker_value(&snap, "scroll_offset=").unwrap_or(0)
+        };
         driver.start_behavior_recording();
         let response = driver.call(
             "scroll",
@@ -343,7 +359,12 @@ fn desktop_scope_windowless_scroll_lands_on_control() {
         let deadline = Instant::now() + Duration::from_secs(3);
         let after = loop {
             let state = ax_snapshot(&mut driver, &window_session, pid, wid);
-            let offset = marker_value(&state, "scroll_offset=").unwrap_or(before);
+            let offset = if DisplayServer::current() == DisplayServer::X11 {
+                marker_value(&state, "scroll_offset=")
+                    .expect("scroll_offset must remain visible after the desktop scroll action")
+            } else {
+                marker_value(&state, "scroll_offset=").unwrap_or(before)
+            };
             if offset > before || Instant::now() >= deadline {
                 break offset;
             }
