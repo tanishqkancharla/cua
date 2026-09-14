@@ -549,10 +549,16 @@ pub fn focused_window_id_of_pid(pid: i32) -> Option<u32> {
         if app.is_null() {
             return None;
         }
+        AXUIElementSetMessagingTimeout(app, 0.5);
         let window = copy_element_attr(app, "AXFocusedWindow");
         CFRelease(app as CFTypeRef);
         let window = window?;
-        let window_id = ax_get_window_id(window);
+        let mut owner = 0;
+        let window_id = (AXUIElementGetPid(window, &mut owner) == kAXErrorSuccess
+            && owner == pid
+            && copy_string_attr(window, "AXRole").as_deref() == Some("AXWindow"))
+        .then(|| ax_get_window_id(window))
+        .flatten();
         CFRelease(window as CFTypeRef);
         window_id
     }
