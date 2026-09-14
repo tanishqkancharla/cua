@@ -174,9 +174,9 @@ fn is_scoped_action(tool_name: &str) -> bool {
             | "type_text_chars"
             | "press_key"
             | "hotkey"
-            | "native_paste"
-            | "select_text"
             | "set_value"
+            | "select_text"
+            | "native_paste"
     )
 }
 
@@ -455,6 +455,28 @@ mod tests {
             enforce_tool(
                 "click",
                 &json!({"session": desktop, "pid": 42, "x": 4, "y": 5})
+            )
+            .unwrap_err()
+            .code,
+            "window_scope_disabled"
+        );
+    }
+
+    #[test]
+    fn select_text_respects_existing_window_scope() {
+        let window = fresh("selection-window");
+        let desktop = fresh("selection-desktop");
+        bind_session(&window, Some(CaptureScopePolicy::Window)).unwrap();
+        bind_session(&desktop, Some(CaptureScopePolicy::Desktop)).unwrap();
+        assert!(enforce_tool(
+            "select_text",
+            &json!({"session": window, "pid": 42, "window_id": 7})
+        )
+        .is_ok());
+        assert_eq!(
+            enforce_tool(
+                "select_text",
+                &json!({"session": desktop, "pid": 42, "window_id": 7})
             )
             .unwrap_err()
             .code,

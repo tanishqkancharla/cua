@@ -322,6 +322,15 @@ pub fn default_capabilities_for(tool_name: &str) -> Vec<String> {
         // contract is intentionally narrower than `type_text`'s. It
         // still accepts `element_token`, hence the tokens claim.
         "type_text_chars" => &["input.keyboard.type", "accessibility.element_tokens"],
+        "select_text" => &["input.keyboard.select", "accessibility.element_tokens"],
+        "native_paste" => &[
+            "input.keyboard.press",
+            "input.keyboard.paste",
+            "clipboard.read",
+            "clipboard.write",
+            "clipboard.write.text",
+            "accessibility.element_tokens",
+        ],
         "set_value" => &[
             // Bulk-set an editable field's value — semantically a
             // typing surface, even though the implementation skips
@@ -329,13 +338,6 @@ pub fn default_capabilities_for(tool_name: &str) -> Vec<String> {
             "input.keyboard.type",
             "accessibility.element_tokens",
         ],
-        "native_paste" => &[
-            "input.keyboard.paste",
-            "clipboard.write",
-            "accessibility.element_tokens",
-        ],
-        "select_text" => &["input.keyboard.select", "accessibility.element_tokens"],
-
         // ── screen / capture ─────────────────────────────────────────
         // Note: the regular `screenshot` tool was removed from the
         // surface in PR #1692 — get_window_state's vision capture mode
@@ -1966,7 +1968,13 @@ impl ToolRegistry {
         {
             return Ok(());
         }
-        let (operation, content_kind, summary) = if tool_name == "clipboard_read" {
+        let (operation, content_kind, summary) = if tool_name == "native_paste" {
+            (
+                "read_and_write",
+                "supported_formats",
+                "Allow Cua to read, preserve when supported, and replace the current clipboard for native paste",
+            )
+        } else if tool_name == "clipboard_read" {
             (
                 "read",
                 if args.get("include_text").and_then(Value::as_bool) == Some(true) {
@@ -1975,12 +1983,6 @@ impl ToolRegistry {
                     "types"
                 },
                 "Allow Cua to read the current system clipboard",
-            )
-        } else if tool_name == "native_paste" {
-            (
-                "write",
-                "text",
-                "Allow OpenSky to replace the current system clipboard for one native paste",
             )
         } else {
             let kind = if args.get("text").and_then(Value::as_str).is_some() {
@@ -2578,6 +2580,8 @@ fn is_physical_desktop_action(tool: &str) -> bool {
             | "press_key"
             | "hotkey"
             | "set_value"
+            | "select_text"
+            | "native_paste"
             | "bring_to_front"
             | "close_window"
             | "set_window_frame"
@@ -4737,7 +4741,7 @@ fn recording_args_for(tool_name: &str, args: &Value) -> Value {
                     );
                 }
             }
-            "clipboard_write" => {
+            "clipboard_write" | "native_paste" => {
                 for field in ["text", "image_path", "file_path"] {
                     if arguments.contains_key(field) {
                         arguments.insert(field.to_owned(), Value::String("[redacted]".to_owned()));
@@ -4889,6 +4893,18 @@ mod capability_tests {
     }
 
     #[test]
+    fn native_paste_recording_keeps_target_without_clipboard_text() {
+        let recorded = recording_args_for(
+            "native_paste",
+            &serde_json::json!({"pid": 42, "window_id": 7, "text": "private clipboard text", "format": "text"}),
+        );
+        assert_eq!(recorded["pid"], 42);
+        assert_eq!(recorded["window_id"], 7);
+        assert_eq!(recorded["format"], "text");
+        assert!(!recorded.to_string().contains("private clipboard text"));
+    }
+
+    #[test]
     fn clipboard_write_recording_args_are_content_free() {
         let recorded = recording_args_for(
             "clipboard_write",
@@ -4953,6 +4969,8 @@ mod capability_tests {
         "press_key",
         "hotkey",
         "set_value",
+        "select_text",
+        "native_paste",
         // screen
         "zoom",
         "get_screen_size",
@@ -5030,7 +5048,16 @@ mod capability_tests {
         "input.keyboard.type.terminal_safe",
         "input.keyboard.hotkey",
         "input.keyboard.press",
+        "input.keyboard.paste",
+        "input.keyboard.select",
         "input.delivery_mode",
+        // Shared clipboard contract (also used by compound native paste).
+        "clipboard.read",
+        "clipboard.types",
+        "clipboard.write",
+        "clipboard.write.text",
+        "clipboard.write.image",
+        "clipboard.write.file_url",
         // screen
         "screen.capture",
         "screen.capture.window",
@@ -5282,6 +5309,7 @@ mod capability_tests {
             "type_text_chars",
             "press_key",
             "set_value",
+            "select_text",
             // get_window_state emits the tokens — same capability
             // claim, from the other side of the contract.
             "get_window_state",

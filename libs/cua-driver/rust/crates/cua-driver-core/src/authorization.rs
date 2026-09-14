@@ -281,9 +281,9 @@ const DESKTOP_INPUT_OPERATIONS: &[&str] = &[
     "type_text_chars",
     "press_key",
     "hotkey",
-    "native_paste",
-    "select_text",
     "set_value",
+    "select_text",
+    "native_paste",
     "bring_to_front",
     "close_window",
     "set_window_frame",
@@ -907,13 +907,14 @@ pub fn advertised_risk_for(tool: &str) -> RiskAssessment {
         | "set_agent_cursor_motion"
         | "set_agent_cursor_theme" => RiskClass::R1,
 
-        "clipboard_write" | "native_paste" => RiskClass::R1,
+        "clipboard_write" => RiskClass::R1,
 
         // Surfaces that can reveal or control sensitive local/authenticated
         // state. Active adapters still decide their exact resource scope at
         // the canonical registry boundary before platform dispatch.
         "zoom"
         | "clipboard_read"
+        | "native_paste"
         | "list_apps"
         | "list_windows"
         | "debug_window_info"
@@ -1064,7 +1065,7 @@ pub fn classify_tool_call(tool: &str, args: &Value) -> RiskAssessment {
             enforcement: RiskEnforcement::Active,
             operation_sensitive: true,
         },
-        "clipboard_write" | "native_paste" => RiskAssessment {
+        "clipboard_write" => RiskAssessment {
             class: if args.get("image_path").and_then(Value::as_str).is_some()
                 || args.get("file_path").and_then(Value::as_str).is_some()
             {
@@ -1072,11 +1073,6 @@ pub fn classify_tool_call(tool: &str, args: &Value) -> RiskAssessment {
             } else {
                 RiskClass::R1
             },
-            enforcement: RiskEnforcement::Active,
-            operation_sensitive: true,
-        },
-        "select_text" => RiskAssessment {
-            class: RiskClass::R1,
             enforcement: RiskEnforcement::Active,
             operation_sensitive: true,
         },
@@ -1201,6 +1197,8 @@ fn enforce_hard_invariants(
             | "press_key"
             | "hotkey"
             | "set_value"
+            | "select_text"
+            | "native_paste"
             | "kill_app"
             | "bring_to_front"
             | "close_window"
@@ -1563,6 +1561,56 @@ mod tests {
         assert_eq!(
             adapter.profile_behavior.for_mode(PermissionMode::Bounded),
             ModeBehavior::AllowWithoutGrant
+        );
+    }
+
+    #[test]
+    fn select_text_is_reviewed_desktop_input_with_existing_guards() {
+        let args = serde_json::json!({"pid": 42, "window_id": 7, "text": "selection"});
+        let risk = classify_tool_call("select_text", &args);
+        assert_eq!(risk.class, RiskClass::R1);
+        assert_eq!(risk.enforcement, RiskEnforcement::Active);
+        assert_eq!(advertised_risk_for("select_text").class, RiskClass::R1);
+        assert_eq!(
+            enforcement_adapters_for_call("select_text", &args)
+                .iter()
+                .map(|adapter| adapter.id)
+                .collect::<Vec<_>>(),
+            vec!["desktop_input"]
+        );
+        let error = enforce_hard_invariants(
+            "select_text",
+            &serde_json::json!({"pid": std::process::id()}),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("authorization process"));
+        assert_eq!(
+            advertised_risk_for("select_text_unreviewed").class,
+            RiskClass::Unclassified
+        );
+    }
+
+    #[test]
+    fn native_paste_requires_both_target_and_clipboard_guards() {
+        let args = serde_json::json!({"pid": 42, "window_id": 7, "text": "line one\nline two"});
+        let risk = classify_tool_call("native_paste", &args);
+        assert_eq!(risk.class, RiskClass::R2);
+        assert_eq!(risk.enforcement, RiskEnforcement::Active);
+        assert_eq!(
+            enforcement_adapters_for_call("native_paste", &args)
+                .iter()
+                .map(|adapter| adapter.id)
+                .collect::<Vec<_>>(),
+            vec!["desktop_input", "clipboard"]
+        );
+        assert!(enforce_hard_invariants(
+            "native_paste",
+            &serde_json::json!({"pid": std::process::id()})
+        )
+        .is_err());
+        assert_eq!(
+            advertised_risk_for("native_paste_unreviewed").class,
+            RiskClass::Unclassified
         );
     }
 

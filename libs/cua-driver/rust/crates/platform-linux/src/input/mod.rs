@@ -14,6 +14,8 @@
 /// Shared `delivery_mode` contract (background|foreground) — mirrors macOS
 /// `tools::DeliveryMode` and Windows `input::delivery`.
 pub mod delivery;
+mod native_paste;
+pub(crate) use native_paste::{send_paste_xtest_checked, validate_paste_xtest};
 
 use anyhow::{anyhow, bail, Context, Result};
 use evdev::uinput::VirtualDevice;
@@ -2193,7 +2195,7 @@ pub fn try_type_text_xtest_already_focused(xid: u64, text: &str) -> Result<bool>
     send_type_text_xtest_checked(text, Some(target))
 }
 
-fn x11_target_already_focused(
+pub(crate) fn x11_target_already_focused(
     conn: &RustConnection,
     root: Window,
     active_atom: Atom,
@@ -2370,6 +2372,10 @@ pub fn send_key_xtest(key: &str, modifiers: &[&str]) -> Result<()> {
         conn.xtest_fake_input(KEY_PRESS_EVENT, sk, 0, x11rb::NONE, 0, 0, 0)?;
     }
     conn.xtest_fake_input(KEY_PRESS_EVENT, keycode, 0, x11rb::NONE, 0, 0, 0)?;
+    // Begin the existing hold interval only after the server has processed
+    // key-down. Sleeping with buffered requests sent press and release
+    // together, producing a zero-duration tap instead of KEY_DELAY_MS.
+    conn.get_input_focus()?.reply()?;
     sleep(Duration::from_millis(KEY_DELAY_MS));
     conn.xtest_fake_input(KEY_RELEASE_EVENT, keycode, 0, x11rb::NONE, 0, 0, 0)?;
     if let Some(sk) = auto_shift_kc {
@@ -2434,36 +2440,7 @@ pub fn try_click_xtest_already_focused(
     let root = conn.setup().roots[screen_num].root;
     let target = u32::try_from(xid).context("X11 target window exceeds 32 bits")?;
     let active_atom = conn.intern_atom(true, b"_NET_ACTIVE_WINDOW")?.reply()?.atom;
-    let check = || -> Result<Option<(i32, i32)>> {
-        let geometry = conn.get_geometry(target)?.reply()?;
-        if x < 0 || y < 0 || x >= i32::from(geometry.width) || y >= i32::from(geometry.height) {
-            bail!("X11 click point is outside the requested client window");
-        }
-        if !x11_target_already_focused(&conn, root, active_atom, target)? {
-            return Ok(None);
-        }
-        let local_x =
-            i16::try_from(x).context("X11 click x exceeds the protocol coordinate range")?;
-        let local_y =
-            i16::try_from(y).context("X11 click y exceeds the protocol coordinate range")?;
-        let translated = conn
-            .translate_coordinates(target, root, local_x, local_y)?
-            .reply()?;
-        let (sx, sy) = (i32::from(translated.dst_x), i32::from(translated.dst_y));
-        if !translated.same_screen
-            || sx < 0
-            || sy < 0
-            || sx >= i32::from(conn.setup().roots[screen_num].width_in_pixels)
-            || sy >= i32::from(conn.setup().roots[screen_num].height_in_pixels)
-        {
-            bail!("X11 click point cannot be represented on the target screen");
-        }
-        if !x11_input_point_within_target(&conn, root, target, translated.dst_x, translated.dst_y)?
-        {
-            return Ok(None);
-        }
-        Ok(Some((sx, sy)))
-    };
+    let check = || checked_focused_click_point(&conn, screen_num, active_atom, target, x, y);
     let Some((sx, sy)) = check()? else {
         return Ok(false);
     };
@@ -2477,11 +2454,109 @@ pub fn try_click_xtest_already_focused(
     Ok(true)
 }
 
+/// Refresh a retained target's window-local point after a real pointer motion.
+/// The caller must resolve the same observed object, never another ordinal.
+/// `false` is possible only before any input is submitted. Once the preliminary
+/// motion is attempted, errors must not cause a fallback or automatic replay.
+///
+/// The server round-trip and 50 ms settling interval give native UI event
+/// processing an opportunity to update bounds; they are not an application
+/// acknowledgement. The caller must keep its identity/staleness guards, and
+/// focus/stacking can still change between checks and input requests.
+pub fn try_click_xtest_already_focused_refreshed(
+    xid: u64,
+    x: i32,
+    y: i32,
+    button: u8,
+    count: usize,
+    modifiers: &[&str],
+    refresh: impl Fn() -> Result<(i32, i32)>,
+) -> Result<bool> {
+    use x11rb::protocol::xtest::ConnectionExt as _;
+    let (conn, screen_num) = connect_x11_for_input()?;
+    let root = conn.setup().roots[screen_num].root;
+    let target = u32::try_from(xid).context("X11 target window exceeds 32 bits")?;
+    let active_atom = conn.intern_atom(true, b"_NET_ACTIVE_WINDOW")?.reply()?.atom;
+    let check = |x, y| checked_focused_click_point(&conn, screen_num, active_atom, target, x, y);
+    let Some((sx, sy)) = check(x, y)? else {
+        return Ok(false);
+    };
+    (|| -> Result<()> {
+        conn.xtest_fake_input(MOTION_NOTIFY_EVENT, 0, 0, root, sx as i16, sy as i16, 0)?;
+        conn.flush()?;
+        conn.get_input_focus()?.reply()?;
+        sleep(Duration::from_millis(50));
+        let (refreshed_x, refreshed_y) = refresh()?;
+        let Some((refreshed_sx, refreshed_sy)) = check(refreshed_x, refreshed_y)? else {
+            bail!("exact target focus or input surface changed after pointer motion");
+        };
+        send_click_xtest_on_connection(
+            &conn, root, refreshed_sx, refreshed_sy, button, count, modifiers, || {
+                if check(refreshed_x, refreshed_y)? != Some((refreshed_sx, refreshed_sy)) {
+                    bail!("exact target focus, geometry, or input surface changed");
+                }
+                Ok(())
+            },
+        )
+    })()
+    .context("X11 refreshed click interrupted; pointer/key input may have been delivered and must not be automatically replayed")?;
+    Ok(true)
+}
+
+/// Return a screen point only for the exact active client and visible input
+/// surface. This helper performs read-only checks and injects no input.
+///
+/// A transient popup can be a root sibling of its active owner rather than a
+/// child of that window. When the visible hit is such a popup, accept it only
+/// when its X11 client identity matches the active target. This keeps the
+/// exposed popup on the XTest delivery path.
+fn checked_focused_click_point(
+    conn: &RustConnection,
+    screen_num: usize,
+    active_atom: Atom,
+    target: Window,
+    x: i32,
+    y: i32,
+) -> Result<Option<(i32, i32)>> {
+    let root = conn.setup().roots[screen_num].root;
+    let geometry = conn.get_geometry(target)?.reply()?;
+    if x < 0 || y < 0 || x >= i32::from(geometry.width) || y >= i32::from(geometry.height) {
+        bail!("X11 click point is outside the requested client window");
+    }
+    if !x11_target_already_focused(conn, root, active_atom, target)? {
+        return Ok(None);
+    }
+    let local_x = i16::try_from(x).context("X11 click x exceeds the protocol coordinate range")?;
+    let local_y = i16::try_from(y).context("X11 click y exceeds the protocol coordinate range")?;
+    let translated = conn
+        .translate_coordinates(target, root, local_x, local_y)?
+        .reply()?;
+    let (sx, sy) = (i32::from(translated.dst_x), i32::from(translated.dst_y));
+    if !translated.same_screen
+        || sx < 0
+        || sy < 0
+        || sx >= i32::from(conn.setup().roots[screen_num].width_in_pixels)
+        || sy >= i32::from(conn.setup().roots[screen_num].height_in_pixels)
+    {
+        bail!("X11 click point cannot be represented on the target screen");
+    }
+    if !x11_input_point_within_target(conn, root, target, translated.dst_x, translated.dst_y)? {
+        return Ok(None);
+    }
+    Ok(Some((sx, sy)))
+}
+
 /// Walk the actual stacking order from the root toward the requested client.
 /// Checking only focus, PID, or the target's own descendants is insufficient:
 /// an always-on-top sibling can cover the pixel while keyboard focus stays put.
 /// Respect both bounding and input shapes so an input-transparent cursor
 /// overlay does not hide the app, and a shaped window's hole is not a hit.
+///
+/// A root-sibling popup is accepted only if it meets the same exact ownership
+/// and combo-popup criteria used for its composed screenshot. An ordinary
+/// sibling from the same process is still excluded: it must be the target's
+/// input-bearing, transient X11 combo popup before a coordinate click can cross
+/// the original toplevel.
 fn x11_input_point_within_target(
     conn: &RustConnection,
     root: Window,
@@ -2493,6 +2568,9 @@ fn x11_input_point_within_target(
     let mut current = root;
     for _ in 0..64 {
         if current == target {
+            return Ok(true);
+        }
+        if current != root && x11_owned_combo_popup_for_target(conn, target, current)? {
             return Ok(true);
         }
         let tree = conn.query_tree(current)?.reply()?;
@@ -2543,6 +2621,86 @@ fn x11_input_point_within_target(
         current = child;
     }
     Ok(false)
+}
+
+/// Return whether `candidate` is the target's visible X11 combo popup. This
+/// mirrors the ownership boundary used by popup capture: explicit transient
+/// owner, matching PID, exact COMBO type, and override-redirect. Matching a
+/// process alone would allow a click into another normal document window from
+/// the same multi-window application.
+fn x11_owned_combo_popup_for_target(
+    conn: &RustConnection,
+    target: Window,
+    candidate: Window,
+) -> Result<bool> {
+    let attributes = conn.get_window_attributes(candidate)?.reply()?;
+    if !attributes.override_redirect {
+        return Ok(false);
+    }
+    let transient =
+        x11_window_property_values(conn, candidate, b"WM_TRANSIENT_FOR", AtomEnum::WINDOW)?;
+    let target_pid = x11_window_property_values(conn, target, b"_NET_WM_PID", AtomEnum::CARDINAL)?;
+    let candidate_pid =
+        x11_window_property_values(conn, candidate, b"_NET_WM_PID", AtomEnum::CARDINAL)?;
+    let combo = conn
+        .intern_atom(true, b"_NET_WM_WINDOW_TYPE_COMBO")?
+        .reply()?
+        .atom;
+    if combo == x11rb::NONE {
+        return Ok(false);
+    }
+    let types =
+        x11_window_property_values(conn, candidate, b"_NET_WM_WINDOW_TYPE", AtomEnum::ATOM)?;
+    Ok(x11_owned_combo_popup_properties_match(
+        target,
+        &transient,
+        &target_pid,
+        &candidate_pid,
+        combo,
+        &types,
+    ))
+}
+
+fn x11_owned_combo_popup_properties_match(
+    target: Window,
+    transient: &[u32],
+    target_pid: &[u32],
+    candidate_pid: &[u32],
+    combo: Atom,
+    types: &[u32],
+) -> bool {
+    transient == [target]
+        && target_pid.len() == 1
+        && target_pid == candidate_pid
+        && types == [combo]
+}
+
+/// Read a short typed X11 ownership property. Absence is an empty list;
+/// malformed or longer property data is an error so ownership checks fail
+/// closed. All current callers require exactly one value.
+fn x11_window_property_values(
+    conn: &RustConnection,
+    window: Window,
+    name: &[u8],
+    kind: AtomEnum,
+) -> Result<Vec<u32>> {
+    let atom = conn.intern_atom(true, name)?.reply()?.atom;
+    if atom == x11rb::NONE {
+        return Ok(Vec::new());
+    }
+    let reply = conn
+        .get_property(false, window, atom, kind, 0, 2)?
+        .reply()?;
+    if reply.type_ == x11rb::NONE {
+        return Ok(Vec::new());
+    }
+    if reply.type_ != u32::from(kind) || reply.format != 32 || reply.bytes_after != 0 {
+        bail!("unsupported X11 popup ownership property format");
+    }
+    reply
+        .value32()
+        .map(|values| values.collect())
+        .ok_or_else(|| anyhow!("missing X11 popup ownership property values"))
 }
 
 /// Real XTest click with physical modifier down/up transitions around the
@@ -3198,7 +3356,7 @@ mod path_tests {
         is_uinput_unavailable, kde_x11_uinput_hotplug_is_unsafe, master_pointer_name,
         modifiers_to_state, normalize_uinput_device_name, path_cumulative, point_on_path,
         real_pointer_capabilities_available, sample_function, slave_pointer_name,
-        EVDEV_UINPUT_NAME_MAX_BYTES, UINPUT_POINTER_SUFFIX,
+        x11_owned_combo_popup_properties_match, EVDEV_UINPUT_NAME_MAX_BYTES, UINPUT_POINTER_SUFFIX,
     };
     use x11rb::protocol::xproto::KeyButMask;
 
@@ -3392,6 +3550,46 @@ mod path_tests {
             .expect_err("the creation choke point must refuse before opening X11 or uinput");
         assert!(is_uinput_unavailable(&error));
         assert!(error.to_string().contains("delivery_mode='foreground'"));
+    }
+
+    #[test]
+    fn owned_combo_popup_properties_require_exact_owner_and_type() {
+        assert!(x11_owned_combo_popup_properties_match(
+            42,
+            &[42],
+            &[99],
+            &[99],
+            77,
+            &[77],
+        ));
+    }
+
+    #[test]
+    fn foreign_root_sibling_does_not_match_owned_combo_properties() {
+        assert!(!x11_owned_combo_popup_properties_match(
+            42,
+            &[42],
+            &[99],
+            &[100],
+            77,
+            &[77],
+        ));
+        assert!(!x11_owned_combo_popup_properties_match(
+            42,
+            &[43],
+            &[99],
+            &[99],
+            77,
+            &[77],
+        ));
+        assert!(!x11_owned_combo_popup_properties_match(
+            42,
+            &[42],
+            &[99],
+            &[99],
+            77,
+            &[77, 78],
+        ));
     }
 
     #[test]

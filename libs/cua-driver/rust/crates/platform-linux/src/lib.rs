@@ -48,6 +48,8 @@ pub mod installed_apps;
 pub mod capture;
 #[cfg(target_os = "linux")]
 mod clipboard;
+#[cfg(target_os = "linux")]
+mod native_paste;
 
 #[cfg(target_os = "linux")]
 pub mod atspi;
@@ -67,6 +69,9 @@ pub mod wayland;
 // `terminal` is OS-independent (pure string matching + a thin x11 hook).
 // Keeping it un-gated lets the unit tests run on any host.
 pub mod terminal;
+
+// Pure matching logic is testable without a Linux desktop.
+pub mod text_selection;
 
 #[cfg(target_os = "linux")]
 pub mod xauth;
