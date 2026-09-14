@@ -414,28 +414,33 @@ pub fn type_text_physical_global(text: &str, inter_char_delay_ms: u64) -> anyhow
     Ok(())
 }
 
-/// Send a physical key chord using the exact bare-event sequence documented by
-/// Apple for `CGEventCreateKeyboardEvent`: NULL source, modifier downs, base
-/// down/up, then modifier ups in reverse order. No flags, Unicode payload, or
-/// event-type overrides are applied; CoreGraphics derives those from the
-/// virtual key transitions and its default source state.
+/// Send a physical key chord using the bare-event sequence documented by Apple
+/// for `CGEventCreateKeyboardEvent`: NULL source, modifier downs, base down/up,
+/// then modifier ups in reverse order. The base events explicitly carry the
+/// accumulated modifier flags; NULL-source construction otherwise snapshots the
+/// modifier state before the preceding synthetic modifier downs are posted.
 pub fn press_key_bare_global(key: &str, modifiers: &[&str]) -> anyhow::Result<()> {
     use core_graphics::event::CGEventTapLocation;
 
     let key_code = key_name_to_code(key)?;
-    let mut modifier_codes = Vec::new();
+    let mut modifier_keys = Vec::new();
     for modifier in modifiers {
-        let Some((modifier_code, _)) = modifier_key_code_and_flag(modifier) else {
+        let Some((modifier_code, modifier_flag)) = modifier_key_code_and_flag(modifier) else {
             continue;
         };
-        if !modifier_codes.contains(&modifier_code) {
-            modifier_codes.push(modifier_code);
+        if !modifier_keys
+            .iter()
+            .any(|(pressed_code, _)| *pressed_code == modifier_code)
+        {
+            modifier_keys.push((modifier_code, modifier_flag));
         }
     }
 
-    let events = bare_chord_transitions(key_code, &modifier_codes)
+    let events = bare_chord_events(key_code, &modifier_keys)
         .into_iter()
-        .map(|(code, down)| create_bare_keyboard_event(code, down))
+        .map(|event| {
+            create_bare_keyboard_event_with_flags(event.key_code, event.key_down, event.flags)
+        })
         .collect::<anyhow::Result<Vec<_>>>()?;
     for event in events {
         event.post(CGEventTapLocation::HID);
@@ -444,13 +449,53 @@ pub fn press_key_bare_global(key: &str, modifiers: &[&str]) -> anyhow::Result<()
     Ok(())
 }
 
-fn bare_chord_transitions(key_code: u16, modifier_codes: &[u16]) -> Vec<(u16, bool)> {
-    let mut transitions = Vec::with_capacity(modifier_codes.len() * 2 + 2);
-    transitions.extend(modifier_codes.iter().map(|&code| (code, true)));
-    transitions.push((key_code, true));
-    transitions.push((key_code, false));
-    transitions.extend(modifier_codes.iter().rev().map(|&code| (code, false)));
-    transitions
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BareChordEvent {
+    key_code: u16,
+    key_down: bool,
+    flags: CGEventFlags,
+}
+
+fn bare_chord_events(key_code: u16, modifier_keys: &[(u16, CGEventFlags)]) -> Vec<BareChordEvent> {
+    let mut events = Vec::with_capacity(modifier_keys.len() * 2 + 2);
+    let mut active_flags = CGEventFlags::CGEventFlagNull;
+    for &(modifier_code, modifier_flag) in modifier_keys {
+        active_flags |= modifier_flag;
+        events.push(BareChordEvent {
+            key_code: modifier_code,
+            key_down: true,
+            flags: active_flags,
+        });
+    }
+    events.push(BareChordEvent {
+        key_code,
+        key_down: true,
+        flags: active_flags,
+    });
+    events.push(BareChordEvent {
+        key_code,
+        key_down: false,
+        flags: active_flags,
+    });
+    for &(modifier_code, modifier_flag) in modifier_keys.iter().rev() {
+        active_flags.remove(modifier_flag);
+        events.push(BareChordEvent {
+            key_code: modifier_code,
+            key_down: false,
+            flags: active_flags,
+        });
+    }
+    events
+}
+
+fn create_bare_keyboard_event_with_flags(
+    key_code: u16,
+    key_down: bool,
+    flags: CGEventFlags,
+) -> anyhow::Result<CGEvent> {
+    let event = create_bare_keyboard_event(key_code, key_down)?;
+    event.set_flags(flags);
+    Ok(event)
 }
 
 fn create_bare_keyboard_event(key_code: u16, key_down: bool) -> anyhow::Result<CGEvent> {
@@ -837,7 +882,10 @@ mod tests {
     #[test]
     fn bare_command_chord_orders_modifier_base_and_reverse_release() {
         assert_eq!(
-            bare_chord_transitions(9, &[55]),
+            bare_chord_events(9, &[(55, CGEventFlags::CGEventFlagCommand)])
+                .into_iter()
+                .map(|event| (event.key_code, event.key_down))
+                .collect::<Vec<_>>(),
             vec![(55, true), (9, true), (9, false), (55, false)]
         );
         let command_down = create_bare_keyboard_event(55, true).unwrap();
@@ -851,6 +899,70 @@ mod tests {
                 .contains(CGEventFlags::CGEventFlagCommand),
             "bare Command down must derive the active Command flag"
         );
+    }
+
+    #[test]
+    fn bare_command_v_base_events_carry_command_flag() {
+        let events = bare_chord_events(9, &[(55, CGEventFlags::CGEventFlagCommand)]);
+        let native_events = events
+            .iter()
+            .map(|event| {
+                create_bare_keyboard_event_with_flags(event.key_code, event.key_down, event.flags)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(events.len(), 4);
+        assert!(native_events[0]
+            .get_flags()
+            .contains(CGEventFlags::CGEventFlagCommand));
+        for event in &native_events[1..3] {
+            assert!(event.get_flags().contains(CGEventFlags::CGEventFlagCommand));
+        }
+        assert_eq!(native_events[3].get_flags(), CGEventFlags::CGEventFlagNull);
+    }
+
+    #[test]
+    fn bare_shift_command_chord_tracks_flags_through_reverse_release() {
+        let events = bare_chord_events(
+            9,
+            &[
+                (55, CGEventFlags::CGEventFlagCommand),
+                (56, CGEventFlags::CGEventFlagShift),
+            ],
+        );
+        let flags = events
+            .iter()
+            .map(|event| {
+                create_bare_keyboard_event_with_flags(event.key_code, event.key_down, event.flags)
+                    .unwrap()
+                    .get_flags()
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| (event.key_code, event.key_down))
+                .collect::<Vec<_>>(),
+            vec![
+                (55, true),
+                (56, true),
+                (9, true),
+                (9, false),
+                (56, false),
+                (55, false)
+            ]
+        );
+        assert_eq!(flags[0], CGEventFlags::CGEventFlagCommand);
+        assert_eq!(
+            flags[1],
+            CGEventFlags::CGEventFlagCommand | CGEventFlags::CGEventFlagShift
+        );
+        assert_eq!(flags[2], flags[1]);
+        assert_eq!(flags[3], flags[1]);
+        assert_eq!(flags[4], CGEventFlags::CGEventFlagCommand);
+        assert_eq!(flags[5], CGEventFlags::CGEventFlagNull);
     }
 
     #[test]

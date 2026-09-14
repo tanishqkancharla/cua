@@ -281,6 +281,7 @@ const DESKTOP_INPUT_OPERATIONS: &[&str] = &[
     "type_text_chars",
     "press_key",
     "hotkey",
+    "native_paste",
     "set_value",
     "bring_to_front",
     "close_window",
@@ -601,7 +602,7 @@ pub const ENFORCEMENT_ADAPTERS: &[EnforcementAdapterDescriptor] = &[
     },
     EnforcementAdapterDescriptor {
         id: "clipboard",
-        operations: &["clipboard_read", "clipboard_write"],
+        operations: &["clipboard_read", "clipboard_write", "native_paste"],
         state: RiskEnforcement::Active,
         risk_class: RiskClass::R2,
         resource_kind: "system_clipboard",
@@ -766,7 +767,7 @@ pub fn enforcement_adapters_for_call(
         add("desktop_input");
     }
 
-    if matches!(tool, "clipboard_read" | "clipboard_write")
+    if matches!(tool, "clipboard_read" | "clipboard_write" | "native_paste")
         || (tool == "browser_type" && args.get("mode").and_then(Value::as_str) == Some("paste"))
     {
         add("clipboard");
@@ -904,7 +905,7 @@ pub fn advertised_risk_for(tool: &str) -> RiskAssessment {
         | "set_agent_cursor_motion"
         | "set_agent_cursor_theme" => RiskClass::R1,
 
-        "clipboard_write" => RiskClass::R1,
+        "clipboard_write" | "native_paste" => RiskClass::R1,
 
         // Surfaces that can reveal or control sensitive local/authenticated
         // state. Active adapters still decide their exact resource scope at
@@ -1061,7 +1062,7 @@ pub fn classify_tool_call(tool: &str, args: &Value) -> RiskAssessment {
             enforcement: RiskEnforcement::Active,
             operation_sensitive: true,
         },
-        "clipboard_write" => RiskAssessment {
+        "clipboard_write" | "native_paste" => RiskAssessment {
             class: if args.get("image_path").and_then(Value::as_str).is_some()
                 || args.get("file_path").and_then(Value::as_str).is_some()
             {

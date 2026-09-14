@@ -329,6 +329,11 @@ pub fn default_capabilities_for(tool_name: &str) -> Vec<String> {
             "input.keyboard.type",
             "accessibility.element_tokens",
         ],
+        "native_paste" => &[
+            "input.keyboard.paste",
+            "clipboard.write",
+            "accessibility.element_tokens",
+        ],
 
         // ── screen / capture ─────────────────────────────────────────
         // Note: the regular `screenshot` tool was removed from the
@@ -1969,6 +1974,12 @@ impl ToolRegistry {
                     "types"
                 },
                 "Allow Cua to read the current system clipboard",
+            )
+        } else if tool_name == "native_paste" {
+            (
+                "write",
+                "text",
+                "Allow OpenSky to replace the current system clipboard for one native paste",
             )
         } else {
             let kind = if args.get("text").and_then(Value::as_str).is_some() {

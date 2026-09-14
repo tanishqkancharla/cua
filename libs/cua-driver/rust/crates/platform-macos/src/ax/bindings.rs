@@ -46,6 +46,15 @@ pub const kAXValueCGRectType: AXValueType = 3;
 pub const kAXValueCFRangeType: AXValueType = 4;
 pub const kAXValueIllegalType: AXValueType = 1_000;
 
+/// Core Foundation's `CFRange`, used by AXSelectedTextRange. Its offsets are
+/// UTF-16 code units for accessibility text attributes.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CFRange {
+    pub location: isize,
+    pub length: isize,
+}
+
 // ── Link to AXUIElement functions ────────────────────────────────────────────
 #[link(name = "ApplicationServices", kind = "framework")]
 extern "C" {
@@ -117,6 +126,7 @@ pub unsafe fn element_at_screen_position(pid: i32, x: f64, y: f64) -> Option<AXU
 // ── AXValue functions ────────────────────────────────────────────────────────
 #[link(name = "ApplicationServices", kind = "framework")]
 extern "C" {
+    pub fn AXValueGetTypeID() -> CFTypeID;
     pub fn AXValueCreate(the_type: AXValueType, value_ptr: *const c_void) -> AXValueRef;
     pub fn AXValueGetType(value: AXValueRef) -> AXValueType;
     pub fn AXValueGetValue(
