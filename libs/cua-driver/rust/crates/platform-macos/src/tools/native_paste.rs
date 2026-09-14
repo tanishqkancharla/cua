@@ -11,10 +11,7 @@
 //! observable and turns them into an unknown outcome rather than a replay.
 
 use async_trait::async_trait;
-use core_foundation::{
-    base::{CFEqual, CFGetTypeID, CFRelease, CFTypeRef, TCFType},
-    string::CFString,
-};
+use core_foundation::base::{CFEqual, CFRelease, CFTypeRef};
 use cua_driver_core::{
     background_input::BackgroundAction,
     clipboard::CLIPBOARD_WRITE_LOCK,
@@ -27,10 +24,7 @@ use objc2_foundation::NSString;
 use serde_json::Value;
 
 use crate::ax::{
-    bindings::{
-        copy_string_attr, kAXErrorSuccess, kAXValueCFRangeType, AXUIElementCopyAttributeValue,
-        AXUIElementRef, AXValueGetType, AXValueGetTypeID, AXValueGetValue, CFRange,
-    },
+    bindings::{copy_string_attr, copy_text_range_attr, AXUIElementRef, CFRange},
     exact_target::focused_element_in_window,
 };
 
@@ -201,30 +195,6 @@ fn expected_insertion(before: &str, selection: CFRange, text: &str) -> Option<St
     Some(expected)
 }
 
-unsafe fn copy_selected_text_range(element: AXUIElementRef) -> Option<CFRange> {
-    let attribute = CFString::new("AXSelectedTextRange");
-    let mut value: CFTypeRef = std::ptr::null();
-    if AXUIElementCopyAttributeValue(element, attribute.as_concrete_TypeRef(), &mut value)
-        != kAXErrorSuccess
-        || value.is_null()
-    {
-        return None;
-    }
-    let mut range = CFRange {
-        location: 0,
-        length: 0,
-    };
-    let valid = CFGetTypeID(value) == AXValueGetTypeID()
-        && AXValueGetType(value as _) == kAXValueCFRangeType
-        && AXValueGetValue(
-            value as _,
-            kAXValueCFRangeType,
-            &mut range as *mut _ as *mut std::ffi::c_void,
-        );
-    CFRelease(value);
-    valid.then_some(range)
-}
-
 fn prepare_target(pid: i32, window_id: u32, text: &str) -> Result<PreparedPaste, String> {
     unsafe {
         let element = focused_element_in_window(pid, window_id).ok_or_else(|| {
@@ -238,7 +208,7 @@ fn prepare_target(pid: i32, window_id: u32, text: &str) -> Result<PreparedPaste,
                 return Err("Focused target has no readable plaintext AXValue.".into());
             }
         };
-        let selection = match copy_selected_text_range(element) {
+        let selection = match copy_text_range_attr(element, "AXSelectedTextRange") {
             Some(range) => range,
             None => {
                 CFRelease(element as CFTypeRef);
@@ -277,7 +247,8 @@ fn target_still_matches_prepared(
         let same = CFEqual(retained as CFTypeRef, current as CFTypeRef) != 0;
         CFRelease(current as CFTypeRef);
         same && copy_string_attr(retained as AXUIElementRef, "AXValue").as_deref() == Some(before)
-            && copy_selected_text_range(retained as AXUIElementRef) == Some(selection)
+            && copy_text_range_attr(retained as AXUIElementRef, "AXSelectedTextRange")
+                == Some(selection)
     }
 }
 
@@ -331,7 +302,8 @@ fn observe_after_dispatch(
         };
         let selection_matches = !require_selection_proof
             || expected_selection.is_some_and(|selection| unsafe {
-                copy_selected_text_range(element as AXUIElementRef) == Some(selection)
+                copy_text_range_attr(element as AXUIElementRef, "AXSelectedTextRange")
+                    == Some(selection)
             });
         if value_matches && selection_matches && pasteboard_still_has(token, payload) {
             return true;

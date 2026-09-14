@@ -37,6 +37,16 @@ impl RetainedElement {
     pub fn as_ptr(&self) -> usize {
         self.0
     }
+
+    /// Take another independent Core Foundation retain for a blocking worker.
+    /// The worker owns this guard so cancelling the async caller cannot release
+    /// an AX element while its `spawn_blocking` closure still dereferences it.
+    pub fn duplicate(&self) -> Self {
+        if self.0 != 0 {
+            unsafe { CFRetain(self.0 as AXUIElementRef as CFTypeRef) };
+        }
+        Self(self.0)
+    }
 }
 
 // The raw AXUIElementRef is already shuttled across threads as a `usize` into

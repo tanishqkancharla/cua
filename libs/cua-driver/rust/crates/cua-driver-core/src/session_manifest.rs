@@ -1004,6 +1004,7 @@ pub fn load_manifest(path: &Path) -> Result<SessionManifest, String> {
                 "press_key",
                 "hotkey",
                 "native_paste",
+                "select_text",
                 "set_value",
                 "mouse_button_down",
                 "mouse_button_up",

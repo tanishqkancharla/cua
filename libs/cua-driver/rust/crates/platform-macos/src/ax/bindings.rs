@@ -150,7 +150,68 @@ struct CGSizeValue {
 
 // ── Helper functions ──────────────────────────────────────────────────────────
 
-use core_foundation::{array::CFArray, base::TCFType, string::CFString as CFStr};
+use core_foundation::{
+    array::CFArray,
+    base::{CFGetTypeID, TCFType},
+    string::CFString as CFStr,
+};
+
+/// Copy an AX text range attribute such as `AXSelectedTextRange`.
+///
+/// Accessibility text offsets are UTF-16 code units. Callers that turn these
+/// into Rust slices must validate both endpoints rather than treating them as
+/// byte indices.
+///
+/// # Safety
+///
+/// `element` must be a valid, live `AXUIElementRef` for the duration of the call.
+pub unsafe fn copy_text_range_attr(element: AXUIElementRef, attr_name: &str) -> Option<CFRange> {
+    let attr = CFStr::new(attr_name);
+    let mut value: CFTypeRef = std::ptr::null();
+    if AXUIElementCopyAttributeValue(element, attr.as_concrete_TypeRef(), &mut value)
+        != kAXErrorSuccess
+        || value.is_null()
+    {
+        return None;
+    }
+    let mut range = CFRange {
+        location: 0,
+        length: 0,
+    };
+    let valid = CFGetTypeID(value) == AXValueGetTypeID()
+        && AXValueGetType(value as AXValueRef) == kAXValueCFRangeType
+        && AXValueGetValue(
+            value as AXValueRef,
+            kAXValueCFRangeType,
+            &mut range as *mut _ as *mut c_void,
+        );
+    CFRelease(value);
+    valid.then_some(range)
+}
+
+/// Set an AX text range attribute such as `AXSelectedTextRange`.
+///
+/// # Safety
+///
+/// `element` must be a valid, live `AXUIElementRef` for the duration of the call.
+pub unsafe fn set_text_range_attr(
+    element: AXUIElementRef,
+    attr_name: &str,
+    range: CFRange,
+) -> AXError {
+    let attr = CFStr::new(attr_name);
+    let value = AXValueCreate(
+        kAXValueCFRangeType,
+        &range as *const CFRange as *const c_void,
+    );
+    if value.is_null() {
+        return kAXErrorFailure;
+    }
+    let result =
+        AXUIElementSetAttributeValue(element, attr.as_concrete_TypeRef(), value as CFTypeRef);
+    CFRelease(value as CFTypeRef);
+    result
+}
 
 /// Whether an AX attribute is currently writable on this element.
 ///
