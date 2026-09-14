@@ -33,6 +33,7 @@ mod get_desktop_state;
 pub(crate) mod get_screen_size;
 mod health_report;
 mod move_cursor;
+mod native_paste;
 mod page;
 pub(crate) mod px_frame;
 mod set_config;
@@ -936,6 +937,10 @@ pub fn register_all(
     ));
     registry.register(pid_window_guarded(
         hotkey::HotkeyTool::new(state.clone()),
+        &pid_window_candidates,
+    ));
+    registry.register(pid_window_guarded(
+        native_paste::NativePasteTool::new(),
         &pid_window_candidates,
     ));
     registry.register(pid_window_guarded(
