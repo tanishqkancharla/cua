@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Remove only the source-built cua-driver-local product. The released
+# Remove only the source-built opensky-driver product. The released
 # cua-driver installation has different names and paths and is never touched.
 set -euo pipefail
 
@@ -22,17 +22,17 @@ while [[ $# -gt 0 ]]; do
 done
 
 OS="$(uname -s 2>/dev/null || echo unknown)"
-HOME_DIR="${CUA_DRIVER_LOCAL_HOME:-$HOME/.cua-driver-local}"
+HOME_DIR="${CUA_DRIVER_LOCAL_HOME:-$HOME/.opensky-driver}"
 BIN_DIR="${CUA_DRIVER_LOCAL_INSTALL_DIR:-$HOME/.local/bin}"
-CLI_LINK="$BIN_DIR/cua-driver-local"
-APP_BUNDLE="/Applications/CuaDriverLocal.app"
+CLI_LINK="$BIN_DIR/opensky-driver"
+APP_BUNDLE="/Applications/OpenSkyDriver.app"
 if [[ "$OS" == "Darwin" ]]; then
-    CACHE_DIR="$HOME/Library/Caches/cua-driver-local"
+    CACHE_DIR="$HOME/Library/Caches/opensky-driver"
 else
-    CACHE_DIR="$HOME/.cache/cua-driver-local"
+    CACHE_DIR="$HOME/.cache/opensky-driver"
 fi
-LAUNCHAGENT="$HOME/Library/LaunchAgents/com.trycua.cua-driver-local.plist"
-SYSTEMD_UNIT="$HOME/.config/systemd/user/cua-driver-local.service"
+LAUNCHAGENT="$HOME/Library/LaunchAgents/com.opensky.driver.plist"
+SYSTEMD_UNIT="$HOME/.config/systemd/user/opensky-driver.service"
 
 log() { printf '==> %s\n' "$*"; }
 
@@ -50,7 +50,7 @@ case "$BIN_DIR" in
 esac
 
 if [[ "$VALIDATE_ONLY" == "1" ]]; then
-    printf 'cli=%s\nhome=%s\ncache=%s\napp=%s\nbundle=com.trycua.driver.local\nlaunchagent=%s\nsystemd=%s\n' \
+    printf 'cli=%s\nhome=%s\ncache=%s\napp=%s\nbundle=com.opensky.driver\nlaunchagent=%s\nsystemd=%s\n' \
         "$CLI_LINK" "$HOME_DIR" "$CACHE_DIR" "$APP_BUNDLE" "$LAUNCHAGENT" "$SYSTEMD_UNIT"
     exit 0
 fi
@@ -89,16 +89,16 @@ if [[ "$OS" == "Darwin" && -f "$LAUNCHAGENT" ]]; then
     log "removed LaunchAgent $LAUNCHAGENT"
 elif [[ "$OS" == "Linux" && -f "$SYSTEMD_UNIT" ]]; then
     if command -v systemctl >/dev/null 2>&1; then
-        systemctl --user disable --now cua-driver-local.service 2>/dev/null || true
+        systemctl --user disable --now opensky-driver.service 2>/dev/null || true
     fi
     rm -f "$SYSTEMD_UNIT"
     log "removed systemd user unit $SYSTEMD_UNIT"
 fi
-# See the note in _install-local-rust.sh: `pkill -x cua-driver-local` never
+# See the note in _install-local-rust.sh: `pkill -x opensky-driver` never
 # matches on Linux, because `-x` compares against the 15-char truncated
 # `comm` and the name is 16. Match argv[0], anchored so the launcher shells
 # that merely mention the path in their script text are left alone.
-for _daemon_bin in "$CLI_LINK" "$HOME_DIR/packages/current/cua-driver-local"; do
+for _daemon_bin in "$CLI_LINK" "$HOME_DIR/packages/current/opensky-driver"; do
     [ -n "$_daemon_bin" ] || continue
     pkill -f "^${_daemon_bin}([[:space:]]|\$)" >/dev/null 2>&1 || true
 done
@@ -111,9 +111,9 @@ if [[ "$OS" == "Darwin" && "$RESET_TCC" == "1" ]] && command -v tccutil >/dev/nu
         [[ ! -x "$LSREGISTER" ]] || "$LSREGISTER" -f "$APP_BUNDLE" >/dev/null 2>&1 || true
     fi
     for service in Accessibility ScreenCapture AppleEvents; do
-        tccutil reset "$service" com.trycua.driver.local >/dev/null 2>&1 || true
+        tccutil reset "$service" com.opensky.driver >/dev/null 2>&1 || true
     done
-    log "revoked TCC grants for com.trycua.driver.local"
+    log "revoked TCC grants for com.opensky.driver"
 fi
 
 # Remove the CLI only if it is an installer-created link into the local product.
@@ -131,12 +131,12 @@ fi
 
 # Skill links use the shared pack name, so target ownership is mandatory.
 for skill_link in \
-    "$HOME/.claude/skills/cua-driver" \
-    "$HOME/.agents/skills/cua-driver" \
-    "$HOME/.openclaw/skills/cua-driver" \
-    "$HOME/.config/opencode/skills/cua-driver" \
-    "$HOME/.gemini/skills/cua-driver" \
-    "$HOME/.hermes/skills/cua-driver"; do
+    "$HOME/.claude/skills/opensky-driver" \
+    "$HOME/.agents/skills/opensky-driver" \
+    "$HOME/.openclaw/skills/opensky-driver" \
+    "$HOME/.config/opencode/skills/opensky-driver" \
+    "$HOME/.gemini/skills/opensky-driver" \
+    "$HOME/.hermes/skills/opensky-driver"; do
     if [[ -L "$skill_link" ]]; then
         target="$(resolve_link "$skill_link")"
         if is_local_target "$target"; then
@@ -159,7 +159,7 @@ try:
 except (OSError, ValueError):
     raise SystemExit(0)
 
-anchors = ("cua-driver-local", os.environ["LOCAL_HOME"], os.environ["LOCAL_APP"])
+anchors = ("opensky-driver", os.environ["LOCAL_HOME"], os.environ["LOCAL_APP"])
 removed = []
 
 def is_local(server):
@@ -185,7 +185,7 @@ for project_name, project in (data.get("projects") or {}).items():
         scrub(project.get("mcpServers"), f"project:{project_name}")
 
 if removed:
-    backup = f"{path}.bak-cua-driver-local-uninstall-{int(time.time())}"
+    backup = f"{path}.bak-opensky-driver-uninstall-{int(time.time())}"
     shutil.copy2(path, backup)
     fd, temporary = tempfile.mkstemp(prefix=".claude.json.", dir=os.path.dirname(path) or ".", text=True)
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -203,7 +203,7 @@ fi
 # A caller may override CUA_DRIVER_LOCAL_HOME, so never recursively delete that
 # root. Require the installer's local executable marker, remove only known
 # runtime-owned children, and leave any unrelated files in place.
-LOCAL_HOME_MARKER="$HOME_DIR/packages/current/cua-driver-local"
+LOCAL_HOME_MARKER="$HOME_DIR/packages/current/opensky-driver"
 if [[ -e "$LOCAL_HOME_MARKER" || -L "$LOCAL_HOME_MARKER" ]]; then
     rm -rf "$HOME_DIR/packages" "$HOME_DIR/skills"
     rm -f \
@@ -225,7 +225,7 @@ if [[ -e "$LOCAL_HOME_MARKER" || -L "$LOCAL_HOME_MARKER" ]]; then
         log "removed local runtime payloads from $HOME_DIR; preserved unrelated files"
     fi
 elif [[ -d "$HOME_DIR" ]]; then
-    log "$HOME_DIR has no cua-driver-local install marker; leaving it untouched"
+    log "$HOME_DIR has no opensky-driver install marker; leaving it untouched"
 fi
 if [[ "$OS" == "Darwin" && -d "$APP_BUNDLE" ]]; then
     if [[ -w "$(dirname "$APP_BUNDLE")" ]]; then
@@ -236,4 +236,4 @@ if [[ "$OS" == "Darwin" && -d "$APP_BUNDLE" ]]; then
     log "removed $APP_BUNDLE"
 fi
 
-log "cua-driver-local uninstalled; release cua-driver was left untouched"
+log "opensky-driver uninstalled; release cua-driver was left untouched"

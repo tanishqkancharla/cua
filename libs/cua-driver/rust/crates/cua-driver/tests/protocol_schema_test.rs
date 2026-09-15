@@ -72,6 +72,7 @@ fn tools_list_schema_shape() {
         "browser_navigate",
         "browser_click",
         "browser_type",
+        "browser_key",
     ] {
         assert!(
             tools.iter().any(|tool| tool["name"] == name),
@@ -98,9 +99,10 @@ fn tools_list_schema_shape() {
     );
     for (name, required) in [
         ("browser_prepare", &[][..]),
-        ("browser_navigate", &["target_id", "tab_id", "url"][..]),
+        ("browser_navigate", &["target_id", "tab_id"][..]),
         ("browser_click", &["target_id", "tab_id"][..]),
         ("browser_type", &["target_id", "tab_id", "ref", "text"][..]),
+        ("browser_key", &["target_id", "tab_id", "key"][..]),
     ] {
         let tool = tools
             .iter()
@@ -124,6 +126,24 @@ fn tools_list_schema_shape() {
             );
         }
     }
+    let navigate = tools
+        .iter()
+        .find(|tool| tool["name"] == "browser_navigate")
+        .expect("browser_navigate not found in tools/list");
+    assert!(navigate["inputSchema"]["properties"]["url"].is_object());
+    assert!(navigate["inputSchema"]["properties"]["action"].is_object());
+    assert!(enum_contains(
+        &navigate["inputSchema"]["properties"]["action"],
+        "back"
+    ));
+    assert!(enum_contains(
+        &navigate["inputSchema"]["properties"]["action"],
+        "forward"
+    ));
+    assert!(enum_contains(
+        &navigate["inputSchema"]["properties"]["action"],
+        "reload"
+    ));
     const DELIVERY_MODE_TOOLS: &[&str] = &[
         "click",
         "double_click",

@@ -293,7 +293,7 @@ fn profile_root() -> Result<PathBuf, BrowserRefusal> {
                 .map(PathBuf::from)
                 .map(|path| path.join(".local").join("state"))
         })
-        .map(|path| path.join("cua-driver").join("browser-profiles"));
+        .map(|path| path.join("opensky-driver").join("browser-profiles"));
     root.ok_or_else(|| {
         refusal(
             BrowserRefusalCode::BrowserRouteUnavailable,
@@ -342,7 +342,7 @@ fn configure_linux_isolated_browser_command(
     }
 }
 
-fn isolated_browser_command(executable: &str, profile: &Path) -> Command {
+fn isolated_browser_command(executable: &str, profile: &Path, headless: bool) -> Command {
     let mut command = Command::new(executable);
     #[cfg(unix)]
     {
@@ -358,6 +358,9 @@ fn isolated_browser_command(executable: &str, profile: &Path) -> Command {
         .arg("--disable-component-update")
         .arg("--disable-default-apps")
         .arg("--disable-extensions");
+    if headless {
+        command.arg("--headless=new");
+    }
     #[cfg(target_os = "windows")]
     command
         .arg("--window-position=40,40")
@@ -727,7 +730,11 @@ impl BrowserEngine {
             self.platform.isolated_browser_executable()?
         };
         let prepared_profile = prepare_profile(profile_request)?;
-        let mut command = isolated_browser_command(&executable, &prepared_profile.path);
+        let mut command = isolated_browser_command(
+            &executable,
+            &prepared_profile.path,
+            profile_request.headless,
+        );
         let mut child = command.spawn().map_err(|error| {
             cleanup_created_profile(&prepared_profile);
             refusal(
@@ -1396,7 +1403,7 @@ mod tests {
     #[test]
     fn isolated_launch_uses_a_deterministic_clean_profile() {
         let profile = Path::new("profile-under-test");
-        let command = isolated_browser_command("chromium-under-test", profile);
+        let command = isolated_browser_command("chromium-under-test", profile, false);
         let args = command
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
@@ -1421,6 +1428,13 @@ mod tests {
         }
         #[cfg(target_os = "linux")]
         assert!(args.iter().any(|arg| arg == "--password-store=basic"));
+        assert!(!args.iter().any(|arg| arg == "--headless=new"));
+
+        let headless = isolated_browser_command("chromium-under-test", profile, true)
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(headless.iter().any(|arg| arg == "--headless=new"));
     }
 
     #[test]

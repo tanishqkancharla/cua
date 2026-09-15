@@ -2,9 +2,9 @@
 
 use async_trait::async_trait;
 use cua_driver_contract::{
-    ClickButton, ClickInput, DragInput, GetCursorPositionInput, GetDesktopStateInput,
-    GetScreenSizeInput, HotkeyInput, InvokeMenuInput, MoveCursorInput, PressKeyInput, ScrollInput,
-    TypeTextInput,
+    ClickButton, ClickInput, CloseWindowInput, DragInput, GetCursorPositionInput,
+    GetDesktopStateInput, GetScreenSizeInput, HotkeyInput, InvokeMenuInput, MoveCursorInput,
+    PressKeyInput, ScrollInput, TypeTextInput,
 };
 use cua_driver_core::{
     protocol::ToolResult,
@@ -7658,7 +7658,7 @@ impl Tool for KillAppTool {
         KILL_DEF.get_or_init(|| ToolDef {
             name: "kill_app".into(),
             description: "Force-terminate a process by pid (kill -9 equivalent on Linux). \
-                Use as escalation when the cooperative close path failed to make the process \
+                Use as escalation when the cooperative close_window path failed to make the process \
                 exit. Unsaved state is lost — prefer the cooperative path first."
                 .into(),
             input_schema: json!({"type":"object","required":["pid"],"properties":{
@@ -7744,6 +7744,36 @@ fn kill_app_stale_process_refusal(message: String) -> ToolResult {
             "message": message,
         }
     }))
+}
+
+pub struct CloseWindowTool;
+static CLOSE_WINDOW_DEF: std::sync::OnceLock<ToolDef> = std::sync::OnceLock::new();
+
+#[async_trait]
+impl Tool for CloseWindowTool {
+    fn def(&self) -> &ToolDef {
+        CLOSE_WINDOW_DEF.get_or_init(|| {
+            let contract =
+                cua_driver_contract::tool_contract("close_window").expect("close_window contract");
+            ToolDef::from_contract(&contract)
+        })
+    }
+
+    async fn invoke(&self, args: Value) -> ToolResult {
+        let input: CloseWindowInput = match parse_typed_input("close_window", args) {
+            Ok(input) => input,
+            Err(error) => return error,
+        };
+        let message = "Linux does not yet expose a compositor-independent exact-window close primitive; refusing instead of using hotkeys, menu labels, coordinates, or process termination";
+        ToolResult::error(format!("close_window: {message}")).with_structured(json!({
+            "status": "unsupported",
+            "effect": "refused",
+            "code": "exact_window_close_unsupported",
+            "pid": input.pid,
+            "window_id": input.window_id,
+            "message": message,
+        }))
+    }
 }
 
 // ── invoke_menu (Linux) ──────────────────────────────────────────────────────
@@ -8230,6 +8260,7 @@ pub fn build_registry_with_provider(
     ));
     r.register(Box::new(LaunchAppTool));
     r.register(Box::new(KillAppTool));
+    r.register(Box::new(CloseWindowTool));
     let pid_window_candidates: WindowTargetCandidates = Arc::new(pid_window_target_candidates);
     r.register(pid_window_guarded(BringToFrontTool, &pid_window_candidates));
     r.register(Box::new(SetWindowFrameTool));
@@ -8309,10 +8340,9 @@ pub fn build_registry_with_provider(
         },
         &pid_window_candidates,
     ));
-    cua_driver_core::clipboard::register_clipboard_tools(
-        &mut r,
-        Arc::new(crate::clipboard::LinuxClipboard::new()),
-    );
+    let clipboard: Arc<dyn cua_driver_core::clipboard::ClipboardBackend> =
+        Arc::new(crate::clipboard::LinuxClipboard::new());
+    cua_driver_core::clipboard::register_clipboard_tools(&mut r, clipboard.clone());
     // `screenshot` removed - see the matching comment in
     // platform-windows/src/tools/impl_.rs::build_registry. Canonical
     // screenshot path is `get_window_state` (it always returns a screenshot now).
@@ -8363,7 +8393,11 @@ pub fn build_registry_with_provider(
         r.approval_broker(),
         r.protected_resource_ownership(),
     );
-    cua_driver_core::browser::register_browser_tools(&browser_engine, &mut r);
+    cua_driver_core::browser::tools::register_browser_tools_with_clipboard(
+        &browser_engine,
+        &mut r,
+        Some(clipboard),
+    );
     r.register_recording_tools();
     r.register_session_tools();
     r

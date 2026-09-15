@@ -202,19 +202,19 @@ mod tests {
     fn keychain_namespace_is_strict_and_separated() {
         assert_ne!(
             MacosKeychainKeyProvider::service("cua-driver").unwrap(),
-            MacosKeychainKeyProvider::service("cua-driver-local").unwrap()
+            MacosKeychainKeyProvider::service("opensky-driver").unwrap()
         );
         assert!(MacosKeychainKeyProvider::service("../escape").is_err());
         assert!(MacosKeychainKeyProvider::uses_data_protection("cua-driver"));
         assert!(!MacosKeychainKeyProvider::uses_data_protection(
-            "cua-driver-local"
+            "opensky-driver"
         ));
     }
 
     #[test]
     #[ignore = "mutates one uniquely named login-Keychain item; run in macOS release qualification"]
     fn local_keychain_key_lifecycle_is_destroyable() {
-        let namespace = format!("cua-driver-local-test-{}", uuid::Uuid::new_v4().simple());
+        let namespace = format!("opensky-driver-test-{}", uuid::Uuid::new_v4().simple());
         let provider = MacosKeychainKeyProvider;
         let created = provider.load_or_create(&namespace).unwrap();
         assert_eq!(created.bytes.len(), 32);

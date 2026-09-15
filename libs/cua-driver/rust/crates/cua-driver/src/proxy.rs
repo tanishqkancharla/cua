@@ -170,7 +170,7 @@ pub async fn run_proxy(socket_path: String) -> anyhow::Result<()> {
     if !is_daemon_listening(&socket_path) {
         anyhow::bail!(
             "cua-driver-rs daemon not reachable on {socket_path}. Start it \
-             with `open -n -g -a CuaDriver --args serve` and retry."
+             with `open -n -g -a OpenSkyDriver --args serve` and retry."
         );
     }
     // A selected service may outlive the CLI package that launched this

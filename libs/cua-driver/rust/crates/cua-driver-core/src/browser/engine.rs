@@ -1,4 +1,4 @@
-//! BrowserEngine — the semantic core behind the five browser tools.
+//! BrowserEngine — the semantic core behind the first-class browser tools.
 //!
 //! Owns the target/ref store, the CDP connection pool, and every
 //! exact-or-refused decision. The platform adapter is consulted for OS
@@ -49,16 +49,17 @@ use super::reconnect::ReconnectGates;
 use super::refusal::{BrowserRefusal, BrowserRefusalCode};
 use super::semantic::{
     build_dom_index, build_layout_index, compose_accessibility_tree, parse_viewport,
-    OmissionCounts, SemanticDocument, SemanticNode, DEFAULT_SEMANTIC_NODE_BUDGET,
-    SEMANTIC_COMPUTED_STYLES,
+    OmissionCounts, SemanticContextPage, SemanticContextWindow, SemanticDocument, SemanticNode,
+    DEFAULT_SEMANTIC_NODE_BUDGET, SEMANTIC_COMPUTED_STYLES,
 };
 use super::store::{
-    format_ref, BrowserStore, FrameIdentity, FrameKind, FrameRef, RefEntry, SemanticContinuation,
-    SnapshotRecord, TabRecord, TargetRecord,
+    format_ref, parse_ref, BrowserStore, FrameIdentity, FrameKind, FrameRef, RefEntry,
+    SemanticContinuation, SnapshotRecord, TabRecord, TargetRecord,
 };
 use super::types::{
     BindingQuality, BrowserClassification, BrowserEngineFamily, BrowserProcessRole,
-    EndpointAccessClass, NativeWindowInfo, OwnedEndpoint, Rect,
+    EndpointAccessClass, NativeOwnershipMethod, NativeOwnershipProof, NativeWindowInfo,
+    OwnedEndpoint, Rect,
 };
 
 /// Bounds tolerance (device pixels) for native ↔ CDP window correlation.
@@ -82,6 +83,7 @@ pub struct BrowserEngine {
     pub(crate) protected_resource_ownership: Arc<crate::consent::ProtectedResourceOwnershipStore>,
     mutation_gates: MutationGates,
     reconnect_gates: ReconnectGates,
+    semantic_extension_gate: tokio::sync::Mutex<()>,
     pending_existing_profile_cleanups: Mutex<HashMap<String, Vec<ExistingProfileSetupRequest>>>,
     session_end_hook: Mutex<Option<crate::session::SessionEndHookRegistration>>,
 }
@@ -103,6 +105,23 @@ fn authorize_live_browser_origin(
     manifest
         .authorize_browser_url(live_url)
         .map_err(|error| refuse(BrowserRefusalCode::BrowserOriginOutsideScope, error))
+}
+
+/// Re-check a destination discovered only after browser revalidation (for
+/// example a back/forward history entry) against the current delegated
+/// session. Explicit URL navigation is authorized from its public argument;
+/// history navigation has no caller-provided URL, so it must perform this
+/// second, in-lock check immediately before mutation.
+pub(crate) fn authorize_current_browser_destination(
+    destination_url: &str,
+) -> Result<(), BrowserRefusal> {
+    let Some(context) = crate::tool::current_dispatch_authorization_context() else {
+        return Ok(());
+    };
+    let Some(manifest) = context.capability_manifest() else {
+        return Ok(());
+    };
+    authorize_live_browser_origin(Some(manifest), destination_url)
 }
 
 fn protected_live_origin_scope(raw: &str) -> Result<String, BrowserRefusal> {
@@ -398,6 +417,44 @@ pub(crate) struct SemanticSnapshotOutcome {
     pub omissions: OmissionCounts,
     pub continuation: Option<String>,
     pub oopif: OopifStatus,
+    pub query_contexts: Vec<SemanticQueryContext>,
+    pub context: Option<SemanticContextMetadata>,
+}
+
+pub(crate) struct SemanticContextMetadata {
+    pub anchor_ref: String,
+    pub group_ref: String,
+    pub parent_group_ref: Option<String>,
+    pub order_domain: String,
+    pub before_omitted: usize,
+    pub after_omitted: usize,
+    pub group_complete: bool,
+    pub document_collection_complete: bool,
+    pub member_projection: &'static str,
+    pub source_member_nodes: usize,
+    pub projected_out_nodes: usize,
+    pub member_refs: Vec<String>,
+    pub before_continuation: Option<String>,
+    pub after_continuation: Option<String>,
+}
+
+pub(crate) struct SemanticQueryContext {
+    pub outline: String,
+    pub metadata: SemanticContextMetadata,
+}
+
+pub(crate) struct SemanticContextOutcome {
+    pub snapshot_id: u64,
+    pub url: String,
+    pub title: String,
+    pub outline: String,
+    pub refs: Vec<SemanticListedRef>,
+    pub content_refs: Vec<SemanticListedRef>,
+    pub selected_nodes: usize,
+    pub total_nodes: usize,
+    pub omissions: OmissionCounts,
+    pub oopif: OopifStatus,
+    pub context: SemanticContextMetadata,
 }
 
 pub(crate) struct BrowserTabScreenshot {
@@ -636,6 +693,7 @@ impl BrowserEngine {
             protected_resource_ownership,
             mutation_gates: MutationGates::new(),
             reconnect_gates: ReconnectGates::new(),
+            semantic_extension_gate: tokio::sync::Mutex::new(()),
             pending_existing_profile_cleanups: Mutex::new(HashMap::new()),
             session_end_hook: Mutex::new(None),
         });
@@ -1181,6 +1239,70 @@ impl BrowserEngine {
         Ok(out)
     }
 
+    /// Enumerate exact page targets without requiring a native-window mapping.
+    /// This is used only for a browser process launched and owned by this driver
+    /// session in headless mode.
+    async fn headless_page_candidates(
+        &self,
+        conn: &CdpConnection,
+    ) -> Result<Vec<CdpWindowCandidate>, BrowserRefusal> {
+        let targets = conn
+            .call(None, "Target.getTargets", json!({}))
+            .await
+            .map_err(|error| route_err("Target.getTargets failed", error))?;
+        let infos = targets
+            .get("targetInfos")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                refuse(
+                    BrowserRefusalCode::BrowserRouteUnavailable,
+                    "Target.getTargets returned no targetInfos array",
+                )
+            })?;
+        let mut out = Vec::new();
+        for info in infos {
+            if info.get("type").and_then(Value::as_str) != Some("page") {
+                continue;
+            }
+            let url = info
+                .get("url")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned();
+            if url.starts_with("devtools://") {
+                continue;
+            }
+            let cdp_target_id = info
+                .get("targetId")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    refuse(
+                        BrowserRefusalCode::BrowserRouteUnavailable,
+                        "Target.getTargets returned a page without targetId",
+                    )
+                })?;
+            out.push(CdpWindowCandidate {
+                cdp_target_id,
+                cdp_window_id: None,
+                title: info
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_owned(),
+                url,
+                bounds: None,
+            });
+        }
+        if out.is_empty() {
+            return Err(refuse(
+                BrowserRefusalCode::BrowserTabNotFound,
+                "the driver-owned headless browser has no page target",
+            ));
+        }
+        Ok(out)
+    }
+
     /// Attach (flattened) to a tab's target and return the CDP session id.
     async fn attach(
         &self,
@@ -1213,6 +1335,77 @@ impl BrowserEngine {
     }
 
     // ── Binding (get_browser_state, pid + window_id mode) ──────────────
+
+    /// Bind every page in an exact driver-owned headless Chromium process.
+    /// Process and endpoint ownership replace native-window correlation; the
+    /// returned opaque tab ids still select one exact CDP page target.
+    pub(crate) async fn bind_driver_owned_headless(
+        &self,
+        session: &str,
+        transport_session: Option<&str>,
+        pid: i64,
+    ) -> Result<(String, TargetRecord), BrowserRefusal> {
+        let lifecycle_is_live = self.is_driver_owned_pid_for_session(session, pid)
+            || transport_session
+                .is_some_and(|owner| self.is_driver_owned_pid_for_session(owner, pid));
+        if !lifecycle_is_live {
+            return Err(refuse(
+                BrowserRefusalCode::BrowserWrongTargetRefused,
+                "pid-only binding requires a browser launched and owned by this driver session",
+            ));
+        }
+        let class = self.platform.classify_browser(pid).await?;
+        if !class.is_browser || !class.supports_cdp {
+            return Err(unsupported_engine_refusal(
+                &class,
+                "bind_driver_owned_headless",
+            ));
+        }
+        let fingerprint = self.platform.process_fingerprint(pid).await?;
+        let endpoint = self.owned_endpoint(pid).await?;
+        let conn = self.connect(&endpoint.ws_url).await?;
+        let candidates = self.headless_page_candidates(&conn).await?;
+        let mut tabs = HashMap::new();
+        for candidate in &candidates {
+            let tab_id = self.store.mint_tab_id();
+            tabs.insert(
+                tab_id.clone(),
+                TabRecord {
+                    tab_id,
+                    cdp_target_id: candidate.cdp_target_id.clone(),
+                    title: candidate.title.clone(),
+                    url: candidate.url.clone(),
+                    active: None,
+                    generation: 0,
+                    snapshots: HashMap::new(),
+                },
+            );
+        }
+        let representative = &candidates[0];
+        let record = TargetRecord {
+            target_id: String::new(),
+            pid,
+            // Zero is an internal sentinel for a driver-owned headless target;
+            // it is never accepted as a caller-supplied native window id.
+            window_id: 0,
+            ws_url: endpoint.ws_url.clone(),
+            endpoint_owner_pid: endpoint.ownership.owner_pid,
+            endpoint_transport: endpoint.transport,
+            endpoint_access_class: EndpointAccessClass::DriverOwned,
+            generation: 0,
+            transport_session: transport_session.map(str::to_owned),
+            fingerprint,
+            native_title: "Driver-owned headless Chromium".to_owned(),
+            native_bounds: Rect::default(),
+            cdp_target_id: representative.cdp_target_id.clone(),
+            cdp_window_id: None,
+            quality: BindingQuality::Exact,
+            tabs,
+        };
+        let target_id = self.store.mint_target(session, record.clone());
+        let record = self.store.get_target(session, &target_id)?;
+        Ok((target_id, record))
+    }
 
     /// Classify, inspect, discover, correlate — and mint a target
     /// capability on success. `session` must already be explicit.
@@ -1499,10 +1692,29 @@ impl BrowserEngine {
             ));
         }
 
-        // 2. Native window still exists and is still owned by the pid.
-        let native = self
-            .native_window_checked(record.pid, record.window_id)
-            .await?;
+        let driver_owned_headless = record.window_id == 0
+            && record.endpoint_access_class == EndpointAccessClass::DriverOwned;
+
+        // 2. Native window still exists and is still owned by the pid, except
+        // for an exact driver-owned headless process where no native window
+        // exists by construction.
+        let native = if driver_owned_headless {
+            NativeWindowInfo {
+                pid: record.pid,
+                window_id: 0,
+                title: record.native_title.clone(),
+                bounds: record.native_bounds,
+                geometry_exact: true,
+                ownership: NativeOwnershipProof {
+                    method: NativeOwnershipMethod::PlatformAttested,
+                    owner_pid: record.pid,
+                    detail: Some("driver-owned headless browser process".to_owned()),
+                },
+            }
+        } else {
+            self.native_window_checked(record.pid, record.window_id)
+                .await?
+        };
 
         // 3. Endpoint still owned and unchanged.
         let endpoint = if record.generation > 0 {
@@ -1528,7 +1740,11 @@ impl BrowserEngine {
         // 4. CDP target still a page in the bound CDP window, with either
         //    matching geometry or the same singleton cardinality proof.
         let conn = self.connection_for_record(session, &record).await?;
-        let candidates = self.window_candidates(&conn).await?;
+        let candidates = if driver_owned_headless {
+            self.headless_page_candidates(&conn).await?
+        } else {
+            self.window_candidates(&conn).await?
+        };
         let live = candidates
             .iter()
             .find(|c| c.cdp_target_id == tab.cdp_target_id)
@@ -1538,7 +1754,10 @@ impl BrowserEngine {
                     format!("tab {tab_id} no longer has a live CDP page target"),
                 )
             })?;
-        if let Some(bound_window_id) = record.cdp_window_id {
+        if driver_owned_headless {
+            // Endpoint/process ownership and the opaque CDP page capability are
+            // the complete proof for a target with no native window.
+        } else if let Some(bound_window_id) = record.cdp_window_id {
             if live.cdp_window_id != Some(bound_window_id) {
                 return Err(refuse(
                     BrowserRefusalCode::BrowserWrongTargetRefused,
@@ -1663,6 +1882,9 @@ impl BrowserEngine {
         viewport_y: f64,
         kind: BrowserVisualActionKind,
     ) {
+        if validated.native.window_id == 0 {
+            return;
+        }
         // `document.visibilityState` distinguishes the selected tab without
         // focusing its native window or invoking any CDP activation command.
         // Treat an unavailable or malformed proof as inactive: omitting
@@ -2097,6 +2319,8 @@ impl BrowserEngine {
                 actions: Vec::new(),
                 visibility: None,
                 semantic: false,
+                context_only: false,
+                semantic_node: None,
                 frame,
             });
         }
@@ -2151,6 +2375,8 @@ impl BrowserEngine {
                                 actions: Vec::new(),
                                 visibility: None,
                                 semantic: false,
+                                context_only: false,
+                                semantic_node: None,
                                 frame: FrameRef {
                                     kind: FrameKind::Oopif,
                                     oopif_target_id: Some(child.target_id.clone()),
@@ -2222,8 +2448,11 @@ impl BrowserEngine {
                         generation: record.generation,
                         url: url.clone(),
                         refs,
+                        next_ref_index: listed.len() as u32,
                         semantic: None,
                         semantic_root_identity: None,
+                        semantic_oopif_supported: false,
+                        semantic_oopif_frames: 0,
                         continuations: HashMap::new(),
                     },
                 );
@@ -2460,7 +2689,11 @@ impl BrowserEngine {
                 refs.push(listed);
             }
         }
-        let complete = document_complete && page.next_offset.is_none();
+        let complete = semantic_snapshot_complete(
+            document_complete,
+            page.next_offset.is_some(),
+            page.hierarchy_complete,
+        );
         (
             SemanticSnapshotOutcome {
                 snapshot_id,
@@ -2476,9 +2709,171 @@ impl BrowserEngine {
                 omissions: page.omissions,
                 continuation: page.next_offset.map(|_| format!("bc-{}", Uuid::new_v4())),
                 oopif,
+                query_contexts: Vec::new(),
+                context: None,
             },
             stored_refs,
         )
+    }
+
+    fn issue_context_page(
+        snapshot_id: u64,
+        page: &SemanticContextPage,
+        stored_refs: &mut HashMap<u32, RefEntry>,
+        next_index: &mut u32,
+        response_refs: &mut HashSet<String>,
+        forced_anchor: Option<&str>,
+        forced_group: Option<&str>,
+        oopif_supported: bool,
+        oopif_frames: usize,
+    ) -> Result<
+        (
+            Vec<SemanticListedRef>,
+            Vec<SemanticListedRef>,
+            SemanticContextMetadata,
+            Vec<(String, SemanticContinuation)>,
+        ),
+        BrowserRefusal,
+    > {
+        let mut refs = Vec::new();
+        let mut content_refs = Vec::new();
+        let mut issue =
+            |node: &SemanticNode, forced: Option<&str>| -> Result<String, BrowserRefusal> {
+                let identity = node.identity();
+                let existing = if let Some(forced) = forced {
+                    let (forced_snapshot, forced_index) = parse_ref(forced).ok_or_else(|| {
+                        refuse(
+                            BrowserRefusalCode::BrowserRefStale,
+                            "the context continuation carries a malformed bound ref",
+                        )
+                    })?;
+                    let entry = (forced_snapshot == snapshot_id)
+                        .then(|| stored_refs.get(&forced_index))
+                        .flatten()
+                        .filter(|entry| {
+                            entry.semantic && entry.semantic_node.as_ref() == Some(&identity)
+                        })
+                        .cloned()
+                        .ok_or_else(|| {
+                            refuse(
+                                BrowserRefusalCode::BrowserRefStale,
+                                "the context continuation bound ref is no longer exact",
+                            )
+                        })?;
+                    Some((forced_index, entry))
+                } else {
+                    stored_refs
+                        .iter()
+                        .filter(|(_, entry)| {
+                            entry.semantic && entry.semantic_node.as_ref() == Some(&identity)
+                        })
+                        .min_by_key(|(index, entry)| (entry.context_only, **index))
+                        .map(|(index, entry)| (*index, entry.clone()))
+                };
+                let (index, entry) = if let Some((index, entry)) = existing {
+                    (index, entry)
+                } else {
+                    while stored_refs.contains_key(next_index) {
+                        *next_index = next_index.checked_add(1).ok_or_else(|| {
+                            refuse(
+                                BrowserRefusalCode::BrowserRefStale,
+                                "the semantic snapshot ref namespace is exhausted",
+                            )
+                        })?;
+                    }
+                    let index = *next_index;
+                    *next_index = next_index.checked_add(1).ok_or_else(|| {
+                        refuse(
+                            BrowserRefusalCode::BrowserRefStale,
+                            "the semantic snapshot ref namespace is exhausted",
+                        )
+                    })?;
+                    let entry = node.to_context_ref_entry();
+                    stored_refs.insert(index, entry.clone());
+                    (index, entry)
+                };
+                let external = format_ref(snapshot_id, index);
+                if response_refs.insert(external.clone()) {
+                    let mut projected = node.clone();
+                    projected.actions = entry.actions.clone();
+                    let listed = SemanticListedRef {
+                        external: external.clone(),
+                        node: projected,
+                    };
+                    if entry.actions.is_empty() || entry.context_only {
+                        content_refs.push(listed);
+                    } else {
+                        refs.push(listed);
+                    }
+                }
+                Ok(external)
+            };
+
+        let anchor_ref = issue(&page.anchor, forced_anchor)?;
+        let group_ref = issue(&page.group, forced_group)?;
+        let parent_group_ref = page
+            .parent_group
+            .as_ref()
+            .map(|node| issue(node, None))
+            .transpose()?;
+        let member_refs = page
+            .nodes
+            .iter()
+            .map(|node| issue(node, None))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut continuations = Vec::new();
+        let before_continuation = (page.range_start > 0).then(|| format!("bcc-{}", Uuid::new_v4()));
+        if let Some(token) = &before_continuation {
+            continuations.push((
+                token.clone(),
+                SemanticContinuation::Context {
+                    anchor_ref: anchor_ref.clone(),
+                    group: page.group.identity(),
+                    group_ref: group_ref.clone(),
+                    start: page.range_start,
+                    backwards: true,
+                    oopif_supported,
+                    oopif_frames,
+                },
+            ));
+        }
+        let after_continuation =
+            (page.range_end < page.total_nodes).then(|| format!("bcc-{}", Uuid::new_v4()));
+        if let Some(token) = &after_continuation {
+            continuations.push((
+                token.clone(),
+                SemanticContinuation::Context {
+                    anchor_ref: anchor_ref.clone(),
+                    group: page.group.identity(),
+                    group_ref: group_ref.clone(),
+                    start: page.range_end,
+                    backwards: false,
+                    oopif_supported,
+                    oopif_frames,
+                },
+            ));
+        }
+        Ok((
+            refs,
+            content_refs,
+            SemanticContextMetadata {
+                anchor_ref,
+                group_ref,
+                parent_group_ref,
+                order_domain: semantic_order_domain(snapshot_id, &page.group.frame),
+                before_omitted: page.before_omitted,
+                after_omitted: page.after_omitted,
+                group_complete: page.group_complete,
+                document_collection_complete: page.document_collection_complete,
+                member_projection: page.member_projection,
+                source_member_nodes: page.source_member_nodes,
+                projected_out_nodes: page.projected_out_nodes,
+                member_refs,
+                before_continuation,
+                after_continuation,
+            },
+            continuations,
+        ))
     }
 
     pub(crate) async fn snapshot_tab_semantic(
@@ -2497,9 +2892,10 @@ impl BrowserEngine {
                     "continuation cannot be combined with a new scope_ref or query",
                 ));
             }
+            let _semantic_extension_guard = self.semantic_extension_gate.lock().await;
             let (snapshot, continuation) = self
                 .store
-                .resolve_semantic_continuation(session, target_id, tab_id, token)?;
+                .take_semantic_continuation(session, target_id, tab_id, token)?;
             let record = self.store.get_target(session, target_id)?;
             let tab = record.tabs.get(tab_id).cloned().ok_or_else(|| {
                 refuse(
@@ -2537,25 +2933,165 @@ impl BrowserEngine {
                     "the continuation no longer has semantic snapshot state",
                 )
             })?;
+            if let SemanticContinuation::Context {
+                anchor_ref,
+                group,
+                group_ref,
+                start,
+                backwards,
+                oopif_supported,
+                oopif_frames,
+            } = continuation
+            {
+                let (anchor_snapshot, anchor_index) = parse_ref(&anchor_ref).ok_or_else(|| {
+                    refuse(
+                        BrowserRefusalCode::BrowserRefStale,
+                        "the context continuation anchor is malformed",
+                    )
+                })?;
+                let anchor = (anchor_snapshot == snapshot.id)
+                    .then(|| snapshot.refs.get(&anchor_index))
+                    .flatten()
+                    .cloned()
+                    .ok_or_else(|| {
+                        refuse(
+                            BrowserRefusalCode::BrowserRefStale,
+                            "the context continuation anchor is no longer issued",
+                        )
+                    })?;
+                let identity = anchor.semantic_node.as_ref().ok_or_else(|| {
+                    refuse(
+                        BrowserRefusalCode::BrowserRefStale,
+                        "the context continuation anchor identity is unavailable",
+                    )
+                })?;
+                let validated = self
+                    .revalidate_for_mutation(session, target_id, Some(tab_id))
+                    .await?;
+                self.revalidate_semantic_context_frame(
+                    session,
+                    target_id,
+                    tab_id,
+                    &validated,
+                    &identity.frame,
+                )
+                .await?;
+                let window = if backwards {
+                    SemanticContextWindow::Backward { end: start }
+                } else {
+                    SemanticContextWindow::Forward { start }
+                };
+                let page = document
+                    .context_window(
+                        &anchor,
+                        Some(&group),
+                        window,
+                        super::semantic::CONTEXT_BEFORE_NODES
+                            + 1
+                            + super::semantic::CONTEXT_AFTER_NODES,
+                        super::semantic::CONTEXT_OUTLINE_MAX_BYTES,
+                    )
+                    .map_err(|_| {
+                        refuse(
+                            BrowserRefusalCode::BrowserRefStale,
+                            "the stored context continuation can no longer prove its group",
+                        )
+                    })?;
+                let reserve = page.nodes.len().saturating_add(3);
+                let reserved_start = self.store.reserve_semantic_ref_indices(
+                    session,
+                    target_id,
+                    tab_id,
+                    snapshot.id,
+                    reserve,
+                )?;
+                let mut local_refs = snapshot.refs.clone();
+                let original_indices = local_refs.keys().copied().collect::<HashSet<_>>();
+                let mut next_index = reserved_start;
+                let mut response_refs = HashSet::new();
+                let (refs, content_refs, metadata, continuations) = Self::issue_context_page(
+                    snapshot.id,
+                    &page,
+                    &mut local_refs,
+                    &mut next_index,
+                    &mut response_refs,
+                    Some(&anchor_ref),
+                    Some(&group_ref),
+                    oopif_supported,
+                    oopif_frames,
+                )?;
+                let new_refs = local_refs
+                    .into_iter()
+                    .filter(|(idx, _)| !original_indices.contains(idx))
+                    .collect();
+                self.store.commit_reserved_semantic_refs(
+                    session,
+                    target_id,
+                    tab_id,
+                    snapshot.id,
+                    new_refs,
+                    continuations,
+                )?;
+                return Ok(SemanticSnapshotOutcome {
+                    snapshot_id: snapshot.id,
+                    url: snapshot.url,
+                    title: validated.tab.title,
+                    outline: page.outline,
+                    refs,
+                    content_refs,
+                    complete: metadata.group_complete,
+                    scope: "context",
+                    selected_nodes: page.selected_nodes,
+                    total_nodes: page.total_nodes,
+                    omissions: page.omissions,
+                    continuation: None,
+                    oopif: if oopif_supported {
+                        OopifStatus::Attached(oopif_frames)
+                    } else {
+                        OopifStatus::Unsupported
+                    },
+                    query_contexts: Vec::new(),
+                    context: Some(metadata),
+                });
+            }
+            let SemanticContinuation::Matches {
+                offset,
+                query,
+                scope_backend_node_id,
+                oopif_supported,
+                oopif_frames,
+            } = continuation
+            else {
+                unreachable!()
+            };
             let page = document.page(
-                continuation.offset,
+                offset,
                 DEFAULT_SEMANTIC_NODE_BUDGET,
-                continuation.query.as_deref(),
-                continuation.scope_backend_node_id,
+                query.as_deref(),
+                scope_backend_node_id,
             );
-            let start_index = snapshot
-                .refs
-                .keys()
-                .max()
-                .copied()
-                .map_or(0, |value| value.saturating_add(1));
-            let oopif = if continuation.oopif_supported {
-                OopifStatus::Attached(continuation.oopif_frames)
+            let query_context_pages = if query.is_some() {
+                document.query_contexts(&page)
+            } else {
+                Vec::new()
+            };
+            let reservation = DEFAULT_SEMANTIC_NODE_BUDGET
+                + super::semantic::QUERY_CONTEXT_MAX_NODES
+                + super::semantic::QUERY_CONTEXT_MAX_BLOCKS * 3;
+            let start_index = self.store.reserve_semantic_ref_indices(
+                session,
+                target_id,
+                tab_id,
+                snapshot.id,
+                reservation,
+            )?;
+            let oopif = if oopif_supported {
+                OopifStatus::Attached(oopif_frames)
             } else {
                 OopifStatus::Unsupported
             };
             let next_offset = page.next_offset;
-            let (outcome, new_refs) = self.semantic_outcome(
+            let (mut outcome, new_match_refs) = self.semantic_outcome(
                 snapshot.id,
                 snapshot.url.clone(),
                 tab.title,
@@ -2565,29 +3101,66 @@ impl BrowserEngine {
                 oopif,
                 start_index,
             );
+            let mut local_refs = snapshot.refs.clone();
+            local_refs.extend(new_match_refs);
+            let original_indices = snapshot.refs.keys().copied().collect::<HashSet<_>>();
+            let mut response_refs = outcome
+                .refs
+                .iter()
+                .chain(outcome.content_refs.iter())
+                .map(|listed| listed.external.clone())
+                .collect::<HashSet<_>>();
+            let mut next_index = start_index.saturating_add(DEFAULT_SEMANTIC_NODE_BUDGET as u32);
+            let mut context_continuations = Vec::new();
+            for page in query_context_pages {
+                let (new_refs, new_content_refs, metadata, continuations) =
+                    Self::issue_context_page(
+                        snapshot.id,
+                        &page,
+                        &mut local_refs,
+                        &mut next_index,
+                        &mut response_refs,
+                        None,
+                        None,
+                        oopif_supported,
+                        oopif_frames,
+                    )?;
+                outcome.refs.extend(new_refs);
+                outcome.content_refs.extend(new_content_refs);
+                outcome.query_contexts.push(SemanticQueryContext {
+                    outline: page.outline,
+                    metadata,
+                });
+                context_continuations.extend(continuations);
+            }
             let next_token = outcome.continuation.clone();
-            self.store.update_target(session, target_id, |record| {
-                if let Some(stored) = record
-                    .tabs
-                    .get_mut(tab_id)
-                    .and_then(|tab| tab.snapshots.get_mut(&snapshot.id))
-                {
-                    stored.continuations.remove(token);
-                    stored.refs.extend(new_refs);
-                    if let (Some(token), Some(offset)) = (next_token, next_offset) {
-                        stored.continuations.insert(
-                            token,
-                            SemanticContinuation {
-                                offset,
-                                query: continuation.query.clone(),
-                                scope_backend_node_id: continuation.scope_backend_node_id,
-                                oopif_supported: continuation.oopif_supported,
-                                oopif_frames: continuation.oopif_frames,
-                            },
-                        );
-                    }
-                }
-            });
+            let next = match (next_token, next_offset) {
+                (Some(token), Some(offset)) => Some((
+                    token,
+                    SemanticContinuation::Matches {
+                        offset,
+                        query: query.clone(),
+                        scope_backend_node_id,
+                        oopif_supported,
+                        oopif_frames,
+                    },
+                )),
+                _ => None,
+            };
+            let mut continuations = next.into_iter().collect::<Vec<_>>();
+            continuations.extend(context_continuations);
+            let new_refs = local_refs
+                .into_iter()
+                .filter(|(idx, _)| !original_indices.contains(idx))
+                .collect();
+            self.store.commit_reserved_semantic_refs(
+                session,
+                target_id,
+                tab_id,
+                snapshot.id,
+                new_refs,
+                continuations,
+            )?;
             return Ok(outcome);
         }
 
@@ -2710,6 +3283,11 @@ impl BrowserEngine {
             query,
             scope_backend_node_id,
         );
+        let query_context_pages = if query.is_some() {
+            semantic.query_contexts(&page)
+        } else {
+            Vec::new()
+        };
         let next_offset = page.next_offset;
         let snapshot_id = self.store.mint_snapshot_id();
         let scope = if scope_ref.is_some() {
@@ -2719,7 +3297,7 @@ impl BrowserEngine {
         } else {
             "viewport"
         };
-        let (outcome, refs) = self.semantic_outcome(
+        let (mut outcome, mut refs) = self.semantic_outcome(
             snapshot_id,
             url.clone(),
             tab.title.clone(),
@@ -2730,14 +3308,55 @@ impl BrowserEngine {
             0,
         );
         let continuation_token = outcome.continuation.clone();
+        let mut response_refs = outcome
+            .refs
+            .iter()
+            .chain(outcome.content_refs.iter())
+            .map(|listed| listed.external.clone())
+            .collect::<HashSet<_>>();
+        let mut next_ref_index = outcome
+            .refs
+            .iter()
+            .chain(outcome.content_refs.iter())
+            .filter_map(|listed| parse_ref(&listed.external).map(|(_, idx)| idx))
+            .max()
+            .map_or(0, |idx| idx.saturating_add(1));
+        let mut context_continuations = Vec::new();
+        for page in query_context_pages {
+            let (new_refs, new_content_refs, metadata, continuations) = Self::issue_context_page(
+                snapshot_id,
+                &page,
+                &mut refs,
+                &mut next_ref_index,
+                &mut response_refs,
+                None,
+                None,
+                matches!(oopif, OopifStatus::Attached(_)),
+                oopif.frames(),
+            )?;
+            outcome.refs.extend(new_refs);
+            outcome.content_refs.extend(new_content_refs);
+            outcome.query_contexts.push(SemanticQueryContext {
+                outline: page.outline,
+                metadata,
+            });
+            context_continuations.extend(continuations);
+        }
+        let mut persisted = false;
         self.store
             .update_target(session, target_id, |stored_target| {
+                if stored_target.generation != record.generation {
+                    return;
+                }
                 if let Some(stored_tab) = stored_target.tabs.get_mut(tab_id) {
+                    if stored_tab.cdp_target_id != tab.cdp_target_id {
+                        return;
+                    }
                     let mut continuations = HashMap::new();
                     if let (Some(token), Some(offset)) = (continuation_token, next_offset) {
                         continuations.insert(
                             token,
-                            SemanticContinuation {
+                            SemanticContinuation::Matches {
                                 offset,
                                 query: query.map(str::to_owned),
                                 scope_backend_node_id,
@@ -2746,6 +3365,7 @@ impl BrowserEngine {
                             },
                         );
                     }
+                    continuations.extend(context_continuations);
                     stored_tab.snapshots.clear();
                     stored_tab.snapshots.insert(
                         snapshot_id,
@@ -2754,15 +3374,245 @@ impl BrowserEngine {
                             generation: record.generation,
                             url,
                             refs,
+                            next_ref_index,
                             semantic: Some(semantic),
                             semantic_root_identity,
+                            semantic_oopif_supported: matches!(oopif, OopifStatus::Attached(_)),
+                            semantic_oopif_frames: oopif.frames(),
                             continuations,
                         },
                     );
+                    persisted = true;
                 }
             });
+        if !persisted {
+            return Err(refuse(
+                BrowserRefusalCode::BrowserRefStale,
+                "semantic target or tab changed before snapshot commit",
+            ));
+        }
         Ok(outcome)
     }
+
+    /// Resolve bounded structural context from an already-collected semantic
+    /// snapshot. This re-proves the exact target/tab/frame but performs no page
+    /// collection and preserves the existing snapshot/ref namespace.
+    pub(crate) async fn context_tab_semantic(
+        &self,
+        session: &str,
+        target_id: &str,
+        tab_id: &str,
+        context_ref: &str,
+    ) -> Result<SemanticContextOutcome, BrowserRefusal> {
+        let _semantic_extension_guard = self.semantic_extension_gate.lock().await;
+        let resolved = self
+            .store
+            .resolve_semantic_ref(session, target_id, tab_id, context_ref)?;
+        let identity = resolved.entry.semantic_node.as_ref().ok_or_else(|| {
+            refuse(
+                BrowserRefusalCode::BrowserRefStale,
+                "context_ref has no exact stored semantic identity",
+            )
+        })?;
+        let validated = self
+            .revalidate_for_mutation(session, target_id, Some(tab_id))
+            .await?;
+        self.revalidate_semantic_context_frame(
+            session,
+            target_id,
+            tab_id,
+            &validated,
+            &identity.frame,
+        )
+        .await?;
+        let document = resolved.snapshot.semantic.as_ref().ok_or_else(|| {
+            refuse(
+                BrowserRefusalCode::BrowserRefStale,
+                "context_ref no longer has stored semantic document state",
+            )
+        })?;
+        let page = document.context(&resolved.entry).map_err(|error| {
+            let message = match error {
+                super::semantic::SemanticContextError::AnchorUnproven => {
+                    "context_ref does not identify one proven node in the stored semantic document"
+                }
+                super::semantic::SemanticContextError::AnchorAmbiguous => {
+                    "context_ref semantic ancestry is ambiguous or cyclic"
+                }
+                super::semantic::SemanticContextError::GroupUnavailable => {
+                    "context_ref has no proven enclosing structural group"
+                }
+            };
+            refuse(BrowserRefusalCode::BrowserRefStale, message)
+        })?;
+
+        let reserve = page.nodes.len().saturating_add(3);
+        let reserved_start = self.store.reserve_semantic_ref_indices(
+            session,
+            target_id,
+            tab_id,
+            resolved.snapshot.id,
+            reserve,
+        )?;
+        let mut local_refs = resolved.snapshot.refs.clone();
+        let original_indices = local_refs.keys().copied().collect::<HashSet<_>>();
+        let mut next_index = reserved_start;
+        let mut response_refs = HashSet::new();
+        let (refs, content_refs, context, continuations) = Self::issue_context_page(
+            resolved.snapshot.id,
+            &page,
+            &mut local_refs,
+            &mut next_index,
+            &mut response_refs,
+            Some(context_ref),
+            None,
+            resolved.snapshot.semantic_oopif_supported,
+            resolved.snapshot.semantic_oopif_frames,
+        )?;
+        let new_refs = local_refs
+            .into_iter()
+            .filter(|(idx, _)| !original_indices.contains(idx))
+            .collect();
+        self.store.commit_reserved_semantic_refs(
+            session,
+            target_id,
+            tab_id,
+            resolved.snapshot.id,
+            new_refs,
+            continuations,
+        )?;
+        let oopif = if resolved.snapshot.semantic_oopif_supported {
+            OopifStatus::Attached(resolved.snapshot.semantic_oopif_frames)
+        } else {
+            OopifStatus::Unsupported
+        };
+        Ok(SemanticContextOutcome {
+            snapshot_id: resolved.snapshot.id,
+            url: resolved.snapshot.url,
+            title: validated.tab.title,
+            outline: page.outline,
+            refs,
+            content_refs,
+            selected_nodes: page.selected_nodes,
+            total_nodes: page.total_nodes,
+            omissions: page.omissions,
+            oopif,
+            context,
+        })
+    }
+
+    async fn revalidate_semantic_context_frame(
+        &self,
+        session: &str,
+        target_id: &str,
+        tab_id: &str,
+        validated: &ValidatedTab,
+        frame: &FrameRef,
+    ) -> Result<(), BrowserRefusal> {
+        if frame.oopif_target_id.is_none() {
+            self.frame_session_for_mutation(session, target_id, tab_id, validated, frame)
+                .await?;
+            return Ok(());
+        }
+        let Some(identity) = &frame.identity else {
+            return Err(refuse(
+                BrowserRefusalCode::BrowserRefStale,
+                "the OOPIF context ref carries no provable frame identity",
+            ));
+        };
+        let expected_target = frame.oopif_target_id.as_deref().unwrap_or_default();
+        let children = self
+            .attached_iframe_children(&validated.conn, &validated.cdp_session)
+            .await
+            .map_err(|error| match error {
+                AttachError::Unsupported => refuse(
+                    BrowserRefusalCode::BrowserRouteUnavailable,
+                    "the browser no longer supports OOPIF context revalidation",
+                ),
+                AttachError::Failed(error) => route_err(
+                    "Target.setAutoAttach failed during context revalidation",
+                    error,
+                ),
+            })?;
+        let outcome = if let Some(child) = children
+            .iter()
+            .find(|child| child.target_id == expected_target)
+        {
+            match self
+                .local_frame_tree(&validated.conn, &child.session_id)
+                .await
+            {
+                Ok(tree) if tree.proves(identity) => Ok(()),
+                Ok(_) => Err(refuse(
+                    BrowserRefusalCode::BrowserRefStale,
+                    "the context ref's cross-process frame navigated since the snapshot",
+                )),
+                Err(FrameTreeError::Unsupported) => Err(refuse(
+                    BrowserRefusalCode::BrowserRouteUnavailable,
+                    "the browser no longer reports the OOPIF context frame tree",
+                )),
+                Err(FrameTreeError::Failed(error)) => Err(route_err(
+                    "Page.getFrameTree failed during context revalidation",
+                    error,
+                )),
+            }
+        } else {
+            Err(refuse(
+                BrowserRefusalCode::BrowserRefStale,
+                "the context ref's cross-process frame is no longer attached beneath the bound tab",
+            ))
+        };
+        let _ = validated
+            .conn
+            .call(
+                Some(&validated.cdp_session),
+                "Target.setAutoAttach",
+                json!({
+                    "autoAttach": false,
+                    "waitForDebuggerOnStart": false,
+                    "flatten": true
+                }),
+            )
+            .await;
+        for child in children {
+            let _ = validated
+                .conn
+                .call(
+                    Some(&validated.cdp_session),
+                    "Target.detachFromTarget",
+                    json!({ "sessionId": child.session_id }),
+                )
+                .await;
+        }
+        outcome
+    }
+}
+
+fn semantic_order_domain(snapshot_id: u64, frame: &FrameRef) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"cua-semantic-order-domain-v1\0");
+    digest.update(snapshot_id.to_be_bytes());
+    digest.update(frame.kind.as_str().as_bytes());
+    digest.update(b"\0");
+    if let Some(target) = &frame.oopif_target_id {
+        digest.update(target.as_bytes());
+    }
+    digest.update(b"\0");
+    if let Some(identity) = &frame.identity {
+        digest.update(identity.frame_id.as_bytes());
+        digest.update(b"\0");
+        digest.update(identity.loader_id.as_bytes());
+    }
+    let encoded = format!("{:x}", digest.finalize());
+    format!("od-{}", &encoded[..24])
+}
+
+fn semantic_snapshot_complete(
+    document_complete: bool,
+    has_next_page: bool,
+    hierarchy_complete: bool,
+) -> bool {
+    document_complete && !has_next_page && hierarchy_complete
 }
 
 /// Attribute names that make an element interactive-enough to ref.
@@ -2882,6 +3732,14 @@ fn collect_interactive(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn semantic_snapshot_completeness_includes_rendered_hierarchy() {
+        assert!(semantic_snapshot_complete(true, false, true));
+        assert!(!semantic_snapshot_complete(false, false, true));
+        assert!(!semantic_snapshot_complete(true, true, true));
+        assert!(!semantic_snapshot_complete(true, false, false));
+    }
 
     #[test]
     fn endpoint_access_policy_requires_grants_for_standalone_consumers() {

@@ -24,6 +24,7 @@ mod type_text;
 // etc.) live elsewhere under CuaDriverCore::Capture and are reached
 // through GetWindowStateTool.
 mod check_permissions;
+mod close_window;
 mod cursor_tools;
 mod get_accessibility_tree;
 mod get_config;
@@ -901,6 +902,7 @@ pub fn register_all(
     ));
     registry.register(Box::new(launch_app::LaunchAppTool));
     registry.register(Box::new(kill_app::KillAppTool));
+    registry.register(Box::new(close_window::CloseWindowTool));
     let pid_window_candidates: WindowTargetCandidates = Arc::new(pid_window_target_candidates);
     registry.register(pid_window_guarded(
         bring_to_front::BringToFrontTool,
@@ -944,10 +946,9 @@ pub fn register_all(
         scroll::ScrollTool::new(state.clone()),
         &pid_window_candidates,
     ));
-    cua_driver_core::clipboard::register_clipboard_tools(
-        registry,
-        Arc::new(clipboard::MacosClipboard::new()),
-    );
+    let clipboard: Arc<dyn cua_driver_core::clipboard::ClipboardBackend> =
+        Arc::new(clipboard::MacosClipboard::new());
+    cua_driver_core::clipboard::register_clipboard_tools(registry, clipboard.clone());
     // The standalone `screenshot` tool was removed (#1692). The pixel-grounding
     // screenshot the Claude Code computer-use compat loop relies on now comes
     // from `get_window_state` (which always returns BOTH the tree AND a
@@ -1014,7 +1015,11 @@ pub fn register_all(
         registry.approval_broker(),
         registry.protected_resource_ownership(),
     );
-    cua_driver_core::browser::register_browser_tools(&browser_engine, registry);
+    cua_driver_core::browser::tools::register_browser_tools_with_clipboard(
+        &browser_engine,
+        registry,
+        Some(clipboard),
+    );
     // Recording / replay + session-lifecycle tools are platform-independent.
     registry.register_recording_tools();
     registry.register_session_tools();

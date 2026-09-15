@@ -22,6 +22,8 @@ use std::sync::Mutex;
 use serde::Serialize;
 use uuid::Uuid;
 
+pub(crate) const MAX_SEMANTIC_CONTINUATIONS: usize = 1_024;
+
 use super::refusal::{BrowserRefusal, BrowserRefusalCode};
 use super::semantic::SemanticDocument;
 use super::types::{
@@ -118,7 +120,7 @@ pub struct FrameIdentity {
 /// - `kind != Main` ⇒ `identity` is `Some` (unprovable frames are
 ///   omitted from snapshots, never guessed).
 /// - `kind == Oopif` ⇔ `oopif_target_id` is `Some`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FrameRef {
     pub kind: FrameKind,
     /// CDP target id of the OOPIF child target (contained beneath the
@@ -163,9 +165,24 @@ pub struct RefEntry {
     /// their existing permissive behavior during the versioned migration.
     #[serde(skip_serializing)]
     pub semantic: bool,
+    /// Context-only refs are read capabilities into the stored semantic
+    /// document. They never resolve through the mutation/scope namespace.
+    #[serde(skip_serializing)]
+    pub(crate) context_only: bool,
+    /// Exact snapshot-local semantic identity. Unlike backend ids this remains
+    /// unambiguous for backend-less AX nodes and duplicate ids across frames.
+    #[serde(skip_serializing)]
+    pub(crate) semantic_node: Option<SemanticNodeIdentity>,
     /// Frame identity — internal; only the kind string is surfaced.
     #[serde(skip_serializing)]
     pub frame: FrameRef,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SemanticNodeIdentity {
+    pub(crate) ax_id: String,
+    pub(crate) document_order: usize,
+    pub(crate) frame: FrameRef,
 }
 
 #[derive(Debug, Clone)]
@@ -175,18 +192,38 @@ pub struct SnapshotRecord {
     pub url: String,
     /// index → entry; the external ref is `p<id>:<index>`.
     pub refs: HashMap<u32, RefEntry>,
+    pub(crate) next_ref_index: u32,
     pub(crate) semantic: Option<SemanticDocument>,
     pub(crate) semantic_root_identity: Option<FrameIdentity>,
+    pub(crate) semantic_oopif_supported: bool,
+    pub(crate) semantic_oopif_frames: usize,
     pub(crate) continuations: HashMap<String, SemanticContinuation>,
 }
 
 #[derive(Debug, Clone)]
-pub struct SemanticContinuation {
-    pub offset: usize,
-    pub query: Option<String>,
-    pub scope_backend_node_id: Option<i64>,
-    pub oopif_supported: bool,
-    pub oopif_frames: usize,
+pub(crate) enum SemanticContinuation {
+    Matches {
+        offset: usize,
+        query: Option<String>,
+        scope_backend_node_id: Option<i64>,
+        oopif_supported: bool,
+        oopif_frames: usize,
+    },
+    Context {
+        anchor_ref: String,
+        group: SemanticNodeIdentity,
+        group_ref: String,
+        start: usize,
+        backwards: bool,
+        oopif_supported: bool,
+        oopif_frames: usize,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedSemanticRef {
+    pub(crate) snapshot: SnapshotRecord,
+    pub(crate) entry: RefEntry,
 }
 
 #[derive(Debug, Clone)]
@@ -367,6 +404,7 @@ impl BrowserStore {
             .get(&snap)
             .filter(|snapshot| snapshot.generation == target.generation)
             .and_then(|snapshot| snapshot.refs.get(&idx))
+            .filter(|entry| !entry.context_only)
             .cloned()
             .ok_or_else(|| {
                 BrowserRefusal::new(
@@ -379,15 +417,19 @@ impl BrowserStore {
             })
     }
 
-    /// Resolve an opaque continuation within the same session, target, tab,
-    /// snapshot generation, and currently-live snapshot namespace.
-    pub fn resolve_semantic_continuation(
+    pub(crate) fn resolve_semantic_ref(
         &self,
         session: &str,
         target_id: &str,
         tab_id: &str,
-        token: &str,
-    ) -> Result<(SnapshotRecord, SemanticContinuation), BrowserRefusal> {
+        external: &str,
+    ) -> Result<ResolvedSemanticRef, BrowserRefusal> {
+        let (snap, idx) = parse_ref(external).ok_or_else(|| {
+            BrowserRefusal::new(
+                BrowserRefusalCode::BrowserRefStale,
+                "context_ref must be an issued p<snapshot>:<index> semantic ref",
+            )
+        })?;
         let target = self.get_target(session, target_id)?;
         let tab = target.tabs.get(tab_id).ok_or_else(|| {
             BrowserRefusal::new(
@@ -395,26 +437,183 @@ impl BrowserStore {
                 format!("tab {tab_id} is not known for target {target_id}"),
             )
         })?;
-        tab.snapshots
-            .values()
+        let snapshot = tab
+            .snapshots
+            .get(&snap)
+            .filter(|snapshot| {
+                snapshot.generation == target.generation && snapshot.semantic.is_some()
+            })
+            .ok_or_else(|| {
+                BrowserRefusal::new(
+                    BrowserRefusalCode::BrowserRefStale,
+                    "context_ref is stale, foreign, or does not name a semantic snapshot",
+                )
+            })?;
+        let entry = snapshot
+            .refs
+            .get(&idx)
+            .filter(|entry| entry.semantic && entry.semantic_node.is_some())
+            .ok_or_else(|| {
+                BrowserRefusal::new(
+                    BrowserRefusalCode::BrowserRefStale,
+                    "context_ref was not issued as a semantic/content ref in this snapshot",
+                )
+            })?;
+        Ok(ResolvedSemanticRef {
+            snapshot: snapshot.clone(),
+            entry: entry.clone(),
+        })
+    }
+
+    /// Resolve an opaque continuation within the same session, target, tab,
+    /// snapshot generation, and currently-live snapshot namespace.
+    pub(crate) fn take_semantic_continuation(
+        &self,
+        session: &str,
+        target_id: &str,
+        tab_id: &str,
+        token: &str,
+    ) -> Result<(SnapshotRecord, SemanticContinuation), BrowserRefusal> {
+        let mut store = self.inner.lock().unwrap();
+        let target = store
+            .get_mut(session)
+            .and_then(|session| session.targets.get_mut(target_id))
+            .ok_or_else(|| {
+                BrowserRefusal::new(
+                    BrowserRefusalCode::BrowserBindingStale,
+                    "the continuation target is not live in this session",
+                )
+            })?;
+        let generation = target.generation;
+        let tab = target.tabs.get_mut(tab_id).ok_or_else(|| {
+            BrowserRefusal::new(
+                BrowserRefusalCode::BrowserTabNotFound,
+                format!("tab {tab_id} is not known for target {target_id}"),
+            )
+        })?;
+        let snapshot = tab
+            .snapshots
+            .values_mut()
             .find(|snapshot| {
-                snapshot.generation == target.generation
+                snapshot.generation == generation
                     && snapshot.semantic.is_some()
                     && snapshot.continuations.contains_key(token)
-            })
-            .and_then(|snapshot| {
-                snapshot
-                    .continuations
-                    .get(token)
-                    .cloned()
-                    .map(|continuation| (snapshot.clone(), continuation))
             })
             .ok_or_else(|| {
                 BrowserRefusal::new(
                     BrowserRefusalCode::BrowserRefStale,
                     "the semantic continuation is stale or does not belong to this session and tab",
                 )
-            })
+            })?;
+        let continuation = snapshot
+            .continuations
+            .remove(token)
+            .expect("located continuation must exist");
+        Ok((snapshot.clone(), continuation))
+    }
+
+    pub(crate) fn reserve_semantic_ref_indices(
+        &self,
+        session: &str,
+        target_id: &str,
+        tab_id: &str,
+        snapshot_id: u64,
+        count: usize,
+    ) -> Result<u32, BrowserRefusal> {
+        let mut store = self.inner.lock().unwrap();
+        let target = store
+            .get_mut(session)
+            .and_then(|session| session.targets.get_mut(target_id))
+            .ok_or_else(|| {
+                BrowserRefusal::new(
+                    BrowserRefusalCode::BrowserBindingStale,
+                    "semantic target is no longer live",
+                )
+            })?;
+        let generation = target.generation;
+        let snapshot = target
+            .tabs
+            .get_mut(tab_id)
+            .and_then(|tab| tab.snapshots.get_mut(&snapshot_id))
+            .filter(|snapshot| snapshot.generation == generation && snapshot.semantic.is_some())
+            .ok_or_else(|| {
+                BrowserRefusal::new(
+                    BrowserRefusalCode::BrowserRefStale,
+                    "semantic snapshot is no longer live",
+                )
+            })?;
+        let count = u32::try_from(count).map_err(|_| {
+            BrowserRefusal::new(
+                BrowserRefusalCode::BrowserRefStale,
+                "semantic ref reservation is too large",
+            )
+        })?;
+        let start = snapshot.next_ref_index;
+        snapshot.next_ref_index = start.checked_add(count).ok_or_else(|| {
+            BrowserRefusal::new(
+                BrowserRefusalCode::BrowserRefStale,
+                "semantic ref namespace is exhausted",
+            )
+        })?;
+        Ok(start)
+    }
+
+    pub(crate) fn commit_reserved_semantic_refs(
+        &self,
+        session: &str,
+        target_id: &str,
+        tab_id: &str,
+        snapshot_id: u64,
+        refs: HashMap<u32, RefEntry>,
+        continuations: Vec<(String, SemanticContinuation)>,
+    ) -> Result<(), BrowserRefusal> {
+        let mut store = self.inner.lock().unwrap();
+        let target = store
+            .get_mut(session)
+            .and_then(|session| session.targets.get_mut(target_id))
+            .ok_or_else(|| {
+                BrowserRefusal::new(
+                    BrowserRefusalCode::BrowserBindingStale,
+                    "semantic target is no longer live",
+                )
+            })?;
+        let generation = target.generation;
+        let snapshot = target
+            .tabs
+            .get_mut(tab_id)
+            .and_then(|tab| tab.snapshots.get_mut(&snapshot_id))
+            .filter(|snapshot| snapshot.generation == generation && snapshot.semantic.is_some())
+            .ok_or_else(|| {
+                BrowserRefusal::new(
+                    BrowserRefusalCode::BrowserRefStale,
+                    "semantic snapshot changed before continuation commit",
+                )
+            })?;
+        if snapshot
+            .continuations
+            .len()
+            .checked_add(continuations.len())
+            .is_none_or(|count| count > MAX_SEMANTIC_CONTINUATIONS)
+        {
+            return Err(BrowserRefusal::new(
+                BrowserRefusalCode::BrowserRefStale,
+                "the semantic snapshot continuation capacity is exhausted",
+            ));
+        }
+        if refs
+            .keys()
+            .any(|idx| *idx >= snapshot.next_ref_index || snapshot.refs.contains_key(idx))
+        {
+            return Err(BrowserRefusal::new(
+                BrowserRefusalCode::BrowserRefStale,
+                "reserved semantic ref range is no longer exclusive",
+            ));
+        }
+        snapshot.refs.extend(refs);
+        for (token, continuation) in continuations {
+            snapshot.continuations.insert(token, continuation);
+        }
+        Ok(())
     }
 
     /// Drop every snapshot of one tab (navigation invalidates refs).
@@ -509,6 +708,8 @@ mod tests {
                     actions: Vec::new(),
                     visibility: None,
                     semantic: false,
+                    context_only: false,
+                    semantic_node: None,
                     frame: FrameRef {
                         kind: FrameKind::Main,
                         oopif_target_id: None,
@@ -535,8 +736,11 @@ mod tests {
                             generation: 0,
                             url: "https://example.test".into(),
                             refs,
+                            next_ref_index: 1,
                             semantic: None,
                             semantic_root_identity: None,
+                            semantic_oopif_supported: false,
+                            semantic_oopif_frames: 0,
                             continuations: HashMap::new(),
                         },
                     )]),
@@ -642,6 +846,80 @@ mod tests {
         assert_eq!(store.target_count("sess-a"), 0);
         let err = store.resolve_ref("sess-a", &tid, &tab, &ext).unwrap_err();
         assert_eq!(err.code, BrowserRefusalCode::BrowserBindingStale);
+    }
+
+    #[test]
+    fn semantic_continuation_capacity_refuses_atomically_without_eviction() {
+        let (store, tid, tab, ext) = store_with_ref();
+        let (snapshot_id, _) = parse_ref(&ext).unwrap();
+        store.update_target("sess-a", &tid, |target| {
+            let snapshot = target
+                .tabs
+                .get_mut(&tab)
+                .unwrap()
+                .snapshots
+                .get_mut(&snapshot_id)
+                .unwrap();
+            snapshot.semantic = Some(SemanticDocument::default());
+            let entry = snapshot.refs.get_mut(&0).unwrap();
+            entry.semantic = true;
+            entry.semantic_node = Some(SemanticNodeIdentity {
+                ax_id: "root".into(),
+                document_order: 0,
+                frame: entry.frame.clone(),
+            });
+        });
+        let continuations = (0..MAX_SEMANTIC_CONTINUATIONS)
+            .map(|idx| {
+                (
+                    format!("bc-{idx}"),
+                    SemanticContinuation::Matches {
+                        offset: idx,
+                        query: None,
+                        scope_backend_node_id: None,
+                        oopif_supported: false,
+                        oopif_frames: 0,
+                    },
+                )
+            })
+            .collect();
+        store
+            .commit_reserved_semantic_refs(
+                "sess-a",
+                &tid,
+                &tab,
+                snapshot_id,
+                HashMap::new(),
+                continuations,
+            )
+            .unwrap();
+
+        let error = store
+            .commit_reserved_semantic_refs(
+                "sess-a",
+                &tid,
+                &tab,
+                snapshot_id,
+                HashMap::new(),
+                vec![(
+                    "bc-overflow".into(),
+                    SemanticContinuation::Matches {
+                        offset: usize::MAX,
+                        query: None,
+                        scope_backend_node_id: None,
+                        oopif_supported: false,
+                        oopif_frames: 0,
+                    },
+                )],
+            )
+            .unwrap_err();
+        assert_eq!(error.code, BrowserRefusalCode::BrowserRefStale);
+        assert!(store
+            .take_semantic_continuation("sess-a", &tid, &tab, "bc-0")
+            .is_ok());
+        assert!(store
+            .take_semantic_continuation("sess-a", &tid, &tab, "bc-overflow")
+            .is_err());
     }
 
     #[test]

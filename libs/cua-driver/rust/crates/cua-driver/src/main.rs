@@ -38,6 +38,22 @@ mod version_check;
 
 use std::sync::Arc;
 
+fn print_opensky_identity_if_requested() -> bool {
+    if std::env::args().skip(1).collect::<Vec<_>>() != ["--opensky-driver-identity"] {
+        return false;
+    }
+    println!(
+        "{}",
+        serde_json::json!({
+            "product": "opensky-driver",
+            "protocolVersion": 1,
+            "version": env!("CARGO_PKG_VERSION"),
+            "source": option_env!("CUA_DRIVER_SOURCE_SHA"),
+        })
+    );
+    true
+}
+
 fn init_logging() {
     use tracing_subscriber::EnvFilter;
     tracing_subscriber::fmt()
@@ -458,6 +474,9 @@ mod mcp_runtime_selection_tests {
 
 #[cfg(target_os = "macos")]
 fn main() {
+    if print_opensky_identity_if_requested() {
+        return;
+    }
     if let Some(code) = platform_macos::permissions::gate::run_permission_probe_if_requested() {
         std::process::exit(code);
     }
@@ -882,6 +901,9 @@ fn main() {
 
 #[cfg(not(target_os = "macos"))]
 fn main() -> anyhow::Result<()> {
+    if print_opensky_identity_if_requested() {
+        return Ok(());
+    }
     if let Some(code) = history_runtime::run_offline_purge_if_requested() {
         std::process::exit(code);
     }

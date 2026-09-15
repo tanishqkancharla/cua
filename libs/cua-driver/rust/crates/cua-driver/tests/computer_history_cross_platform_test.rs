@@ -42,7 +42,7 @@ fn history_root() -> PathBuf {
     #[cfg(target_os = "windows")]
     {
         return PathBuf::from(std::env::var_os("LOCALAPPDATA").expect("LOCALAPPDATA must be set"))
-            .join("cua-driver-local/computer-history");
+            .join("opensky-driver/computer-history");
     }
     #[cfg(target_os = "linux")]
     {
@@ -52,7 +52,7 @@ fn history_root() -> PathBuf {
                 PathBuf::from(std::env::var_os("HOME").expect("HOME must be set"))
                     .join(".local/state")
             });
-        state.join("cua-driver-local/computer-history")
+        state.join("opensky-driver/computer-history")
     }
 }
 
@@ -446,13 +446,13 @@ fn key_references() -> Vec<String> {
     #[cfg(target_os = "windows")]
     {
         platform_windows::history::WindowsCredentialKeyProvider
-            .references("cua-driver-local")
+            .references("opensky-driver")
             .expect("inspect Windows Credential Manager history key")
     }
     #[cfg(target_os = "linux")]
     {
         platform_linux::history::LinuxSecretServiceKeyProvider
-            .references("cua-driver-local")
+            .references("opensky-driver")
             .expect("inspect Secret Service history key")
     }
 }

@@ -70,16 +70,7 @@ impl PipeResponse {
 
 #[cfg(target_os = "windows")]
 fn pipe_path() -> &'static str {
-    let is_local = std::env::current_exe()
-        .ok()
-        .and_then(|path| path.file_name().map(|name| name.to_owned()))
-        .and_then(|name| name.to_str().map(str::to_owned))
-        .is_some_and(|name| name.eq_ignore_ascii_case("cua-driver-uia-local.exe"));
-    if is_local {
-        r"\\.\pipe\cua-driver-local-uia"
-    } else {
-        r"\\.\pipe\cua-driver-uia"
-    }
+    r"\\.\pipe\opensky-driver-uia"
 }
 
 #[cfg(target_os = "windows")]

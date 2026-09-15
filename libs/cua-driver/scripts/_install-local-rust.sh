@@ -24,14 +24,14 @@
 #
 # Linux layout produced (matches install.sh):
 #
-#   ${CUA_DRIVER_LOCAL_HOME:-$HOME/.cua-driver-local}/packages/
-#       releases/<version>-local-<config>-<target>/cua-driver-local
-#       current/cua-driver-local
-#   ${CUA_DRIVER_LOCAL_INSTALL_DIR:-$HOME/.local/bin}/cua-driver-local
+#   ${CUA_DRIVER_LOCAL_HOME:-$HOME/.opensky-driver}/packages/
+#       releases/<version>-local-<config>-<target>/opensky-driver
+#       current/opensky-driver
+#   ${CUA_DRIVER_LOCAL_INSTALL_DIR:-$HOME/.local/bin}/opensky-driver
 #
 # macOS layout produced:
-#   /Applications/CuaDriverLocal.app/Contents/MacOS/cua-driver-local
-#   $HOME/.local/bin/cua-driver-local -> .../CuaDriverLocal.app/Contents/MacOS/cua-driver-local
+#   /Applications/OpenSkyDriver.app/Contents/MacOS/opensky-driver
+#   $HOME/.local/bin/opensky-driver -> .../OpenSkyDriver.app/Contents/MacOS/opensky-driver
 #
 # The version string carries `-local-debug` / `-local-release` so it
 # never collides with a real release dir and is trivial to GC.
@@ -126,11 +126,11 @@ while [ "$#" -gt 0 ]; do
             echo "                  macOS: LaunchAgent under ~/Library/LaunchAgents"
             echo "                  Linux: systemd --user unit"
             echo "                On macOS this also fixes TCC: a launchd-started daemon"
-            echo "                is attributed to com.trycua.driver.local (not your terminal),"
+            echo "                is attributed to com.opensky.driver (not your terminal),"
             echo "                so you grant Accessibility + Screen Recording once and"
-            echo "                every cua-driver-local call/mcp routes through it correctly."
+            echo "                every opensky-driver call/mcp routes through it correctly."
             echo "  --bin-dir <path>"
-            echo "                Install the visible cua-driver-local symlink to <path>"
+            echo "                Install the visible opensky-driver symlink to <path>"
             echo "                instead of ~/.local/bin. Must be an absolute path; takes"
             echo "                precedence over CUA_DRIVER_LOCAL_INSTALL_DIR."
             echo "  --require-stable-signing"
@@ -162,7 +162,7 @@ case "$OS" in
     *)      echo "${RED}Unsupported OS: $OS${NORMAL}"; exit 1 ;;
 esac
 
-HOME_DIR="${CUA_DRIVER_LOCAL_HOME:-$HOME/.cua-driver-local}"
+HOME_DIR="${CUA_DRIVER_LOCAL_HOME:-$HOME/.opensky-driver}"
 BIN_DIR="${BIN_DIR_OVERRIDE:-${CUA_DRIVER_LOCAL_INSTALL_DIR:-$HOME/.local/bin}}"
 # The symlink is created after this script cds into the Cargo workspace, so a
 # relative path would silently land inside rust/ — and uninstall-local.sh
@@ -186,7 +186,7 @@ echo "  source:  ${BOLD}$REPO_ROOT${NORMAL}"
 echo "  sha:     ${BOLD}$CUA_DRIVER_SOURCE_SHA${NORMAL}"
 echo "  config:  ${BOLD}$BUILD_CONFIG${NORMAL}"
 echo "  target:  ${BOLD}$TARGET_TRIPLE${NORMAL}"
-echo "  bin:     ${BOLD}$BIN_DIR/cua-driver-local${NORMAL}"
+echo "  bin:     ${BOLD}$BIN_DIR/opensky-driver${NORMAL}"
 echo "  current: ${BOLD}$CURRENT_LINK${NORMAL}"
 echo ""
 
@@ -258,12 +258,12 @@ mkdir -p "$VERSIONED_DIR"
 # destination.
 #
 # A plain `cp` opens the destination with O_TRUNC and writes in place. When a
-# previous cua-driver-local is still running out of that exact path — the
+# previous opensky-driver is still running out of that exact path — the
 # common case, since the version tag is stable per config, so every rebuild
 # targets the same file — Linux refuses the open with ETXTBSY and the install
 # dies mid-stage:
 #
-#   cp: cannot create regular file '.../cua-driver-local': Text file busy
+#   cp: cannot create regular file '.../opensky-driver': Text file busy
 #
 # The daemon stop further below cannot prevent this: it runs after the swap,
 # and a manually launched `serve` is not always reachable by it anyway.
@@ -279,7 +279,7 @@ stage_binary() {
     chmod +x "$stage_tmp"
     mv -f "$stage_tmp" "$stage_dest"
 }
-stage_binary "$BUILT_BINARY" "$VERSIONED_DIR/cua-driver-local"
+stage_binary "$BUILT_BINARY" "$VERSIONED_DIR/opensky-driver"
 stage_binary "$BUILT_THEME_BINARY" "$VERSIONED_DIR/cua-cursor-theme"
 
 # Re-sign with a fresh ad-hoc signature.
@@ -295,7 +295,7 @@ stage_binary "$BUILT_THEME_BINARY" "$VERSIONED_DIR/cua-cursor-theme"
 # accepts. Cheap (~50ms on a 40MB binary). macOS-only — no-op on Linux.
 if [ "$OS" = "Darwin" ]; then
     if command -v codesign >/dev/null 2>&1; then
-        codesign --force --sign - "$VERSIONED_DIR/cua-driver-local" 2>/dev/null \
+        codesign --force --sign - "$VERSIONED_DIR/opensky-driver" 2>/dev/null \
             || echo "${YELLOW}warning: codesign --force --sign - failed; first run may fail with SIGKILL on macOS 26+${NORMAL}" >&2
         codesign --force --sign - "$VERSIONED_DIR/cua-cursor-theme" 2>/dev/null \
             || echo "${YELLOW}warning: cursor-theme sidecar signing failed${NORMAL}" >&2
@@ -364,10 +364,10 @@ echo ""
 # shellcheck source=_local-signing.sh
 . "$SCRIPT_DIR/_local-signing.sh"
 
-# --- macOS: wrap the binary in CuaDriverLocal.app for a stable TCC identity ---
+# --- macOS: wrap the binary in OpenSkyDriver.app for a stable TCC identity ---
 #
 # TCC keys Accessibility / Screen-Recording grants on the bundle
-# identifier (com.trycua.driver.local), not the bare executable path. A loose
+# identifier (com.opensky.driver), not the bare executable path. A loose
 # binary gets grants attributed to its ad-hoc cdhash, which changes on
 # every rebuild — so permissions silently reset and never appear cleanly
 # under System Settings. Mirror the production path (install.sh) + the CD
@@ -375,20 +375,20 @@ echo ""
 # CuaDriverBundle skeleton, install the bundle to /Applications, and point
 # the visible bin at the binary INSIDE the bundle. Linux/Windows have no
 # .app concept and keep the bare-binary symlink below.
-APP_DEST="/Applications/CuaDriverLocal.app"
+APP_DEST="/Applications/OpenSkyDriver.app"
 if [ "$OS" = "Darwin" ]; then
     SKELETON="$REPO_ROOT/scripts/CuaDriverBundle"
     if [ ! -d "$SKELETON/Contents" ]; then
         echo "${RED}Error: bundle skeleton missing at $SKELETON${NORMAL}" >&2
         exit 1
     fi
-    APP_STAGE="$VERSIONED_DIR/CuaDriverLocal.app"
+    APP_STAGE="$VERSIONED_DIR/OpenSkyDriver.app"
     rm -rf "$APP_STAGE"
     mkdir -p "$APP_STAGE/Contents/MacOS"
     cp -R "$SKELETON/Contents/." "$APP_STAGE/Contents/"
-    cp "$VERSIONED_DIR/cua-driver-local" "$APP_STAGE/Contents/MacOS/cua-driver-local"
+    cp "$VERSIONED_DIR/opensky-driver" "$APP_STAGE/Contents/MacOS/opensky-driver"
     cp "$VERSIONED_DIR/cua-cursor-theme" "$APP_STAGE/Contents/MacOS/cua-cursor-theme"
-    chmod +x "$APP_STAGE/Contents/MacOS/cua-driver-local"
+    chmod +x "$APP_STAGE/Contents/MacOS/opensky-driver"
     chmod +x "$APP_STAGE/Contents/MacOS/cua-cursor-theme"
     rm -f "$APP_STAGE/Contents/MacOS/.gitkeep"
     PREVIOUS_REQUIREMENT=""
@@ -401,13 +401,13 @@ if [ "$OS" = "Darwin" ]; then
             "$APP_STAGE/Contents/Info.plist" 2>/dev/null || true
         plutil -replace CFBundleVersion -string "$VERSION_TAG" \
             "$APP_STAGE/Contents/Info.plist" 2>/dev/null || true
-        plutil -replace CFBundleExecutable -string "cua-driver-local" \
+        plutil -replace CFBundleExecutable -string "opensky-driver" \
             "$APP_STAGE/Contents/Info.plist"
-        plutil -replace CFBundleIdentifier -string "com.trycua.driver.local" \
+        plutil -replace CFBundleIdentifier -string "com.opensky.driver" \
             "$APP_STAGE/Contents/Info.plist"
-        plutil -replace CFBundleName -string "Cua Driver Local" \
+        plutil -replace CFBundleName -string "OpenSky Driver" \
             "$APP_STAGE/Contents/Info.plist"
-        plutil -replace CFBundleDisplayName -string "Cua Driver Local" \
+        plutil -replace CFBundleDisplayName -string "OpenSky Driver" \
             "$APP_STAGE/Contents/Info.plist"
     fi
     # Sign the staged bundle before touching the live installation. Required on
@@ -420,13 +420,13 @@ if [ "$OS" = "Darwin" ]; then
             exit 1
         fi
         if ! codesign --verify --deep --strict "$APP_STAGE" 2>/dev/null; then
-            echo "${RED}Error: staged CuaDriverLocal.app failed signature verification; live installation was not changed.${NORMAL}" >&2
+            echo "${RED}Error: staged OpenSkyDriver.app failed signature verification; live installation was not changed.${NORMAL}" >&2
             exit 1
         fi
         STAGED_REQUIREMENT="$(designated_requirement "$APP_STAGE")"
         STAGED_SIGNING_CLASS="$(classify_designated_requirement "$STAGED_REQUIREMENT")"
     else
-        echo "${RED}Error: codesign is required to install CuaDriverLocal.app safely.${NORMAL}" >&2
+        echo "${RED}Error: codesign is required to install OpenSkyDriver.app safely.${NORMAL}" >&2
         exit 1
     fi
 
@@ -456,7 +456,7 @@ if [ "$OS" = "Darwin" ]; then
         if [ -d "$APP_BACKUP" ]; then
             mv "$APP_BACKUP" "$APP_DEST"
         fi
-        echo "${RED}Error: installed CuaDriverLocal.app did not preserve its verified signing identity; restored the previous bundle.${NORMAL}" >&2
+        echo "${RED}Error: installed OpenSkyDriver.app did not preserve its verified signing identity; restored the previous bundle.${NORMAL}" >&2
         exit 1
     fi
     echo "${GREEN}installed $APP_DEST${NORMAL}"
@@ -469,8 +469,8 @@ if [ "$OS" = "Darwin" ]; then
     # --- Force LaunchServices registration of the freshly-copied bundle ----
     #
     # `ditto` drops the bundle on disk, but LaunchServices registers the new
-    # com.trycua.driver.local identity ASYNCHRONOUSLY (seconds later). Until it
-    # does, `open -n -g -a CuaDriverLocal` (what `permissions grant` / MCP use to
+    # com.opensky.driver identity ASYNCHRONOUSLY (seconds later). Until it
+    # does, `open -n -g -a OpenSkyDriver` (what `permissions grant` / MCP use to
     # launch the daemon) fails with -1728. A synchronous `lsregister -f` closes
     # that race so both the reset and the first launch resolve the bundle id.
     LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister"
@@ -483,19 +483,19 @@ fi
 # --- Visible-bin symlink ------------------------------------------------
 #
 # On macOS point at the binary INSIDE the installed bundle so the process
-# that actually runs carries the com.trycua.driver.local identity (TCC keys
+# that actually runs carries the com.opensky.driver identity (TCC keys
 # grants on it). On Linux/Windows point at the versioned-store binary.
 mkdir -p "$BIN_DIR"
 if [ "$OS" = "Darwin" ]; then
-    BIN_TARGET="$APP_DEST/Contents/MacOS/cua-driver-local"
+    BIN_TARGET="$APP_DEST/Contents/MacOS/opensky-driver"
 else
-    BIN_TARGET="$CURRENT_LINK/cua-driver-local"
+    BIN_TARGET="$CURRENT_LINK/opensky-driver"
 fi
-ln -sf "$BIN_TARGET" "$BIN_DIR/cua-driver-local"
-echo "${GREEN}$BIN_DIR/cua-driver-local -> $BIN_TARGET${NORMAL}"
+ln -sf "$BIN_TARGET" "$BIN_DIR/opensky-driver"
+echo "${GREEN}$BIN_DIR/opensky-driver -> $BIN_TARGET${NORMAL}"
 echo ""
 
-INSTALLED_BIN="$BIN_DIR/cua-driver-local"
+INSTALLED_BIN="$BIN_DIR/opensky-driver"
 
 # --- Stop any pre-swap cua-driver daemons ------------------------------
 #
@@ -506,17 +506,17 @@ INSTALLED_BIN="$BIN_DIR/cua-driver-local"
 # fails the install. Survivors (rare on Unix — `pkill` reaches all
 # user-owned procs without elevation) get a yellow hint.
 #
-# NOTE: do not use `pkill -x cua-driver-local`. `-x` compares against the
+# NOTE: do not use `pkill -x opensky-driver`. `-x` compares against the
 # kernel's truncated process name — 15 chars on Linux (`comm`) — and
-# `cua-driver-local` is 16, so on Linux it silently matched nothing and
+# `opensky-driver` is 16, so on Linux it silently matched nothing and
 # every pre-swap daemon survived the install. Match argv[0] instead, and
 # anchor it: an unanchored `-f` pattern also matches the launcher shells
 # whose script *text* contains the daemon path, killing the surrounding
 # session rather than the daemon.
 if [ "$OS" = "Darwin" ]; then
-    launchctl unload "$HOME/Library/LaunchAgents/com.trycua.cua-driver-local.plist" 2>/dev/null || true
+    launchctl unload "$HOME/Library/LaunchAgents/com.opensky.driver.plist" 2>/dev/null || true
 elif [ "$OS" = "Linux" ] && command -v systemctl >/dev/null 2>&1; then
-    systemctl --user stop cua-driver-local.service >/dev/null 2>&1 || true
+    systemctl --user stop opensky-driver.service >/dev/null 2>&1 || true
 fi
 for _daemon_bin in "$INSTALLED_BIN" "$BIN_TARGET"; do
     [ -n "$_daemon_bin" ] || continue
@@ -544,7 +544,7 @@ echo ""
 
 if [ "$INSTALL_AUTOSTART" = true ]; then
     if [ "$OS" = "Darwin" ]; then
-        PLIST_PATH="$HOME/Library/LaunchAgents/com.trycua.cua-driver-local.plist"
+        PLIST_PATH="$HOME/Library/LaunchAgents/com.opensky.driver.plist"
         echo "${BOLD}Writing LaunchAgent → $PLIST_PATH${NORMAL}"
         mkdir -p "$(dirname "$PLIST_PATH")"
         cat >"$PLIST_PATH" <<EOF
@@ -552,7 +552,7 @@ if [ "$INSTALL_AUTOSTART" = true ]; then
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>com.trycua.cua-driver-local</string>
+  <key>Label</key><string>com.opensky.driver</string>
   <key>ProgramArguments</key>
   <array>
     <string>$INSTALLED_BIN</string>
@@ -569,12 +569,12 @@ EOF
         launchctl load "$PLIST_PATH"
         echo "${GREEN}Loaded.${NORMAL} Manage with launchctl load / unload \"$PLIST_PATH\"."
     elif [ "$OS" = "Linux" ]; then
-        UNIT_PATH="$HOME/.config/systemd/user/cua-driver-local.service"
+        UNIT_PATH="$HOME/.config/systemd/user/opensky-driver.service"
         echo "${BOLD}Writing systemd user unit → $UNIT_PATH${NORMAL}"
         mkdir -p "$(dirname "$UNIT_PATH")"
         cat >"$UNIT_PATH" <<EOF
 [Unit]
-Description=cua-driver-local serve daemon
+Description=opensky-driver serve daemon
 After=graphical-session.target
 
 [Service]
@@ -586,8 +586,8 @@ RestartSec=2
 WantedBy=default.target
 EOF
         systemctl --user daemon-reload
-        systemctl --user enable --now cua-driver-local.service
-        echo "${GREEN}Enabled.${NORMAL} Manage with systemctl --user {start|stop|status} cua-driver-local."
+        systemctl --user enable --now opensky-driver.service
+        echo "${GREEN}Enabled.${NORMAL} Manage with systemctl --user {start|stop|status} opensky-driver."
     fi
     echo ""
 fi
@@ -610,34 +610,19 @@ else
     # Repo layout changed or running from an unexpected location — fall
     # back to one-line essentials so users still know what to do next.
     echo "Next steps: $INSTALLED_BIN --version  |  $INSTALLED_BIN mcp-config  |  $INSTALLED_BIN skills install"
-    echo "Docs: https://github.com/trycua/cua/tree/main/libs/cua-driver/rust"
+    echo "Docs: https://github.com/tanishqkancharla/cua"
 fi
 
-# The local/release identity split deliberately stopped source installs from
-# creating or repairing the published `cua-driver` name. Make the resulting
-# migration state explicit when only the local product is present: otherwise
-# an existing MCP client can keep launching a now-missing release path even
-# though this install completed successfully. Do not create a compatibility
-# symlink here; that would collapse the separate product identities again.
-RELEASE_BIN="$BIN_DIR/cua-driver"
-if [ ! -e "$RELEASE_BIN" ]; then
-    echo ""
-    echo "${YELLOW}Migration note: the published cua-driver CLI is not installed at $RELEASE_BIN.${NORMAL}" >&2
-    echo "  Existing MCP clients configured for 'cua-driver' will not use this local build." >&2
-    echo "  To configure Codex for the local build, run:" >&2
-    echo "    $INSTALLED_BIN mcp-config --client codex" >&2
-    echo "  To restore the published product instead, run:" >&2
-    echo '    /bin/bash -c "$(curl -fsSL https://cua.ai/driver/install.sh)"' >&2
-fi
+
 
 # OS-specific autostart hint (kept inline; per-shell natural location).
 if [ "$INSTALL_AUTOSTART" != true ]; then
     echo ""
     if [ "$OS" = "Darwin" ]; then
         echo "Auto-start (recommended on macOS): re-run with --autostart to register a LaunchAgent."
-        echo "  A launchd-started daemon is attributed to com.trycua.driver.local (not your terminal),"
-        echo "  so permission prompts say \"Cua Driver Local\" and grants stick — grant Accessibility +"
-        echo "  Screen Recording once and every cua-driver-local call/mcp routes through it correctly."
+        echo "  A launchd-started daemon is attributed to com.opensky.driver (not your terminal),"
+        echo "  so permission prompts say \"OpenSky Driver\" and grants stick — grant Accessibility +"
+        echo "  Screen Recording once and every opensky-driver call/mcp routes through it correctly."
         echo "  (Without it, a prompt raised from a terminal attributes to the terminal instead.)"
     else
         echo "Auto-start (optional): re-run with --autostart to register a systemd user unit."

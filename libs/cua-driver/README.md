@@ -1,3 +1,5 @@
+> This fork ships **OpenSky Driver**. Use the [fork installation instructions](../../README.md). Cua release links below are retained upstream documentation.
+
 # Cua Driver
 
 Background computer-use driver for any agents. Speaks MCP over stdio; drives native macOS apps without stealing focus.

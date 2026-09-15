@@ -1141,7 +1141,7 @@ mod tests {
         EmbeddedDriverHostOptions {
             binary_path: std::env::current_dir()
                 .expect("test working directory")
-                .join("cua-driver")
+                .join("opensky-driver")
                 .to_string_lossy()
                 .into_owned(),
             host_bundle_id: "com.example.host".into(),

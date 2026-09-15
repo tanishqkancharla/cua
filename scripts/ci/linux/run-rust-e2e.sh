@@ -217,7 +217,7 @@ run_computer_history_gate() {
   echo "[HISTORY] Installing the exact candidate into an isolated local namespace"
   bash "${DRIVER_ROOT}/scripts/install-local.sh" --release \
     2>&1 | tee "${ARTIFACT_DIR}/history-install-local.log"
-  export CUA_E2E_INSTALLED_DRIVER_BIN="${history_home}/packages/current/cua-driver-local"
+  export CUA_E2E_INSTALLED_DRIVER_BIN="${history_home}/packages/current/opensky-driver"
   export CUA_E2E_HISTORY_DAEMON_SOCKET="${history_socket}"
   if [[ ! -x "${CUA_E2E_INSTALLED_DRIVER_BIN}" ]]; then
     echo "installed history driver is missing: ${CUA_E2E_INSTALLED_DRIVER_BIN}" >&2

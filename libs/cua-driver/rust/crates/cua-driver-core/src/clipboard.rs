@@ -14,10 +14,17 @@ use crate::{
     tool_args::parse_typed_input,
 };
 
+pub static CLIPBOARD_WRITE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 pub trait ClipboardBackend: Send + Sync {
     fn available_formats(&self) -> Result<Vec<String>, String>;
     fn read_text(&self) -> Result<Option<String>, String>;
     fn write_text(&self, text: String) -> Result<(), String>;
+    /// Write the formats consumed by a real paste. Browser paste leaves them on
+    /// the clipboard, matching normal browser clipboard behavior.
+    fn write_paste(&self, _text: String, _html: Option<String>) -> Result<(), String> {
+        Err("formatted paste is unavailable on this clipboard backend".into())
+    }
     fn write_image(&self, absolute_path: &str) -> Result<(), String>;
     fn write_file_url(&self, absolute_path: &str) -> Result<(), String>;
 }
@@ -135,6 +142,7 @@ impl Tool for ClipboardWriteTool {
             );
         }
 
+        let _clipboard = CLIPBOARD_WRITE_LOCK.lock().await;
         let backend = self.backend.clone();
         let result = tokio::task::spawn_blocking(move || {
             let written_type = if let Some(text) = input.text {

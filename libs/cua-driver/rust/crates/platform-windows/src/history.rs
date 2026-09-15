@@ -204,7 +204,7 @@ mod tests {
     fn credential_namespace_is_strict_and_separated() {
         assert_ne!(
             WindowsCredentialKeyProvider::service("cua-driver").unwrap(),
-            WindowsCredentialKeyProvider::service("cua-driver-local").unwrap()
+            WindowsCredentialKeyProvider::service("opensky-driver").unwrap()
         );
         assert!(WindowsCredentialKeyProvider::service("../escape").is_err());
     }
@@ -230,7 +230,7 @@ mod tests {
     #[test]
     #[ignore = "mutates uniquely named Windows Credential Manager items; run in native release qualification"]
     fn credential_manager_key_lifecycle_is_isolated_corruptible_and_destroyable() {
-        let namespace = format!("cua-driver-local-test-{}", uuid::Uuid::new_v4().simple());
+        let namespace = format!("opensky-driver-test-{}", uuid::Uuid::new_v4().simple());
         let other_namespace = format!("{namespace}-other");
         let provider = WindowsCredentialKeyProvider;
         assert!(provider.references(&namespace).unwrap().is_empty());

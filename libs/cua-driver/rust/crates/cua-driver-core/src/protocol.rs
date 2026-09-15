@@ -332,7 +332,7 @@ pub fn initialize_result() -> Value {
     serde_json::json!({
         "protocolVersion": "2025-06-18",
         "capabilities": { "tools": {} },
-        "serverInfo": { "name": "cua-driver", "version": env!("CARGO_PKG_VERSION") },
+        "serverInfo": { "name": "opensky-driver", "version": env!("CARGO_PKG_VERSION") },
         "instructions": agent_instructions()
     })
 }
@@ -357,7 +357,7 @@ fn agent_instructions() -> String {
     } else if cfg!(target_os = "windows") {
         (
             "UIA (UI Automation)",
-            "WINDOWS.md (UIA tree, UWP / ApplicationFrameHost hosting, Session 0 isolation)",
+            "WINDOWS.md (UIA, UWP/ApplicationFrameHost, Session 0 isolation)",
         )
     } else {
         (
@@ -373,7 +373,7 @@ Before UI work, classify the desired outcome. For non-GUI outcomes, prefer a cli
 
 On continuation/recent-work, when available, call `history_status`; if ready, make one bounded initial `history_query` before broad discovery; otherwise continue.
 
-For app/window outcomes, use the narrowest semantic Cua route first: `set_window_frame` plus `list_windows` readback for geometry, typed browser tools for supported page content, and clipboard tools for clipboard state. Then climb through background `element_index` ({tree_kind}), background pixels, foreground delivery, and desktop fallback. Never advance on transport success alone.
+For app/window outcomes, use the narrowest semantic Cua route first: `close_window` for exact close, `set_window_frame` plus `list_windows` readback for geometry, typed browser tools for supported page content, and clipboard tools. Then climb through background `element_index` ({tree_kind}), pixels, foreground delivery, and desktop fallback. Never advance on transport success alone.
 
 Workflow per turn:
 0. `start_session` is optional. For multi-call work, prefer a short `session` label and repeat it on every call that accepts it. Unnamed calls use the transport's implicit session. Only `start_session` revives an ended name; `end_session` explicitly cleans up.

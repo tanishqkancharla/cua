@@ -65,7 +65,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const SKILL_PACK_NAME: &str = "cua-driver";
+const SKILL_PACK_NAME: &str = "opensky-driver";
 const STABLE_RELEASE_TAG_PREFIX: &str = "cua-driver-rs-v";
 const NIGHTLY_RELEASE_TAG_PREFIX: &str = "nightly-cua-driver-rs-v";
 /// Pre-rename name. The skill pack used to install as `cua-driver-rs`
@@ -73,7 +73,7 @@ const NIGHTLY_RELEASE_TAG_PREFIX: &str = "nightly-cua-driver-rs-v";
 /// uninstall we sweep this name out of every agent skills dir and the
 /// local stage so a user who had the old skill installed ends up with
 /// exactly one pack, named consistently with the rest of the binary.
-const LEGACY_SKILL_PACK_NAME: &str = "cua-driver-rs";
+const LEGACY_SKILL_PACK_NAME: &str = "opensky-driver-legacy";
 const SKILL_FILES: &[&str] = &[
     "README.md",
     "SKILL.md",
@@ -576,6 +576,66 @@ fn make_dir_symlink(target: &Path, link: &Path) -> Result<()> {
 // ── fetch ──────────────────────────────────────────────────────────────────
 
 fn fetch_into(dest: &Path, from_main: bool, all_platforms: bool) -> Result<()> {
+    if crate::bundle::is_local_installation() {
+        // The installed docs must come from this build, not upstream releases.
+        fs::create_dir_all(dest)?;
+        for (name, body) in [
+            (
+                "README.md",
+                include_str!("../../../Skills/cua-driver/README.md"),
+            ),
+            (
+                "SKILL.md",
+                include_str!("../../../Skills/cua-driver/SKILL.md"),
+            ),
+            (
+                "WINDOWS.md",
+                include_str!("../../../Skills/cua-driver/WINDOWS.md"),
+            ),
+            (
+                "MACOS.md",
+                include_str!("../../../Skills/cua-driver/MACOS.md"),
+            ),
+            (
+                "LINUX.md",
+                include_str!("../../../Skills/cua-driver/LINUX.md"),
+            ),
+            (
+                "BROWSER.md",
+                include_str!("../../../Skills/cua-driver/BROWSER.md"),
+            ),
+            (
+                "RECORDING.md",
+                include_str!("../../../Skills/cua-driver/RECORDING.md"),
+            ),
+            (
+                "EMBEDDING.md",
+                include_str!("../../../Skills/cua-driver/EMBEDDING.md"),
+            ),
+        ] {
+            let path = dest.join(name);
+            if is_excluded_platform_doc(name, all_platforms) {
+                if path.exists() {
+                    fs::remove_file(path)?;
+                }
+                continue;
+            }
+            let body = body
+                .replace("cua-driver-local", "opensky-driver")
+                .replace("cua-driver", "opensky-driver")
+                .replace("CuaDriverLocal", "OpenSkyDriver")
+                .replace("CuaDriver.app", "OpenSkyDriver.app")
+                .replace("Cua Driver", "OpenSky Driver")
+                .replace("libs/opensky-driver", "libs/cua-driver")
+                .replace("crates/opensky-driver", "crates/cua-driver")
+                .replace("opensky-driver-sdk", "cua-driver-sdk")
+                .replace("opensky-driver-core", "cua-driver-core")
+                .replace("-p opensky-driver", "-p cua-driver");
+            fs::write(path, body)?;
+        }
+        return Ok(());
+    }
+
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent)?;
     }

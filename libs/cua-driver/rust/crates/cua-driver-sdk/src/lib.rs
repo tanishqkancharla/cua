@@ -6,13 +6,14 @@
 //! MCP and daemon transports are downstream adapters rather than peer contracts.
 
 use cua_driver_contract::{
-    ActionResult, ClickInput, ClipboardReadInput, ClipboardWriteInput, DragInput, EndSessionInput,
-    EndSessionOutput, EscalateSessionInput, GetAgentCursorStateInput, GetCursorPositionInput,
-    GetDesktopStateInput, GetScreenSizeInput, GetSessionInput, GetSessionStateInput, HotkeyInput,
-    InvokeMenuInput, ListSessionsInput, ListSessionsOutput, MoveCursorInput, PressKeyInput,
-    ScrollInput, SessionOutput, SessionStateOutput, SetAgentCursorEnabledInput,
-    SetAgentCursorMotionInput, SetAgentCursorThemeInput, SetWindowFrameInput, StartSessionInput,
-    StartSessionOutput, ToolInput, TypeTextInput, VerifyStateInput, VerifyStateOutput,
+    ActionResult, ClickInput, ClipboardReadInput, ClipboardWriteInput, CloseWindowInput, DragInput,
+    EndSessionInput, EndSessionOutput, EscalateSessionInput, GetAgentCursorStateInput,
+    GetCursorPositionInput, GetDesktopStateInput, GetScreenSizeInput, GetSessionInput,
+    GetSessionStateInput, HotkeyInput, InvokeMenuInput, ListSessionsInput, ListSessionsOutput,
+    MoveCursorInput, PressKeyInput, ScrollInput, SessionOutput, SessionStateOutput,
+    SetAgentCursorEnabledInput, SetAgentCursorMotionInput, SetAgentCursorThemeInput,
+    SetWindowFrameInput, StartSessionInput, StartSessionOutput, ToolInput, TypeTextInput,
+    VerifyStateInput, VerifyStateOutput,
 };
 use cua_driver_core::daemon::{
     is_daemon_listening, request_daemon_metadata, send_request, socket_path_for_namespace,
@@ -633,6 +634,7 @@ macro_rules! desktop_tool_methods {
             get_cursor_position: GetCursorPositionInput,
             verify_state: VerifyStateInput,
             move_cursor: MoveCursorInput,
+            close_window: CloseWindowInput,
             set_window_frame: SetWindowFrameInput,
             invoke_menu: InvokeMenuInput,
             click: ClickInput,
@@ -892,7 +894,8 @@ impl CuaDriver {
     /// This is the temporary compatibility path for released socket clients.
     #[uniffi::constructor]
     pub fn connect(socket_path: Option<String>) -> Result<Arc<Self>, DriverError> {
-        let socket_path = socket_path.unwrap_or_else(|| socket_path_for_namespace("cua-driver"));
+        let socket_path =
+            socket_path.unwrap_or_else(|| socket_path_for_namespace("opensky-driver"));
         if socket_path.trim().is_empty() {
             return Err(DriverError::Configuration {
                 reason: "socket_path must not be empty".into(),

@@ -41,8 +41,8 @@ pub async fn request_from_launchservices_host(probe_direct_capture: bool) -> Too
 }
 
 fn driver_bundle_id_for_executable(executable: &str) -> Option<&'static str> {
-    if executable.contains("/CuaDriverLocal.app/Contents/MacOS/") {
-        Some("com.trycua.driver.local")
+    if executable.contains("/OpenSkyDriver.app/Contents/MacOS/") {
+        Some("com.opensky.driver")
     } else if executable.contains("/CuaDriver.app/Contents/MacOS/") {
         Some("com.trycua.driver")
     } else {
@@ -68,7 +68,7 @@ fn direct_capture_evidence_store_for_identity(
     }
     let bundle_id = driver_bundle_id_for_executable(executable)?;
     let state_directory = match bundle_id {
-        "com.trycua.driver.local" => ".cua-driver-local",
+        "com.opensky.driver" => ".opensky-driver",
         "com.trycua.driver" => ".cua-driver",
         _ => return None,
     };
@@ -545,12 +545,12 @@ mod tests {
         );
         assert_eq!(
             driver_bundle_id_for_executable(
-                "/Applications/CuaDriverLocal.app/Contents/MacOS/cua-driver-local"
+                "/Applications/OpenSkyDriver.app/Contents/MacOS/opensky-driver"
             ),
-            Some("com.trycua.driver.local")
+            Some("com.opensky.driver")
         );
         assert_eq!(
-            driver_bundle_id_for_executable("/Users/test/.local/bin/cua-driver-local"),
+            driver_bundle_id_for_executable("/Users/test/.local/bin/opensky-driver"),
             None
         );
     }
@@ -561,7 +561,7 @@ mod tests {
             std::env::temp_dir().join(format!("cua-direct-capture-test-{}", uuid::Uuid::new_v4()));
         let release = release_evidence_store(&home);
         let local = direct_capture_evidence_store_for_identity(
-            "/Applications/CuaDriverLocal.app/Contents/MacOS/cua-driver-local",
+            "/Applications/OpenSkyDriver.app/Contents/MacOS/opensky-driver",
             &home,
             Some("driver-daemon"),
         )

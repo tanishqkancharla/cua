@@ -31,9 +31,9 @@ fn initialize_handshake() {
     assert_eq!(resp["jsonrpc"], "2.0");
     assert_eq!(resp["id"], 1);
     assert!(resp["result"]["protocolVersion"].is_string());
-    // The server reports "cua-driver" on every platform. (The old Windows
+    // The server reports "opensky-driver" on every platform. (The old Windows
     // mirror asserted a stale "cua-driver-rs"; it had never been run.)
-    assert_eq!(resp["result"]["serverInfo"]["name"], "cua-driver");
+    assert_eq!(resp["result"]["serverInfo"]["name"], "opensky-driver");
 
     // 2. Send notifications/initialized (no response expected).
     d.send(&serde_json::json!({

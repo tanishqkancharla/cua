@@ -155,6 +155,7 @@ The public `page` tool contains seven operations:
 | `browser_navigate`        | `browser.navigate`                                                                                                             |
 | `browser_click`           | `browser.click.trusted.{ref\|viewport}`, `browser.click.dom_event.ref`                                                         |
 | `browser_type`            | `browser.type.insert_text`, `browser.type.keystrokes`                                                                          |
+| `browser_key`             | `browser.key`                                                                                                                   |
 | `browser_dialog`          | `browser.dialog.inspect`                                                                                                       |
 | `browser_dialog`          | `browser.dialog.accept.{background\|foreground}`                                                                               |
 | `browser_dialog`          | `browser.dialog.dismiss.{background\|foreground}`                                                                              |
@@ -248,6 +249,7 @@ public tool names.
 |  47 | `list_sessions`            | Session lifecycle           | All                                   | List transport-visible lifecycle sessions                             |
 |  48 | `end_session`              | Session lifecycle           | All                                   | End session                                                           |
 |  49 | `escalate_session`         | Legacy session compatibility | All                                  | Deprecated capture-scope escalation                                   |
+|  50 | `browser_key`              | Typed browser               | All                                   | Exact-tab page key press                                              |
 |  50 | `get_session_state`        | Legacy session compatibility | All                                  | Deprecated capture-scope inspect                                      |
 |  51 | `check_for_update`         | Maintenance                 | All                                   | Update check                                                          |
 |  52 | `debug_window_info`        | Diagnostic                  | Windows only                          | Window diagnostic                                                     |

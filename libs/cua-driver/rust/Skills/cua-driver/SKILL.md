@@ -258,7 +258,7 @@ verify_state({"pid":844,"window_id":10725,"expect":[{"element":{"selector":{"lab
 For Chromium page content, keep the same native window selection but switch to
 the browser capability loop: use one lifecycle session, bind `(pid, window_id)` with
 `get_browser_state`, snapshot the returned tab, then use `browser_click`,
-`browser_type`, or `browser_navigate`. Read `BROWSER.md` before using this
+`browser_type`, `browser_key`, or `browser_navigate`. Read `BROWSER.md` before using this
 route. Browser target ids, tab ids, and refs are session-scoped and stale refs
 must be replaced by a fresh snapshot.
 

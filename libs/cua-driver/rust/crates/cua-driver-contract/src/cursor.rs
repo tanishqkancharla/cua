@@ -227,15 +227,17 @@ pub fn classify_cursor_semantics(name: &str, args: &Value) -> Option<CursorSeman
         "drag" | "browser_drag" => CursorAction::Drag,
         "scroll" | "browser_scroll" => CursorAction::Scroll,
         "type_text" | "set_value" | "browser_type" | "browser_fill" => CursorAction::Text,
-        "press_key" | "hotkey" | "browser_press_key" | "browser_hotkey" => CursorAction::Key,
+        "press_key" | "hotkey" | "browser_key" | "browser_press_key" | "browser_hotkey" => {
+            CursorAction::Key
+        }
 
         "move_cursor" | "browser_navigate" | "browser_go_back" | "browser_go_forward"
         | "browser_reload" | "browser_new_tab" | "browser_close_tab" | "browser_select_tab" => {
             CursorAction::Navigate
         }
 
-        "launch_app" | "activate_app" | "bring_to_front" | "set_window_frame" | "invoke_menu"
-        | "list_apps" | "list_windows" | "kill_app" => CursorAction::App,
+        "launch_app" | "activate_app" | "bring_to_front" | "close_window" | "set_window_frame"
+        | "invoke_menu" | "list_apps" | "list_windows" | "kill_app" => CursorAction::App,
 
         "upload_file" | "download_file" | "copy_file" | "move_file" => CursorAction::Transfer,
 
@@ -257,7 +259,7 @@ pub fn classify_cursor_semantics(name: &str, args: &Value) -> Option<CursorSeman
 
     let target = if name.starts_with("browser_") {
         Some(CursorTarget::Browser)
-    } else if matches!(name, "set_window_frame" | "invoke_menu") {
+    } else if matches!(name, "close_window" | "set_window_frame" | "invoke_menu") {
         Some(CursorTarget::Desktop)
     } else if args
         .get("element_index")

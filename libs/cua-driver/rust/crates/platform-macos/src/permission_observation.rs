@@ -165,7 +165,7 @@ mod tests {
                 ..valid.clone()
             },
             PersistedVerification {
-                bundle_id: "com.trycua.driver.local".to_owned(),
+                bundle_id: "com.opensky.driver".to_owned(),
                 ..valid
             },
         ];

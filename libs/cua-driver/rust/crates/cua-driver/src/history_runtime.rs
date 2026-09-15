@@ -369,7 +369,7 @@ fn installed_package_helper_path() -> anyhow::Result<PathBuf> {
         std::env::var_os("CUA_DRIVER_LOCAL_HOME")
             .filter(|value| !value.is_empty())
             .map(PathBuf::from)
-            .unwrap_or_else(|| user_home.join(".cua-driver-local"))
+            .unwrap_or_else(|| user_home.join(".opensky-driver"))
     } else {
         std::env::var_os("CUA_DRIVER_HOME")
             .filter(|value| !value.is_empty())
@@ -560,11 +560,11 @@ mod tests {
     #[cfg(target_os = "macos")]
     fn local_history_accepts_certificate_identity_without_apple_team_identifier() {
         validate_history_app_signature(
-            "Identifier=com.trycua.driver.local\nTeamIdentifier=not set",
-            "designated => identifier \"com.trycua.driver.local\" and certificate leaf = H\"d2badc24c61056ede3b61724c54c5a7d1649ce4d\"",
+            "Identifier=com.opensky.driver\nTeamIdentifier=not set",
+            "designated => identifier \"com.opensky.driver\" and certificate leaf = H\"d2badc24c61056ede3b61724c54c5a7d1649ce4d\"",
             "",
             "",
-            "com.trycua.driver.local",
+            "com.opensky.driver",
             false,
         )
         .unwrap();
@@ -574,11 +574,11 @@ mod tests {
     #[cfg(target_os = "macos")]
     fn history_admission_rejects_adhoc_or_wrong_bundle_identity() {
         let adhoc = validate_history_app_signature(
-            "Identifier=com.trycua.driver.local\nTeamIdentifier=TEAM123",
+            "Identifier=com.opensky.driver\nTeamIdentifier=TEAM123",
             "designated => cdhash H\"1234\"",
             "TEAM123",
             "",
-            "com.trycua.driver.local",
+            "com.opensky.driver",
             false,
         );
         assert!(adhoc.is_err());
@@ -587,7 +587,7 @@ mod tests {
             "designated => identifier \"com.trycua.driver\" and certificate leaf[subject.OU] = TEAM123",
             "TEAM123",
             "",
-            "com.trycua.driver.local",
+            "com.opensky.driver",
             false,
         );
         assert!(wrong_bundle.is_err());

@@ -253,7 +253,7 @@ fn advertised_runtime_input_schema(tool_name: &str, schema: &Value) -> Value {
 ///   `accessibility.tree.bounded`, `accessibility.window_state`,
 ///   `accessibility.element_tokens` (Surface 6 — tool accepts the
 ///   opaque `element_token` arg alongside the integer `element_index`)
-/// - `app.launch`, `app.list`, `app.kill`, `window.list`,
+/// - `app.launch`, `app.list`, `app.kill`, `window.list`, `window.close`,
 ///   `window.activate`, `window.frame.set`, `window.debug_info`
 /// - `system.permissions.tcc`,
 ///   `system.permissions.tcc.accessibility`,
@@ -363,6 +363,7 @@ pub fn default_capabilities_for(tool_name: &str) -> Vec<String> {
         "kill_app" => &["app.kill"],
         "list_windows" => &["window.list"],
         "bring_to_front" => &["window.activate"],
+        "close_window" => &["window.close"],
         "set_window_frame" => &["window.frame.set"],
         "debug_window_info" => &["window.debug_info"],
 
@@ -406,6 +407,7 @@ pub fn default_capabilities_for(tool_name: &str) -> Vec<String> {
         "browser_navigate" => &["browser.navigate"],
         "browser_click" => &["browser.input.click"],
         "browser_type" => &["browser.input.type"],
+        "browser_key" => &["browser.input.key"],
         "browser_dialog" => &["browser.dialog"],
         "browser_set_input_files" => &["browser.input.files"],
         "browser_download" => &["browser.download"],
@@ -437,6 +439,14 @@ pub fn default_capabilities_for(tool_name: &str) -> Vec<String> {
 /// richer live schema.
 pub fn advertised_capabilities_for(tool_name: &str, input_schema: &Value) -> Vec<String> {
     let mut capabilities = default_capabilities_for(tool_name);
+    if tool_name == "browser_type"
+        && input_schema
+            .pointer("/properties/mode/enum")
+            .and_then(Value::as_array)
+            .is_some_and(|modes| modes.iter().any(|mode| mode == "paste"))
+    {
+        capabilities.push("clipboard.write".into());
+    }
     let accepts_delivery_mode = schema_accepts_delivery_mode(input_schema);
     if accepts_delivery_mode
         && !capabilities
@@ -2557,6 +2567,7 @@ fn is_physical_desktop_action(tool: &str) -> bool {
             | "hotkey"
             | "set_value"
             | "bring_to_front"
+            | "close_window"
             | "set_window_frame"
     )
 }
@@ -2771,6 +2782,19 @@ mod runtime_isolation_tests {
         Arc, Mutex,
     };
     use std::time::Duration;
+
+    // Attestations must use the same canonical spelling as manifest paths.
+    // Windows canonicalization includes the verbatim path prefix.
+    const SYNTHETIC_EXECUTABLE: &str = if cfg!(target_os = "windows") {
+        r"\\?\C:\synthetic\fixture"
+    } else {
+        "/synthetic/fixture"
+    };
+    const OTHER_EXECUTABLE: &str = if cfg!(target_os = "windows") {
+        r"\\?\C:\another\application"
+    } else {
+        "/another/application"
+    };
 
     fn standard_context() -> Arc<crate::session_authorization::EffectiveAuthorizationContext> {
         let ceiling = SessionModeCeiling::for_trusted_sessions(
@@ -3017,7 +3041,7 @@ mod runtime_isolation_tests {
                 "fingerprint": {
                     "pid": 424242,
                     "start_time": 7,
-                    "executable": "/synthetic/fixture"
+                    "executable": SYNTHETIC_EXECUTABLE
                 }
             }),
             "get_window_state" => serde_json::json!({
@@ -3027,7 +3051,7 @@ mod runtime_isolation_tests {
                 "fingerprint": {
                     "pid": 424242,
                     "start_time": 7,
-                    "executable": "/synthetic/fixture"
+                    "executable": SYNTHETIC_EXECUTABLE
                 }
             }),
             _ => serde_json::json!({
@@ -3244,7 +3268,7 @@ mod runtime_isolation_tests {
     async fn bounded_observation_uses_only_the_manifest_without_a_protected_host() {
         let hits = Arc::new(AtomicUsize::new(0));
         let registry = attested_registry("get_window_state", None, hits.clone(), false);
-        let context = bounded_context(
+        let context = bounded_context(&format!(
             r#"
 version: 2
 mode: bounded
@@ -3254,12 +3278,12 @@ allow:
   tools: [get_window_state]
 resources:
   apps:
-    - executable: /synthetic/fixture
+    - executable: {SYNTHETIC_EXECUTABLE}
       launch: false
       windows: all
       terminate: deny
-"#,
-        );
+"#
+        ));
         let result = registry
             .invoke_with_context(
                 "get_window_state",
@@ -3279,15 +3303,17 @@ resources:
             let registry = attested_registry("get_window_state", None, allowed_hits.clone(), false);
             let allowed = manifest_context(
                 mode,
-                r#"
+                &format!(
+                    r#"
 version: 3
 allow:
   tools: [get_window_state]
 resources:
   apps:
-    - executable: /synthetic/fixture
+    - executable: {SYNTHETIC_EXECUTABLE}
       windows: all
-"#,
+"#
+                ),
             );
             let result = registry
                 .invoke_with_context(
@@ -3296,22 +3322,28 @@ resources:
                     allowed,
                 )
                 .await;
-            assert_ne!(result.is_error, Some(true), "{mode:?} in-scope call");
+            assert_ne!(
+                result.is_error,
+                Some(true),
+                "{mode:?} in-scope call: {result:?}"
+            );
             assert_eq!(allowed_hits.load(Ordering::SeqCst), 1);
 
             let denied_hits = Arc::new(AtomicUsize::new(0));
             let registry = attested_registry("get_window_state", None, denied_hits.clone(), false);
             let denied = manifest_context(
                 mode,
-                r#"
+                &format!(
+                    r#"
 version: 3
 allow:
   tools: [get_window_state]
 resources:
   apps:
-    - executable: /another/application
+    - executable: {OTHER_EXECUTABLE}
       windows: all
-"#,
+"#
+                ),
             );
             let result = registry
                 .invoke_with_context(
@@ -3927,7 +3959,7 @@ resources:
                 crate::browser::ProcessFingerprint {
                     pid: 424242,
                     start_time: Some(7),
-                    executable: Some("/synthetic/fixture".to_owned()),
+                    executable: Some(SYNTHETIC_EXECUTABLE.to_owned()),
                 },
             );
 
@@ -3955,7 +3987,7 @@ resources:
                 crate::browser::ProcessFingerprint {
                     pid: 424242,
                     start_time: Some(7),
-                    executable: Some("/synthetic/fixture".to_owned()),
+                    executable: Some(SYNTHETIC_EXECUTABLE.to_owned()),
                 },
             );
 
@@ -3985,7 +4017,7 @@ resources:
                 crate::browser::ProcessFingerprint {
                     pid: 424242,
                     start_time: Some(7),
-                    executable: Some("/synthetic/fixture".to_owned()),
+                    executable: Some(SYNTHETIC_EXECUTABLE.to_owned()),
                 },
             );
 
@@ -4088,7 +4120,7 @@ resources:
                 crate::browser::ProcessFingerprint {
                     pid: 424242,
                     start_time: Some(7),
-                    executable: Some("/synthetic/fixture".to_owned()),
+                    executable: Some(SYNTHETIC_EXECUTABLE.to_owned()),
                 },
             );
 
@@ -4923,6 +4955,7 @@ mod capability_tests {
         "kill_app",
         "list_windows",
         "bring_to_front",
+        "close_window",
         "set_window_frame",
         "debug_window_info",
         // permissions / config
@@ -4957,6 +4990,7 @@ mod capability_tests {
         "browser_navigate",
         "browser_click",
         "browser_type",
+        "browser_key",
         "browser_dialog",
         "browser_set_input_files",
         "browser_download",
@@ -5005,6 +5039,7 @@ mod capability_tests {
         "app.kill",
         "window.list",
         "window.activate",
+        "window.close",
         "window.frame.set",
         "window.debug_info",
         // permissions
@@ -5042,6 +5077,7 @@ mod capability_tests {
         "browser.navigate",
         "browser.input.click",
         "browser.input.type",
+        "browser.input.key",
         "browser.input.files",
         "browser.dialog",
         "browser.download",
@@ -5365,7 +5401,13 @@ mod capability_tests {
     fn action_tools_advertise_the_same_closed_output_schema() {
         let expected =
             <cua_driver_contract::ActionResult as cua_driver_contract::ToolOutput>::output_schema();
-        for name in ["click", "browser_click", "browser_pointer", "browser_type"] {
+        for name in [
+            "click",
+            "browser_click",
+            "browser_pointer",
+            "browser_type",
+            "browser_key",
+        ] {
             let entry = action_tool_entry(name);
             // The success variant is unchanged and still closed; it now sits
             // beside the refusal envelope instead of standing alone.

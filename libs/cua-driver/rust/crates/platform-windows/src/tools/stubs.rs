@@ -105,8 +105,10 @@ stub_tool!(
 );
 
 stub_tool!(kill_app_m, KillAppTool, "kill_app",
-    "Force-terminate a process by pid (taskkill /F equivalent on Windows). Use as escalation when the cooperative close path didn't make the process exit — typical for UWP / WinUI3 apps that route WM_CLOSE into a suspended-but-resident state.",
+    "Force-terminate a process by pid (taskkill /F equivalent on Windows). Use as escalation when close_window didn't make the process exit — typical for UWP / WinUI3 apps that route WM_CLOSE into a suspended-but-resident state.",
     serde_json::json!({"type":"object","required":["pid"],"properties":{"pid":{"type":"integer","description":"PID of the process to terminate."}},"additionalProperties":false}));
+
+contract_stub_tool!(close_window_m, CloseWindowTool, "close_window");
 
 stub_tool!(
     click_m,
@@ -310,6 +312,7 @@ pub fn build_registry() -> cua_driver_core::tool::ToolRegistry {
     ));
     r.register(Box::new(LaunchAppTool));
     r.register(Box::new(KillAppTool));
+    r.register(Box::new(CloseWindowTool));
     r.register(Box::new(ClickTool));
     r.register(Box::new(DoubleClickTool));
     r.register(Box::new(RightClickTool));

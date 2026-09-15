@@ -20,7 +20,7 @@ list_windows or launch_app
 get_browser_state(pid, window_id, session?)               # bind
 get_browser_state(target_id, tab_id, session?,
                   snapshot_format=semantic_v2)            # snapshot
-browser_navigate / browser_click / browser_type / browser_pointer
+browser_navigate / browser_click / browser_type / browser_key / browser_pointer
 browser_dialog / browser_set_input_files / browser_download
 get_browser_state(target_id, tab_id, session?,
                   snapshot_format=semantic_v2)            # verify and refresh refs
@@ -312,8 +312,12 @@ cua-driver browser_navigate \
     "url":"https://example.com","session":"browser-run-1"}'
 ```
 
-Only `http:`, `https:`, and `about:` URLs are accepted. Navigation invalidates
-the tab's refs; snapshot again before the next ref-targeted action.
+Only `http:`, `https:`, and `about:` URLs are accepted. To operate browser
+history without focusing browser chrome, pass `"action":"back"`,
+`"action":"forward"`, or `"action":"reload"` instead of `url`. History
+destinations are taken from and authorized against the exact bound tab; an
+unavailable direction is refused. Every successful navigation invalidates the
+tab's refs, so snapshot again before the next ref-targeted action.
 
 ### Click
 
@@ -375,6 +379,24 @@ The driver revalidates the binding and ref, verifies editability and focus
 ownership, and reports requested versus delivered characters. Snapshot again
 to verify application state rather than treating transport completion as the
 task result.
+
+### Press a key
+
+Use `browser_key` for one key or modifier combination at the exact tab's
+current page focus. Add a current type-capable `ref` when focus must first move
+to a specific editable node:
+
+```bash
+cua-driver browser_key \
+  '{"target_id":"<target>","tab_id":"<tab>","ref":"p4:2",
+    "key":"ctrl+a","session":"browser-run-1"}'
+```
+
+The driver sends CDP key-down/key-up events and always attempts to release any
+pressed modifiers and disable temporary focus emulation before returning.
+This controls page focus only; it does not emulate browser-chrome shortcuts.
+Use `browser_navigate` for back, forward, and reload. Refresh page state to
+verify the application-level effect.
 
 ### Extended pointer actions
 

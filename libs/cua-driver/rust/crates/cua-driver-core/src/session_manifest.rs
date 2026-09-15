@@ -142,11 +142,30 @@ impl SessionManifest {
                 }
             }
             "browser_navigate" => {
-                let url = args
-                    .get("url")
-                    .and_then(serde_json::Value::as_str)
-                    .ok_or_else(|| "bounded browser navigation requires url".to_owned())?;
-                self.authorize_browser_url(url)?;
+                match (
+                    args.get("url").and_then(serde_json::Value::as_str),
+                    args.get("action").and_then(serde_json::Value::as_str),
+                ) {
+                    (Some(url), None) => self.authorize_browser_url(url)?,
+                    (None, Some("back" | "forward" | "reload")) => {
+                        // The destination is browser-owned live state rather than
+                        // a public argument. The protected-resource adapter
+                        // attests it before authorization and the tool checks it
+                        // again in the mutation lock immediately before CDP.
+                    }
+                    (Some(_), Some(_)) => {
+                        return Err(
+                            "bounded browser navigation accepts either url or action, not both"
+                                .to_owned(),
+                        )
+                    }
+                    _ => {
+                        return Err(
+                            "bounded browser navigation requires url or back/forward/reload action"
+                                .to_owned(),
+                        )
+                    }
+                }
             }
             _ => {}
         }
@@ -1624,6 +1643,23 @@ allow:
         manifest
             .authorize_browser_url("https://app.example.com/work?q=1")
             .unwrap();
+        for action in ["back", "forward", "reload"] {
+            manifest
+                .authorize_call("browser_navigate", &serde_json::json!({"action": action}))
+                .unwrap();
+        }
+        for invalid in [
+            serde_json::json!({}),
+            serde_json::json!({"action": "sideways"}),
+            serde_json::json!({"url": "https://app.example.com", "action": "back"}),
+        ] {
+            assert!(
+                manifest
+                    .authorize_call("browser_navigate", &invalid)
+                    .is_err(),
+                "invalid navigation request passed manifest authorization: {invalid}"
+            );
+        }
         manifest
             .authorize_protected_resource(
                 "private_observation",

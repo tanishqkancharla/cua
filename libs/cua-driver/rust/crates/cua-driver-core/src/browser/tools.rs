@@ -16,7 +16,9 @@ use crate::tool_args::ArgsExt;
 
 use super::cdp_ws::CdpConnection;
 use super::download::BrowserDownloadTool;
-use super::engine::{BrowserEngine, BrowserTabScreenshot};
+use super::engine::{
+    authorize_current_browser_destination, BrowserEngine, BrowserTabScreenshot, ValidatedTab,
+};
 use super::platform::{BrowserVisualActionKind, PrepareProfile, PrepareRequest, PrepareStrategy};
 use super::pointer::BrowserPointerTool;
 use super::refusal::{BrowserRefusal, BrowserRefusalCode};
@@ -28,11 +30,22 @@ use super::types::BindingQuality;
 /// crates call this from their `register_all` after constructing the
 /// engine with their adapter.
 pub fn register_browser_tools(engine: &Arc<BrowserEngine>, registry: &mut ToolRegistry) {
+    register_browser_tools_with_clipboard(engine, registry, None);
+}
+
+pub fn register_browser_tools_with_clipboard(
+    engine: &Arc<BrowserEngine>,
+    registry: &mut ToolRegistry,
+    clipboard: Option<Arc<dyn crate::clipboard::ClipboardBackend>>,
+) {
     registry.register(Box::new(GetBrowserStateTool::new(engine.clone())));
     registry.register(Box::new(BrowserPrepareTool::new(engine.clone())));
     registry.register(Box::new(BrowserNavigateTool::new(engine.clone())));
     registry.register(Box::new(BrowserClickTool::new(engine.clone())));
-    registry.register(Box::new(BrowserTypeTool::new(engine.clone())));
+    let mut typing = BrowserTypeTool::new(engine.clone());
+    typing.clipboard = clipboard;
+    registry.register(Box::new(typing));
+    registry.register(Box::new(BrowserKeyTool::new(engine.clone())));
     registry.register(Box::new(BrowserDialogTool::new(engine.clone())));
     registry.register(Box::new(BrowserSetInputFilesTool::new(engine.clone())));
     registry.register(Box::new(BrowserDownloadTool::new(engine.clone())));
@@ -142,17 +155,29 @@ pub(crate) async fn browser_protected_resource_scope(
         .attest_protected_tab(&runtime_session, target_id, tab_id)
         .await
         .map_err(|error| error.message)?;
-    let target = validated.record;
-    let tab = validated.tab;
+    let target = &validated.record;
+    let tab = &validated.tab;
     let requested_origin = if tool_name == "browser_navigate" {
-        let requested = args
-            .get("url")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "browser_navigate requires a destination URL".to_owned())?;
+        let requested = match parse_navigation_request(args).map_err(|error| error.to_string())? {
+            NavigationRequest::Url(url) => url,
+            NavigationRequest::Reload => live_origin.clone(),
+            NavigationRequest::Back => {
+                history_destination(&validated, -1)
+                    .await
+                    .map_err(|error| error.message)?
+                    .url
+            }
+            NavigationRequest::Forward => {
+                history_destination(&validated, 1)
+                    .await
+                    .map_err(|error| error.message)?
+                    .url
+            }
+        };
         if requested.to_ascii_lowercase().starts_with("about:") {
             Some("about:".to_owned())
         } else {
-            let parsed = url::Url::parse(requested)
+            let parsed = url::Url::parse(&requested)
                 .map_err(|_| "the destination URL is invalid".to_owned())?;
             Some(parsed.origin().ascii_serialization())
         }
@@ -194,7 +219,7 @@ pub(crate) async fn browser_protected_resource_scope(
 }
 
 fn semantic_ref_value(listed: &super::engine::SemanticListedRef) -> Value {
-    json!({
+    let mut value = json!({
         "ref": listed.external,
         "role": listed.node.role,
         "name": listed.node.name,
@@ -203,6 +228,37 @@ fn semantic_ref_value(listed: &super::engine::SemanticListedRef) -> Value {
         "actions": listed.node.actions.iter().map(|action| action.as_str()).collect::<Vec<_>>(),
         "frame": listed.node.frame.kind.as_str(),
         "visibility": listed.node.visibility.as_str(),
+    });
+    // Page-authored destination text is observational metadata only. Ref
+    // resolution and action authorization continue to use the opaque ref and
+    // the internally stored capability record, never this URL.
+    if let Some(destination_url) = &listed.node.destination_url {
+        value["url"] = Value::String(destination_url.clone());
+    }
+    value
+}
+
+fn semantic_context_value(
+    context: &super::engine::SemanticContextMetadata,
+    outline: &str,
+) -> Value {
+    json!({
+        "anchor_ref": context.anchor_ref,
+        "group_ref": context.group_ref,
+        "parent_group_ref": context.parent_group_ref,
+        "order_domain": context.order_domain,
+        "outline": outline,
+        "member_refs": context.member_refs,
+        "before_omitted": context.before_omitted,
+        "after_omitted": context.after_omitted,
+        "before_continuation": context.before_continuation,
+        "after_continuation": context.after_continuation,
+        "group_complete": context.group_complete,
+        "document_collection_complete": context.document_collection_complete,
+        "member_projection": context.member_projection,
+        "source_member_nodes": context.source_member_nodes,
+        "projected_out_nodes": context.projected_out_nodes,
+        "virtualized_extent": "unknown",
     })
 }
 
@@ -246,7 +302,8 @@ impl GetBrowserStateTool {
             description: "Read-only browser inspection. Mode 1 (bind): pass pid + \
                 window_id of a native browser window to classify it, correlate it to \
                 a CDP target (exact-or-refuse), and mint a session-scoped target id \
-                plus tab ids. Mode 2 (snapshot): pass target_id + tab_id. The \
+                plus tab ids. A driver-owned headless browser binds with pid alone. \
+                Mode 2 (snapshot): pass target_id + tab_id. The \
                 dom_refs_v1 compatibility format returns composed DOM refs. \
                 semantic_v2 joins accessibility, DOM, layout, and viewport state; \
                 ranks visible content before retained/offscreen state; and returns a \
@@ -272,13 +329,17 @@ impl GetBrowserStateTool {
                         "type": "string",
                         "description": "Current semantic/content ref whose subtree should be observed."
                     },
+                    "context_ref": {
+                        "type": "string",
+                        "description": "Current issued semantic/content ref whose bounded same-snapshot structural context should be observed. Cannot be combined with query, scope_ref, continuation, or screenshot."
+                    },
                     "query": {
                         "type": "string",
-                        "description": "Read-only semantic match over role, accessible name, and visible text."
+                        "description": "Read-only semantic match over role, accessible name, and visible text. semantic_v2 query responses also include bounded same-snapshot query_contexts with unmatched nearby structural labels as read-only refs."
                     },
                     "continuation": {
                         "type": "string",
-                        "description": "Opaque continuation minted by an earlier semantic_v2 response."
+                        "description": "Opaque single-use continuation minted by an earlier semantic_v2 response. It advances either filtered matches or a bounded context window within that exact stored snapshot and never recollects the page."
                     },
                     "include_screenshot": {
                         "type": "boolean",
@@ -358,6 +419,13 @@ impl Tool for GetBrowserStateTool {
                     )
                 }
             };
+            let context_ref = match args.get("context_ref") {
+                None => None,
+                Some(Value::String(value)) => Some(value.as_str()),
+                Some(_) => {
+                    return ToolResult::error("Field context_ref has wrong type: expected string")
+                }
+            };
             if snapshot_format != "dom_refs_v1" && snapshot_format != "semantic_v2" {
                 return ToolResult::error(format!(
                     "snapshot_format must be \"dom_refs_v1\" or \"semantic_v2\", got {snapshot_format:?}"
@@ -366,13 +434,106 @@ impl Tool for GetBrowserStateTool {
             if snapshot_format == "dom_refs_v1"
                 && (args.opt_str("scope_ref").is_some()
                     || args.opt_str("query").is_some()
-                    || args.opt_str("continuation").is_some())
+                    || args.opt_str("continuation").is_some()
+                    || context_ref.is_some())
             {
                 return ToolResult::error(
-                    "scope_ref, query, and continuation require snapshot_format=\"semantic_v2\"",
+                    "scope_ref, query, continuation, and context_ref require snapshot_format=\"semantic_v2\"",
                 );
             }
             if snapshot_format == "semantic_v2" {
+                if context_ref.is_some()
+                    && (args.opt_str("scope_ref").is_some()
+                        || args.opt_str("query").is_some()
+                        || args.opt_str("continuation").is_some()
+                        || include_screenshot)
+                {
+                    return ToolResult::error(
+                        "context_ref cannot be combined with scope_ref, query, continuation, or include_screenshot",
+                    );
+                }
+                if args.opt_str("continuation").is_some() && include_screenshot {
+                    return ToolResult::error(
+                        "continuation cannot be combined with include_screenshot",
+                    );
+                }
+                if let Some(context_ref) = context_ref {
+                    let outcome = match self
+                        .engine
+                        .context_tab_semantic(&session, &target_id, &tab_id, context_ref)
+                        .await
+                    {
+                        Ok(outcome) => outcome,
+                        Err(refusal) => return refusal.to_tool_result(),
+                    };
+                    let refs = outcome
+                        .refs
+                        .iter()
+                        .map(semantic_ref_value)
+                        .collect::<Vec<_>>();
+                    let content_refs = outcome
+                        .content_refs
+                        .iter()
+                        .map(semantic_ref_value)
+                        .collect::<Vec<_>>();
+                    return ToolResult::text(format!(
+                        "semantic context p{} of {}: {} action ref(s), {} content ref(s)",
+                        outcome.snapshot_id,
+                        outcome.url,
+                        refs.len(),
+                        content_refs.len()
+                    ))
+                    .with_structured(json!({
+                        "status": "ok",
+                        "mode": "snapshot",
+                        "target_id": target_id,
+                        "tab_id": tab_id,
+                        "snapshot": {
+                            "id": format!("p{}", outcome.snapshot_id),
+                            "format": "semantic_v2",
+                            "complete": outcome.context.group_complete,
+                            "scope": "context",
+                            "selected_nodes": outcome.selected_nodes,
+                            "total_nodes": outcome.total_nodes,
+                            "node_budget": super::semantic::CONTEXT_BEFORE_NODES + 1 + super::semantic::CONTEXT_AFTER_NODES,
+                            "omitted": {
+                                "css_hidden": outcome.omissions.css_hidden,
+                                "offscreen": outcome.omissions.offscreen,
+                                "page_occluded": outcome.omissions.page_occluded,
+                                "no_layout": outcome.omissions.no_layout,
+                                "unknown": outcome.omissions.unknown,
+                                "budget": outcome.omissions.budget,
+                                "unprovable_frame": outcome.omissions.unprovable_frame,
+                            },
+                            "continuation": Value::Null,
+                        },
+                        "page": { "url": outcome.url, "title": outcome.title },
+                        "outline": outcome.outline,
+                        "refs": refs,
+                        "content_refs": content_refs,
+                        "oopif": {
+                            "status": outcome.oopif.as_str(),
+                            "frames": outcome.oopif.frames(),
+                        },
+                        "context": {
+                            "anchor_ref": outcome.context.anchor_ref,
+                            "group_ref": outcome.context.group_ref,
+                            "parent_group_ref": outcome.context.parent_group_ref,
+                            "order_domain": outcome.context.order_domain,
+                            "member_refs": outcome.context.member_refs,
+                            "before_omitted": outcome.context.before_omitted,
+                            "after_omitted": outcome.context.after_omitted,
+                            "before_continuation": outcome.context.before_continuation,
+                            "after_continuation": outcome.context.after_continuation,
+                            "group_complete": outcome.context.group_complete,
+                            "document_collection_complete": outcome.context.document_collection_complete,
+                            "member_projection": outcome.context.member_projection,
+                            "source_member_nodes": outcome.context.source_member_nodes,
+                            "projected_out_nodes": outcome.context.projected_out_nodes,
+                            "virtualized_extent": "unknown",
+                        },
+                    }));
+                }
                 let snapshot = match self
                     .engine
                     .snapshot_tab_semantic(
@@ -396,14 +557,16 @@ impl Tool for GetBrowserStateTool {
                             .iter()
                             .map(semantic_ref_value)
                             .collect::<Vec<_>>();
-                        ToolResult::text(format!(
-                            "semantic snapshot p{} of {}: {} action ref(s), {} content ref(s)",
-                            outcome.snapshot_id,
-                            outcome.url,
-                            refs.len(),
-                            content_refs.len()
-                        ))
-                        .with_structured(json!({
+                        let query_contexts = outcome
+                            .query_contexts
+                            .iter()
+                            .map(|block| semantic_context_value(&block.metadata, &block.outline))
+                            .collect::<Vec<_>>();
+                        let context = outcome
+                            .context
+                            .as_ref()
+                            .map(|context| semantic_context_value(context, &outcome.outline));
+                        let mut structured = json!({
                             "status": "ok",
                             "mode": "snapshot",
                             "target_id": target_id,
@@ -415,7 +578,11 @@ impl Tool for GetBrowserStateTool {
                                 "scope": outcome.scope,
                                 "selected_nodes": outcome.selected_nodes,
                                 "total_nodes": outcome.total_nodes,
-                                "node_budget": super::semantic::DEFAULT_SEMANTIC_NODE_BUDGET,
+                                "node_budget": if outcome.scope == "context" {
+                                    super::semantic::CONTEXT_BEFORE_NODES + 1 + super::semantic::CONTEXT_AFTER_NODES
+                                } else {
+                                    super::semantic::DEFAULT_SEMANTIC_NODE_BUDGET
+                                },
                                 "omitted": {
                                     "css_hidden": outcome.omissions.css_hidden,
                                     "offscreen": outcome.omissions.offscreen,
@@ -427,18 +594,26 @@ impl Tool for GetBrowserStateTool {
                                 },
                                 "continuation": outcome.continuation,
                             },
-                            "page": {
-                                "url": outcome.url,
-                                "title": outcome.title,
-                            },
+                            "page": { "url": outcome.url, "title": outcome.title },
                             "outline": outcome.outline,
                             "refs": refs,
                             "content_refs": content_refs,
-                            "oopif": {
-                                "status": outcome.oopif.as_str(),
-                                "frames": outcome.oopif.frames(),
-                            },
-                        }))
+                            "oopif": { "status": outcome.oopif.as_str(), "frames": outcome.oopif.frames() },
+                        });
+                        if !query_contexts.is_empty() {
+                            structured["query_contexts"] = Value::Array(query_contexts);
+                        }
+                        if let Some(context) = context {
+                            structured["context"] = context;
+                        }
+                        ToolResult::text(format!(
+                            "semantic snapshot p{} of {}: {} action ref(s), {} content ref(s)",
+                            outcome.snapshot_id,
+                            outcome.url,
+                            refs.len(),
+                            content_refs.len()
+                        ))
+                        .with_structured(structured)
                     }
                     Err(refusal) => return refusal.to_tool_result(),
                 };
@@ -508,12 +683,8 @@ impl Tool for GetBrowserStateTool {
             return snapshot;
         }
 
-        // Bind mode: pid + window_id.
+        // Bind mode: pid + window_id, or pid alone for a driver-owned headless browser.
         let pid = match args.require_i64("pid") {
-            Ok(v) => v,
-            Err(e) => return e,
-        };
-        let window_id = match args.require_u64("window_id") {
             Ok(v) => v,
             Err(e) => return e,
         };
@@ -523,11 +694,16 @@ impl Tool for GetBrowserStateTool {
         };
 
         let transport_session = args.opt_str("_transport_session_id");
-        match self
-            .engine
-            .bind_native(&session, transport_session.as_deref(), pid, window_id)
-            .await
-        {
+        let bound = if let Some(window_id) = args.opt_u64("window_id") {
+            self.engine
+                .bind_native(&session, transport_session.as_deref(), pid, window_id)
+                .await
+        } else {
+            self.engine
+                .bind_driver_owned_headless(&session, transport_session.as_deref(), pid)
+                .await
+        };
+        match bound {
             Ok((target_id, record)) => {
                 let tabs: Vec<Value> = record
                     .tabs
@@ -545,7 +721,9 @@ impl Tool for GetBrowserStateTool {
                     BindingQuality::Exact => "exact",
                     BindingQuality::Heuristic => "heuristic",
                 };
-                let binding_route = if record.cdp_window_id.is_some() {
+                let binding_route = if record.window_id == 0 {
+                    "driver_owned_headless"
+                } else if record.cdp_window_id.is_some() {
                     "native_cdp_window"
                 } else {
                     "embedded_single_page"
@@ -616,7 +794,9 @@ impl BrowserPrepareTool {
                         "type": "object",
                         "properties": {
                             "mode": { "type": "string", "enum": ["isolated_new", "isolated_named"] },
-                            "name": { "type": "string", "description": "Required only for isolated_named; 1-64 path-safe ASCII characters." }
+                            "name": { "type": "string", "description": "Required only for isolated_named; 1-64 path-safe ASCII characters." },
+                            "headless": { "type": "boolean", "default": false, "description": "Launch a driver-owned isolated Chromium process without a native window." },
+                            "expose_debugger_endpoint": { "type": "boolean", "default": false, "description": "Return the loopback HTTP debugger endpoint for a driver-owned headless browser so a trusted test host can attach." }
                         },
                         "required": ["mode"],
                         "additionalProperties": false
@@ -692,6 +872,9 @@ impl Tool for BrowserPrepareTool {
                 Err(error) => error,
             };
         }
+        let debugger_endpoint_requested = profile
+            .as_ref()
+            .is_some_and(|profile| profile.headless && profile.expose_debugger_endpoint);
         let request = PrepareRequest {
             pid,
             window_id: args.opt_u64("window_id"),
@@ -704,6 +887,10 @@ impl Tool for BrowserPrepareTool {
         match self.engine.prepare_browser(request).await {
             Ok(outcome) => {
                 let prepared = outcome.endpoint.is_some();
+                let debugger_http_url = debugger_endpoint_requested
+                    .then(|| outcome.endpoint.as_ref()?.http_port)
+                    .flatten()
+                    .map(|port| format!("http://127.0.0.1:{port}"));
                 ToolResult::text(format!(
                     "browser_prepare: {} — {}",
                     if prepared {
@@ -720,6 +907,7 @@ impl Tool for BrowserPrepareTool {
                     "message": outcome.message,
                     // The ws_url itself stays internal; expose only proof metadata.
                     "endpoint_ownership": outcome.endpoint.map(|e| e.ownership),
+                    "debugger_http_url": debugger_http_url,
                     "prepared_pid": outcome.prepared_pid,
                     "side_effects": outcome.side_effects,
                     "attachment": outcome.attachment,
@@ -732,6 +920,124 @@ impl Tool for BrowserPrepareTool {
 
 // ── browser_navigate ─────────────────────────────────────────────────────────
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NavigationRequest {
+    Url(String),
+    Back,
+    Forward,
+    Reload,
+}
+
+impl NavigationRequest {
+    fn action_name(&self) -> &'static str {
+        match self {
+            Self::Url(_) => "url",
+            Self::Back => "back",
+            Self::Forward => "forward",
+            Self::Reload => "reload",
+        }
+    }
+}
+
+fn parse_navigation_request(args: &Value) -> Result<NavigationRequest, &'static str> {
+    let url = args.get("url").and_then(Value::as_str);
+    let action = args.get("action").and_then(Value::as_str);
+    match (url, action) {
+        (Some(url), None) if !url.is_empty() => Ok(NavigationRequest::Url(url.to_owned())),
+        (None, Some("back")) => Ok(NavigationRequest::Back),
+        (None, Some("forward")) => Ok(NavigationRequest::Forward),
+        (None, Some("reload")) => Ok(NavigationRequest::Reload),
+        (Some(_), Some(_)) => Err("browser_navigate accepts either url or action, not both"),
+        (None, Some(_)) => Err("action must be back, forward, or reload"),
+        _ => Err("browser_navigate requires exactly one of url or action"),
+    }
+}
+
+fn navigation_url_is_supported(url: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    match parsed.scheme() {
+        "http" | "https" => parsed.host_str().is_some(),
+        "about" => true,
+        _ => false,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HistoryDestination {
+    entry_id: i64,
+    url: String,
+}
+
+async fn history_destination(
+    validated: &ValidatedTab,
+    offset: i64,
+) -> Result<HistoryDestination, BrowserRefusal> {
+    let history = validated
+        .conn
+        .call(
+            Some(&validated.cdp_session),
+            "Page.getNavigationHistory",
+            json!({}),
+        )
+        .await
+        .map_err(|error| {
+            BrowserRefusal::new(
+                BrowserRefusalCode::BrowserActionUnavailable,
+                format!("the exact tab's navigation history is unavailable: {error}"),
+            )
+        })?;
+    let current = history
+        .get("currentIndex")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| {
+            BrowserRefusal::new(
+                BrowserRefusalCode::BrowserActionUnavailable,
+                "the exact tab returned malformed navigation history",
+            )
+        })?;
+    let desired = current.checked_add(offset).ok_or_else(|| {
+        BrowserRefusal::new(
+            BrowserRefusalCode::BrowserActionUnavailable,
+            "the requested navigation history direction is unavailable",
+        )
+    })?;
+    let entry = usize::try_from(desired)
+        .ok()
+        .and_then(|index| history.get("entries").and_then(Value::as_array)?.get(index))
+        .ok_or_else(|| {
+            BrowserRefusal::new(
+                BrowserRefusalCode::BrowserActionUnavailable,
+                "the requested navigation history direction is unavailable",
+            )
+        })?;
+    let entry_id = entry.get("id").and_then(Value::as_i64).ok_or_else(|| {
+        BrowserRefusal::new(
+            BrowserRefusalCode::BrowserActionUnavailable,
+            "the exact tab returned a malformed navigation history entry",
+        )
+    })?;
+    let url = entry
+        .get("url")
+        .and_then(Value::as_str)
+        .filter(|url| !url.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            BrowserRefusal::new(
+                BrowserRefusalCode::BrowserActionUnavailable,
+                "the exact tab returned a history entry without a destination URL",
+            )
+        })?;
+    if !navigation_url_is_supported(&url) {
+        return Err(BrowserRefusal::new(
+            BrowserRefusalCode::BrowserActionUnavailable,
+            "the requested history entry is not an http, https, or about destination",
+        ));
+    }
+    Ok(HistoryDestination { entry_id, url })
+}
+
 pub struct BrowserNavigateTool {
     def: ToolDef,
     engine: Arc<BrowserEngine>,
@@ -742,8 +1048,10 @@ impl BrowserNavigateTool {
         let def = ToolDef {
             name: "browser_navigate".into(),
             description: "Navigate one tab of an exactly-bound browser target to a \
-                new URL (http/https/about only). Refused for heuristic bindings. \
-                Navigation invalidates all p<snapshot>:<index> refs for the tab."
+                new URL (http/https/about only), backward or forward by one history \
+                entry, or reload it. Pass exactly one of url or action. Refused for \
+                heuristic bindings. Navigation invalidates all p<snapshot>:<index> \
+                refs for the tab."
                 .into(),
             input_schema: json!({
                 "type": "object",
@@ -751,9 +1059,14 @@ impl BrowserNavigateTool {
                     "target_id": schema_target_id(),
                     "tab_id": schema_tab_id(),
                     "url": { "type": "string", "description": "Destination URL (http:, https:, or about:)." },
+                    "action": {
+                        "type": "string",
+                        "enum": ["back", "forward", "reload"],
+                        "description": "Exact-tab history or reload action; alternative to url."
+                    },
                     "session": schema_session(),
                 },
-                "required": ["target_id", "tab_id", "url"],
+                "required": ["target_id", "tab_id"],
                 "additionalProperties": true
             }),
             read_only: false,
@@ -796,26 +1109,25 @@ impl Tool for BrowserNavigateTool {
     }
 
     async fn invoke(&self, args: Value) -> ToolResult {
-        let (target_id, tab_id, url) = match (
-            args.require_str("target_id"),
-            args.require_str("tab_id"),
-            args.require_str("url"),
-        ) {
-            (Ok(t), Ok(tab), Ok(u)) => (t, tab, u),
-            (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => return e,
+        let (target_id, tab_id) = match (args.require_str("target_id"), args.require_str("tab_id"))
+        {
+            (Ok(t), Ok(tab)) => (t, tab),
+            (Err(e), _) | (_, Err(e)) => return e,
+        };
+        let request = match parse_navigation_request(&args) {
+            Ok(request) => request,
+            Err(error) => return ToolResult::error(error),
         };
         let session = match require_explicit_session(&args) {
             Ok(s) => s,
             Err(e) => return e,
         };
-        let lower = url.to_ascii_lowercase();
-        if !(lower.starts_with("http://")
-            || lower.starts_with("https://")
-            || lower.starts_with("about:"))
-        {
-            return ToolResult::error(format!(
-                "browser_navigate only accepts http/https/about URLs, got: {url}"
-            ));
+        if let NavigationRequest::Url(url) = &request {
+            if !navigation_url_is_supported(url) {
+                return ToolResult::error(format!(
+                    "browser_navigate only accepts http/https/about URLs, got: {url}"
+                ));
+            }
         }
 
         let _mutation = match self
@@ -835,13 +1147,32 @@ impl Tool for BrowserNavigateTool {
             Err(refusal) => return refusal.to_tool_result(),
         };
 
+        let (method, params, destination_url) = match &request {
+            NavigationRequest::Url(url) => ("Page.navigate", json!({ "url": url }), None),
+            NavigationRequest::Reload => ("Page.reload", json!({}), None),
+            NavigationRequest::Back | NavigationRequest::Forward => {
+                let offset = if request == NavigationRequest::Back {
+                    -1
+                } else {
+                    1
+                };
+                let destination = match history_destination(&validated, offset).await {
+                    Ok(destination) => destination,
+                    Err(refusal) => return refusal.to_tool_result(),
+                };
+                if let Err(refusal) = authorize_current_browser_destination(&destination.url) {
+                    return refusal.to_tool_result();
+                }
+                (
+                    "Page.navigateToHistoryEntry",
+                    json!({ "entryId": destination.entry_id }),
+                    Some(destination.url),
+                )
+            }
+        };
         match validated
             .conn
-            .call(
-                Some(&validated.cdp_session),
-                "Page.navigate",
-                json!({ "url": url }),
-            )
+            .call(Some(&validated.cdp_session), method, params)
             .await
         {
             Ok(result) => {
@@ -852,15 +1183,22 @@ impl Tool for BrowserNavigateTool {
                 self.engine
                     .store
                     .invalidate_tab_snapshots(&session, &target_id, &tab_id);
-                ToolResult::text(format!("navigated {tab_id} to {url}")).with_structured(json!({
+                let action = request.action_name();
+                let text = match &request {
+                    NavigationRequest::Url(url) => format!("navigated {tab_id} to {url}"),
+                    _ => format!("performed exact-tab {action} in {tab_id}"),
+                };
+                ToolResult::text(text).with_structured(json!({
                     "status": "ok",
                     "target_id": target_id,
                     "tab_id": tab_id,
-                    "url": url,
+                    "url": match &request { NavigationRequest::Url(url) => Some(url), _ => None },
+                    "action": action,
+                    "history_destination_attested": destination_url.is_some(),
                     "refs_invalidated": true,
                 }))
             }
-            Err(e) => ToolResult::error(format!("Page.navigate failed: {e}")),
+            Err(e) => ToolResult::error(format!("{method} failed: {e}")),
         }
     }
 }
@@ -1135,12 +1473,26 @@ impl Tool for BrowserClickTool {
                     "Runtime.callFunctionOn",
                     json!({
                         "objectId": object_id,
-                        "functionDeclaration": "function() { this.click(); }",
+                        // CDP can resolve detached nodes. Check attachment in the
+                        // same JS turn as dispatch so a retained stale object
+                        // cannot activate its handler after leaving the document.
+                        "functionDeclaration": "function() { if (!this.isConnected) return false; this.click(); return true; }",
+                        "returnByValue": true,
                     }),
                 )
                 .await
             {
-                Ok(_) => ToolResult::text(format!(
+                Ok(value) if value.get("exceptionDetails").is_some() => ToolResult::error(
+                    "DOM click raised an exception; delivery is unknown. Refresh page state before deciding what to do next; do not replay automatically.",
+                ),
+                Ok(value) if value.pointer("/result/value") == Some(&Value::Bool(false)) => {
+                    BrowserRefusal::new(
+                        BrowserRefusalCode::BrowserRefStale,
+                        "the ref's node is detached from the live document; no click was dispatched",
+                    )
+                    .to_tool_result()
+                }
+                Ok(value) if value.pointer("/result/value") == Some(&Value::Bool(true)) => ToolResult::text(format!(
                     "dispatched synthetic DOM click on {} in {tab_id}; application effect not \
                      verified (trust-gated controls may ignore untrusted events). Refresh page \
                      state and verify the expected postcondition",
@@ -1159,6 +1511,9 @@ impl Tool for BrowserClickTool {
                         "reason": "synthetic DOM dispatch cannot prove control activation; refresh page state and verify the expected postcondition",
                     },
                 })),
+                Ok(_) => ToolResult::error(
+                    "DOM click returned no delivery receipt; delivery is unknown. Refresh page state before deciding what to do next; do not replay automatically.",
+                ),
                 Err(e) => ToolResult::error(format!("DOM click failed: {e}")),
             };
         }
@@ -1479,6 +1834,7 @@ async fn enter_focus_emulation(
 pub struct BrowserTypeTool {
     def: ToolDef,
     engine: Arc<BrowserEngine>,
+    clipboard: Option<Arc<dyn crate::clipboard::ClipboardBackend>>,
 }
 
 impl BrowserTypeTool {
@@ -1487,7 +1843,9 @@ impl BrowserTypeTool {
             name: "browser_type".into(),
             description: "Type text into an exactly-bound tab via the Input domain. \
                 mode=\"insert_text\" (default) uses Input.insertText; \
-                mode=\"keystrokes\" dispatches per-character key events. Both insert \
+                mode=\"keystrokes\" dispatches per-character key events. \
+                mode=\"paste\" writes text/HTML to the clipboard and invokes a real \
+                browser paste; it leaves the supplied content on the clipboard. All modes insert \
                 at the caret, so typing into a field that already holds text appends \
                 to it; pass replace=true to set the field instead, or to clear it by \
                 typing an empty string. Pass a ref to an editable element from the \
@@ -1503,10 +1861,11 @@ impl BrowserTypeTool {
                     "ref": schema_ref(),
                     "mode": {
                         "type": "string",
-                        "enum": ["insert_text", "keystrokes"],
+                        "enum": ["insert_text", "keystrokes", "paste"],
                         "description": "insert_text (default): bulk Input.insertText. \
-                            keystrokes: per-character Input.dispatchKeyEvent."
+                            keystrokes: per-character Input.dispatchKeyEvent. paste: real clipboard paste (no replace)."
                     },
+                    "format": {"type": "string", "enum": ["text", "md", "html"], "description": "Paste format; Markdown is literal source."},
                     "replace": {
                         "type": "boolean",
                         "description": "false (default): insert at the caret, appending \
@@ -1525,7 +1884,11 @@ impl BrowserTypeTool {
             idempotent: false,
             open_world: true,
         };
-        Self { def, engine }
+        Self {
+            def,
+            engine,
+            clipboard: None,
+        }
     }
 }
 
@@ -1573,12 +1936,23 @@ impl Tool for BrowserTypeTool {
             Err(e) => return e,
         };
         let mode = args.opt_str("mode").unwrap_or_else(|| "insert_text".into());
-        if mode != "insert_text" && mode != "keystrokes" {
+        if mode != "insert_text" && mode != "keystrokes" && mode != "paste" {
             return ToolResult::error(format!(
-                "mode must be \"insert_text\" or \"keystrokes\", got {mode:?}"
+                "mode must be insert_text, keystrokes, or paste, got {mode:?}"
             ));
         }
         let replace = args.opt_bool("replace").unwrap_or(false);
+        let format = args.opt_str("format").unwrap_or_else(|| "text".into());
+        if mode == "paste" && (!matches!(format.as_str(), "text" | "md" | "html") || replace) {
+            return ToolResult::error(
+                "paste accepts format=text|md|html and does not accept replace=true",
+            );
+        }
+        if mode == "paste" && self.clipboard.is_none() {
+            return ToolResult::error(
+                "browser paste is unavailable without a platform clipboard backend",
+            );
+        }
 
         let _mutation = match self
             .engine
@@ -1722,6 +2096,42 @@ impl Tool for BrowserTypeTool {
                     )
                     .await;
             }
+        }
+
+        if mode == "paste" {
+            if let Err(error) =
+                enter_focus_emulation(conn, cdp, entry.backend_node_id, &object_id).await
+            {
+                return BrowserRefusal::new(
+                    BrowserRefusalCode::BrowserInputTrustUnavailable,
+                    error,
+                )
+                .to_tool_result();
+            }
+            let delivered = super::paste::deliver(
+                conn,
+                cdp,
+                &object_id,
+                self.clipboard.as_ref().expect("checked above").clone(),
+                &text,
+                &format,
+            )
+            .await;
+            let cleanup = conn
+                .call(
+                    Some(cdp),
+                    "Emulation.setFocusEmulationEnabled",
+                    json!({"enabled": false}),
+                )
+                .await;
+            return match (delivered, cleanup) {
+                (Ok(()), Ok(_)) => ToolResult::text("Dispatched one real browser paste. Inspect the editor to verify its result; clipboard content was not restored.")
+                    .with_structured(json!({"status":"ok", "effect":"unverifiable", "path":"cdp_input",
+                        "target_id":target_id,"tab_id":tab_id,"ref":ext_ref,"mode":"paste","format":format,
+                        "clipboard_restored":false})),
+                (Err(error), _) => ToolResult::error(error),
+                (Ok(()), Err(error)) => ToolResult::error(format!("Paste was dispatched but focus cleanup failed: {error}. Do not replay automatically.")),
+            };
         }
 
         let requested_chars = text.chars().count();
@@ -2052,6 +2462,512 @@ impl Tool for BrowserTypeTool {
                 "delivered_chars": delivered_chars,
                 "retryable": false,
             }))
+            .to_tool_result(),
+        }
+    }
+}
+
+// ── browser_key ──────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BrowserKeyRequest {
+    key: String,
+    code: String,
+    virtual_key_code: Option<u32>,
+    text: String,
+    modifiers: Vec<CdpModifier>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CdpModifier {
+    Alt,
+    Control,
+    Meta,
+    Shift,
+}
+
+impl CdpModifier {
+    fn bit(self) -> u8 {
+        match self {
+            Self::Alt => 1,
+            Self::Control => 2,
+            Self::Meta => 4,
+            Self::Shift => 8,
+        }
+    }
+
+    fn cdp_identity(self) -> (&'static str, &'static str, u32) {
+        match self {
+            Self::Alt => ("Alt", "AltLeft", 18),
+            Self::Control => ("Control", "ControlLeft", 17),
+            Self::Meta => ("Meta", "MetaLeft", 91),
+            Self::Shift => ("Shift", "ShiftLeft", 16),
+        }
+    }
+}
+
+fn parse_modifier(value: &str) -> Result<CdpModifier, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "alt" | "option" => Ok(CdpModifier::Alt),
+        "ctrl" | "control" => Ok(CdpModifier::Control),
+        "cmd" | "command" | "meta" | "super" | "win" | "windows" => Ok(CdpModifier::Meta),
+        "shift" => Ok(CdpModifier::Shift),
+        "fn" => Err("browser_key cannot represent the hardware Fn modifier through CDP".into()),
+        other => Err(format!("unsupported browser_key modifier {other:?}")),
+    }
+}
+
+fn key_identity(raw: &str) -> Result<(String, String, Option<u32>, String), String> {
+    let lower = raw.trim().to_ascii_lowercase();
+    let named = match lower.as_str() {
+        "return" | "enter" | "kp_enter" => Some(("Enter", "Enter", 13, "\r")),
+        "tab" => Some(("Tab", "Tab", 9, "")),
+        "escape" | "esc" => Some(("Escape", "Escape", 27, "")),
+        "space" | "spacebar" => Some((" ", "Space", 32, " ")),
+        "backspace" | "back_space" => Some(("Backspace", "Backspace", 8, "")),
+        "delete" | "del" => Some(("Delete", "Delete", 46, "")),
+        "home" => Some(("Home", "Home", 36, "")),
+        "end" => Some(("End", "End", 35, "")),
+        "pageup" | "page_up" | "prior" => Some(("PageUp", "PageUp", 33, "")),
+        "pagedown" | "page_down" | "next" => Some(("PageDown", "PageDown", 34, "")),
+        "left" | "arrowleft" | "leftarrow" => Some(("ArrowLeft", "ArrowLeft", 37, "")),
+        "up" | "arrowup" | "uparrow" => Some(("ArrowUp", "ArrowUp", 38, "")),
+        "right" | "arrowright" | "rightarrow" => Some(("ArrowRight", "ArrowRight", 39, "")),
+        "down" | "arrowdown" | "downarrow" => Some(("ArrowDown", "ArrowDown", 40, "")),
+        "plus" => Some(("+", "Equal", 187, "+")),
+        "minus" => Some(("-", "Minus", 189, "-")),
+        "comma" => Some((",", "Comma", 188, ",")),
+        "period" => Some((".", "Period", 190, ".")),
+        _ => None,
+    };
+    if let Some((key, code, virtual_key_code, text)) = named {
+        return Ok((
+            key.to_owned(),
+            code.to_owned(),
+            Some(virtual_key_code),
+            text.to_owned(),
+        ));
+    }
+    if let Some(number) = lower
+        .strip_prefix('f')
+        .and_then(|value| value.parse::<u32>().ok())
+    {
+        if (1..=24).contains(&number) {
+            return Ok((
+                format!("F{number}"),
+                format!("F{number}"),
+                Some(111 + number),
+                String::new(),
+            ));
+        }
+    }
+    if let Some(number) = lower
+        .strip_prefix("kp_")
+        .or_else(|| lower.strip_prefix("kp-"))
+        .and_then(|value| value.parse::<u32>().ok())
+    {
+        if number <= 9 {
+            return Ok((
+                number.to_string(),
+                format!("Numpad{number}"),
+                Some(96 + number),
+                number.to_string(),
+            ));
+        }
+    }
+    let mut chars = raw.chars();
+    let Some(character) = chars.next() else {
+        return Err("browser_key requires a non-empty key".into());
+    };
+    if chars.next().is_some() {
+        return Err(format!("unsupported browser_key key {raw:?}"));
+    }
+    let key = character.to_string();
+    let code = if character.is_ascii_alphabetic() {
+        format!("Key{}", character.to_ascii_uppercase())
+    } else if character.is_ascii_digit() {
+        format!("Digit{character}")
+    } else {
+        String::new()
+    };
+    let virtual_key_code = character
+        .is_ascii_alphanumeric()
+        .then_some(character.to_ascii_uppercase() as u32);
+    Ok((key.clone(), code, virtual_key_code, key))
+}
+
+fn parse_browser_key(args: &Value) -> Result<BrowserKeyRequest, String> {
+    let raw = args
+        .get("key")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "browser_key requires a non-empty key".to_owned())?;
+    let parts: Vec<&str> = if raw == "+" {
+        vec!["plus"]
+    } else if raw.contains('+') {
+        raw.split('+')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .collect()
+    } else {
+        vec![raw]
+    };
+    let mut modifiers = Vec::new();
+    let mut base = None;
+    for part in parts {
+        match parse_modifier(part) {
+            Ok(modifier) => {
+                if !modifiers.contains(&modifier) {
+                    modifiers.push(modifier);
+                }
+            }
+            Err(_) if base.is_none() => base = Some(part),
+            Err(_) => return Err("browser_key accepts exactly one non-modifier key".into()),
+        }
+    }
+    for raw_modifier in args.str_array("modifiers") {
+        let modifier = parse_modifier(&raw_modifier)?;
+        if !modifiers.contains(&modifier) {
+            modifiers.push(modifier);
+        }
+    }
+    let base = base.ok_or_else(|| "browser_key requires one non-modifier key".to_owned())?;
+    let (mut key, code, virtual_key_code, mut text) = key_identity(base)?;
+    if modifiers.contains(&CdpModifier::Shift) && key.len() == 1 && key.is_ascii() {
+        key.make_ascii_uppercase();
+        text.make_ascii_uppercase();
+    }
+    if modifiers.iter().any(|modifier| {
+        matches!(
+            modifier,
+            CdpModifier::Alt | CdpModifier::Control | CdpModifier::Meta
+        )
+    }) {
+        text.clear();
+    }
+    Ok(BrowserKeyRequest {
+        key,
+        code,
+        virtual_key_code,
+        text,
+        modifiers,
+    })
+}
+
+async fn dispatch_browser_key(
+    conn: &CdpConnection,
+    cdp_session: &str,
+    request: &BrowserKeyRequest,
+) -> Result<(), String> {
+    let mut mask = 0_u8;
+    let mut pressed = Vec::new();
+    for modifier in &request.modifiers {
+        mask |= modifier.bit();
+        let (key, code, virtual_key_code) = modifier.cdp_identity();
+        if let Err(error) = conn
+            .call(
+                Some(cdp_session),
+                "Input.dispatchKeyEvent",
+                json!({
+                    "type": "rawKeyDown", "key": key, "code": code,
+                    "windowsVirtualKeyCode": virtual_key_code,
+                    "nativeVirtualKeyCode": virtual_key_code,
+                    "modifiers": mask,
+                }),
+            )
+            .await
+        {
+            // The failed modifier was never acknowledged, so do not include
+            // its bit while releasing the already-pressed prefix.
+            let cleanup =
+                release_browser_modifiers(conn, cdp_session, &pressed, mask & !modifier.bit())
+                    .await;
+            return Err(join_key_cleanup_error(
+                format!("modifier key-down failed: {error}"),
+                cleanup,
+            ));
+        }
+        pressed.push(*modifier);
+    }
+    let mut down = json!({
+        "type": if request.text.is_empty() { "rawKeyDown" } else { "keyDown" },
+        "key": request.key,
+        "code": request.code,
+        "modifiers": mask,
+    });
+    if let Some(virtual_key_code) = request.virtual_key_code {
+        down["windowsVirtualKeyCode"] = json!(virtual_key_code);
+        down["nativeVirtualKeyCode"] = json!(virtual_key_code);
+    }
+    if !request.text.is_empty() {
+        down["text"] = json!(request.text);
+        down["unmodifiedText"] = json!(request.text);
+    }
+    let down_result = conn
+        .call(Some(cdp_session), "Input.dispatchKeyEvent", down)
+        .await;
+    let up_result = if down_result.is_ok() {
+        let mut up = json!({
+            "type": "keyUp", "key": request.key, "code": request.code, "modifiers": mask,
+        });
+        if let Some(virtual_key_code) = request.virtual_key_code {
+            up["windowsVirtualKeyCode"] = json!(virtual_key_code);
+            up["nativeVirtualKeyCode"] = json!(virtual_key_code);
+        }
+        conn.call(Some(cdp_session), "Input.dispatchKeyEvent", up)
+            .await
+    } else {
+        Ok(json!({}))
+    };
+    let cleanup = release_browser_modifiers(conn, cdp_session, &pressed, mask).await;
+    match (down_result, up_result, cleanup.is_empty()) {
+        (Ok(_), Ok(_), true) => Ok(()),
+        (Err(error), _, _) => Err(join_key_cleanup_error(
+            format!("base key-down failed: {error}"),
+            cleanup,
+        )),
+        (Ok(_), Err(error), _) => Err(join_key_cleanup_error(
+            format!("base key-up failed after key-down was acknowledged: {error}"),
+            cleanup,
+        )),
+        (Ok(_), Ok(_), false) => Err(join_key_cleanup_error(
+            "base key was acknowledged but modifier cleanup failed".to_owned(),
+            cleanup,
+        )),
+    }
+}
+
+async fn release_browser_modifiers(
+    conn: &CdpConnection,
+    cdp_session: &str,
+    pressed: &[CdpModifier],
+    mut mask: u8,
+) -> Vec<String> {
+    let mut errors = Vec::new();
+    for modifier in pressed.iter().rev() {
+        mask &= !modifier.bit();
+        let (key, code, virtual_key_code) = modifier.cdp_identity();
+        if let Err(error) = conn
+            .call(
+                Some(cdp_session),
+                "Input.dispatchKeyEvent",
+                json!({
+                    "type": "keyUp", "key": key, "code": code,
+                    "windowsVirtualKeyCode": virtual_key_code,
+                    "nativeVirtualKeyCode": virtual_key_code,
+                    "modifiers": mask,
+                }),
+            )
+            .await
+        {
+            errors.push(format!("{key} key-up failed: {error}"));
+        }
+    }
+    errors
+}
+
+fn join_key_cleanup_error(primary: String, cleanup: Vec<String>) -> String {
+    if cleanup.is_empty() {
+        primary
+    } else {
+        format!("{primary}; cleanup was incomplete: {}", cleanup.join("; "))
+    }
+}
+
+pub struct BrowserKeyTool {
+    def: ToolDef,
+    engine: Arc<BrowserEngine>,
+}
+
+impl BrowserKeyTool {
+    pub fn new(engine: Arc<BrowserEngine>) -> Self {
+        Self {
+            def: ToolDef {
+                name: "browser_key".into(),
+                description: "Press one xdotool-style key or modifier combination in an exactly-bound browser tab through trusted CDP Input events. The event is delivered to the page's current focus without activating browser chrome. Optionally pass a current type-capable semantic ref to focus that exact editable node first. Browser-level shortcuts are not emulated; use browser_navigate for back, forward, and reload.".into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "target_id": schema_target_id(),
+                        "tab_id": schema_tab_id(),
+                        "session": schema_session(),
+                        "key": { "type": "string", "description": "One key or combination, for example Return, Tab, Escape, super+v, ctrl+a, Up, F5, or KP_0." },
+                        "modifiers": { "type": "array", "items": { "type": "string" }, "description": "Optional modifier aliases; equivalent to including them in key." },
+                        "ref": schema_ref()
+                    },
+                    "required": ["target_id", "tab_id", "key"],
+                    "additionalProperties": true
+                }),
+                read_only: false,
+                destructive: false,
+                idempotent: false,
+                open_world: true,
+            },
+            engine,
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for BrowserKeyTool {
+    fn def(&self) -> &ToolDef {
+        &self.def
+    }
+
+    async fn protected_resource_ownership(
+        &self,
+        adapter_id: &str,
+        args: &Value,
+    ) -> ProtectedResourceOwnership {
+        if adapter_id == "browser_bound_input" {
+            browser_resource_ownership(&self.engine, args)
+        } else {
+            ProtectedResourceOwnership::UserOwned
+        }
+    }
+
+    async fn protected_resource_scope(
+        &self,
+        adapter_id: &str,
+        args: &Value,
+    ) -> Result<Option<Value>, String> {
+        if adapter_id == "browser_bound_input" {
+            browser_protected_resource_scope(&self.engine, args, "browser_key").await
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn invoke(&self, args: Value) -> ToolResult {
+        let (target_id, tab_id) = match (args.require_str("target_id"), args.require_str("tab_id"))
+        {
+            (Ok(target), Ok(tab)) => (target, tab),
+            (Err(error), _) | (_, Err(error)) => return error,
+        };
+        let session = match require_explicit_session(&args) {
+            Ok(session) => session,
+            Err(error) => return error,
+        };
+        let request = match parse_browser_key(&args) {
+            Ok(request) => request,
+            Err(error) => return ToolResult::error(error),
+        };
+        let _mutation = match self
+            .engine
+            .lock_mutation(&session, &target_id, &tab_id)
+            .await
+        {
+            Ok(guard) => guard,
+            Err(refusal) => return refusal.to_tool_result(),
+        };
+        let validated = match self
+            .engine
+            .revalidate_for_mutation(&session, &target_id, Some(&tab_id))
+            .await
+        {
+            Ok(validated) => validated,
+            Err(refusal) => return refusal.to_tool_result(),
+        };
+        let mut cdp_session = validated.cdp_session.clone();
+        let mut external_ref = None;
+        if let Some(reference) = args.opt_str("ref") {
+            let entry = match self
+                .engine
+                .store
+                .resolve_ref(&session, &target_id, &tab_id, &reference)
+            {
+                Ok(entry) => entry,
+                Err(refusal) => return refusal.to_tool_result(),
+            };
+            if entry.semantic && !entry.actions.contains(&BrowserActionKind::Type) {
+                return BrowserRefusal::new(
+                    BrowserRefusalCode::BrowserActionUnavailable,
+                    format!("semantic ref {reference} does not declare the type action"),
+                )
+                .to_tool_result();
+            }
+            cdp_session = match self
+                .engine
+                .frame_session_for_mutation(&session, &target_id, &tab_id, &validated, &entry.frame)
+                .await
+            {
+                Ok(cdp_session) => cdp_session,
+                Err(refusal) => return refusal.to_tool_result(),
+            };
+            if let Err(error) = validated
+                .conn
+                .call(
+                    Some(&cdp_session),
+                    "DOM.focus",
+                    json!({ "backendNodeId": entry.backend_node_id }),
+                )
+                .await
+            {
+                return BrowserRefusal::new(
+                    BrowserRefusalCode::BrowserRefStale,
+                    format!("the key target can no longer be focused: {error}"),
+                )
+                .to_tool_result();
+            }
+            external_ref = Some(reference);
+        }
+        if let Err(error) = validated
+            .conn
+            .call(
+                Some(&cdp_session),
+                "Emulation.setFocusEmulationEnabled",
+                json!({ "enabled": true }),
+            )
+            .await
+        {
+            return BrowserRefusal::new(
+                BrowserRefusalCode::BrowserInputTrustUnavailable,
+                format!("the exact tab could not enter CDP focus emulation: {error}"),
+            )
+            .to_tool_result();
+        }
+        let delivered = dispatch_browser_key(&validated.conn, &cdp_session, &request).await;
+        let cleanup = validated
+            .conn
+            .call(
+                Some(&cdp_session),
+                "Emulation.setFocusEmulationEnabled",
+                json!({ "enabled": false }),
+            )
+            .await;
+        match (delivered, cleanup) {
+            (Ok(()), Ok(_)) => ToolResult::text(format!(
+                "pressed {} in exact tab {tab_id}",
+                request.key
+            ))
+            .with_structured(json!({
+                "status": "ok",
+                "target_id": target_id,
+                "tab_id": tab_id,
+                "ref": external_ref,
+                "key": request.key,
+                "modifier_count": request.modifiers.len(),
+                "path": "cdp_input",
+                "effect": "unverifiable",
+            })),
+            (Err(error), Ok(_)) => BrowserRefusal::new(
+                BrowserRefusalCode::BrowserInputIncomplete,
+                format!("exact-tab key delivery was not completed: {error}"),
+            )
+            .with_detail(json!({ "delivery": "unknown", "retryable": false }))
+            .to_tool_result(),
+            (Err(error), Err(cleanup_error)) => BrowserRefusal::new(
+                BrowserRefusalCode::BrowserInputTrustUnavailable,
+                format!("exact-tab key delivery was not completed ({error}) and focus emulation could not be restored ({cleanup_error}); delivery is unknown and must not be retried automatically"),
+            )
+            .with_detail(json!({ "delivery": "unknown", "retryable": false }))
+            .to_tool_result(),
+            (Ok(()), Err(error)) => BrowserRefusal::new(
+                BrowserRefusalCode::BrowserInputTrustUnavailable,
+                format!("the key was acknowledged but focus emulation could not be restored ({error}); delivery is unknown and must not be retried automatically"),
+            )
+            .with_detail(json!({ "delivery": "unknown", "retryable": false }))
             .to_tool_result(),
         }
     }
@@ -2470,11 +3386,40 @@ impl Tool for BrowserSetInputFilesTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+
     use crate::browser::platform::{BrowserPlatform, PrepareOutcome, PrepareRequest};
     use crate::browser::types::{
         BrowserClassification, BrowserEngineFamily, BrowserProduct, NativeWindowInfo,
         OwnedEndpoint, ProcessFingerprint,
     };
+
+    #[test]
+    fn semantic_ref_serializes_link_destination_as_metadata() {
+        let listed = crate::browser::engine::SemanticListedRef {
+            external: "p7:0".to_owned(),
+            node: crate::browser::semantic::SemanticNode {
+                ax_id: "link".to_owned(),
+                parent_ax_id: None,
+                child_ax_ids: Vec::new(),
+                backend_node_id: Some(42),
+                role: "link".to_owned(),
+                name: Some("Documentation".to_owned()),
+                value: None,
+                destination_url: Some("https://example.test/docs".to_owned()),
+                states: BTreeMap::new(),
+                frame: crate::browser::store::FrameRef::main_unproven(),
+                visibility: crate::browser::store::BrowserVisibility::InViewport,
+                actions: vec![crate::browser::store::BrowserActionKind::Click],
+                document_order: 0,
+            },
+        };
+
+        let serialized = semantic_ref_value(&listed);
+        assert_eq!(serialized["url"], "https://example.test/docs");
+        assert_eq!(serialized["actions"], json!(["click"]));
+        assert_eq!(serialized["ref"], "p7:0");
+    }
 
     /// Minimal adapter: pid 1 is a CDP-capable browser with no endpoint
     /// (setup required); pid 2 is not a browser; pid 3 is Safari-like
@@ -2612,6 +3557,10 @@ mod tests {
             state.def().input_schema["properties"]["include_screenshot"]["default"],
             false
         );
+        assert_eq!(
+            state.def().input_schema["properties"]["context_ref"]["type"],
+            "string"
+        );
 
         let prepare = BrowserPrepareTool::new(e.clone());
         assert!(prepare.def().destructive);
@@ -2646,6 +3595,7 @@ mod tests {
                 BrowserTypeTool::new(e.clone()).def().clone(),
                 "browser_type",
             ),
+            (BrowserKeyTool::new(e.clone()).def().clone(), "browser_key"),
             (
                 BrowserDialogTool::new(e.clone()).def().clone(),
                 "browser_dialog",
@@ -2674,6 +3624,7 @@ mod tests {
             BrowserNavigateTool::new(e.clone()).def().clone(),
             BrowserClickTool::new(e.clone()).def().clone(),
             BrowserTypeTool::new(e.clone()).def().clone(),
+            BrowserKeyTool::new(e.clone()).def().clone(),
             BrowserDialogTool::new(e.clone()).def().clone(),
             BrowserSetInputFilesTool::new(e.clone()).def().clone(),
             BrowserDownloadTool::new(e.clone()).def().clone(),
@@ -2698,12 +3649,33 @@ mod tests {
                 "browser_navigate",
                 "browser_click",
                 "browser_type",
+                "browser_key",
                 "browser_dialog",
                 "browser_set_input_files",
                 "browser_download",
                 "browser_pointer"
             ]
         );
+    }
+
+    #[test]
+    fn browser_key_parser_normalizes_common_chords_without_guessing_layout_punctuation() {
+        let control = parse_browser_key(&json!({"key": "CTRL+a"})).unwrap();
+        assert_eq!(control.key, "a");
+        assert_eq!(control.code, "KeyA");
+        assert!(control.text.is_empty());
+        assert_eq!(control.modifiers, vec![CdpModifier::Control]);
+
+        let shifted = parse_browser_key(&json!({"key": "shift+a"})).unwrap();
+        assert_eq!(shifted.key, "A");
+        assert_eq!(shifted.text, "A");
+
+        let tab = parse_browser_key(&json!({"key": "Tab"})).unwrap();
+        assert!(tab.text.is_empty());
+
+        let punctuation = parse_browser_key(&json!({"key": "@"})).unwrap();
+        assert_eq!(punctuation.text, "@");
+        assert_eq!(punctuation.virtual_key_code, None);
     }
 
     #[test]
@@ -2972,13 +3944,15 @@ mod tests {
     #[tokio::test]
     async fn mutations_reject_bad_url_and_bad_route_before_binding() {
         let e = engine();
-        let nav = BrowserNavigateTool::new(e.clone())
-            .invoke(json!({
-                "target_id": "bt1", "tab_id": "tab1", "url": "file:///etc/passwd",
-                "_session_id": "run-1"
-            }))
-            .await;
-        assert_eq!(nav.is_error, Some(true));
+        for url in ["file:///etc/passwd", "https://"] {
+            let nav = BrowserNavigateTool::new(e.clone())
+                .invoke(json!({
+                    "target_id": "bt1", "tab_id": "tab1", "url": url,
+                    "_session_id": "run-1"
+                }))
+                .await;
+            assert_eq!(nav.is_error, Some(true), "url={url}");
+        }
 
         let click = BrowserClickTool::new(e)
             .invoke(json!({

@@ -283,6 +283,7 @@ const DESKTOP_INPUT_OPERATIONS: &[&str] = &[
     "hotkey",
     "set_value",
     "bring_to_front",
+    "close_window",
     "set_window_frame",
 ];
 const DESKTOP_INPUT_SCOPE_KEYS: &[&str] = &[
@@ -350,6 +351,7 @@ const BROWSER_BOUND_INPUT_OPERATIONS: &[&str] = &[
     "browser_navigate",
     "browser_click",
     "browser_type",
+    "browser_key",
     "browser_pointer",
 ];
 const BROWSER_BOUND_INPUT_SCOPE_KEYS: &[&str] = &[
@@ -764,7 +766,9 @@ pub fn enforcement_adapters_for_call(
         add("desktop_input");
     }
 
-    if matches!(tool, "clipboard_read" | "clipboard_write") {
+    if matches!(tool, "clipboard_read" | "clipboard_write")
+        || (tool == "browser_type" && args.get("mode").and_then(Value::as_str) == Some("paste"))
+    {
         add("clipboard");
     }
 
@@ -892,6 +896,7 @@ pub fn advertised_risk_for(tool: &str) -> RiskAssessment {
         | "invoke_menu"
         | "launch_app"
         | "bring_to_front"
+        | "close_window"
         | "set_window_frame"
         | "start_session"
         | "end_session"
@@ -920,6 +925,7 @@ pub fn advertised_risk_for(tool: &str) -> RiskAssessment {
         | "browser_navigate"
         | "browser_click"
         | "browser_type"
+        | "browser_key"
         | "browser_pointer"
         | "history_status"
         | "history_query" => RiskClass::R2,
@@ -1189,6 +1195,7 @@ fn enforce_hard_invariants(
             | "set_value"
             | "kill_app"
             | "bring_to_front"
+            | "close_window"
             | "get_accessibility_tree"
             | "get_window_state"
             | "verify_state"

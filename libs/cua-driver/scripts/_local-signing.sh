@@ -4,7 +4,7 @@
 # This file has no top-level side effects so its policy can be exercised by
 # focused shell tests without building or installing cua-driver.
 
-CUA_LOCAL_SIGN_CN="CuaDriver Local Signing (cua-driver-rs)"
+CUA_LOCAL_SIGN_CN="OpenSky Driver Signing"
 
 local_signing_keychain() {
     if [ -n "${CUA_DRIVER_LOCAL_SIGNING_KEYCHAIN:-}" ]; then
@@ -139,13 +139,13 @@ ad_hoc_requirement_changed() {
         && [ "$(classify_designated_requirement "$installed_requirement")" = "ad-hoc" ]
 }
 
-# Reset only the two TCC services used by Cua Driver Local, and only when an
+# Reset only the two TCC services used by OpenSky Driver, and only when an
 # actual ad-hoc cdhash transition was observed. The caller must register the
 # newly installed bundle with LaunchServices before invoking this function.
 reset_local_tcc_after_ad_hoc_change() {
     local previous_requirement="$1"
     local installed_requirement="$2"
-    local bundle_id="com.trycua.driver.local"
+    local bundle_id="com.opensky.driver"
     local service failed_services=""
 
     ad_hoc_requirement_changed "$previous_requirement" "$installed_requirement" || return 0
@@ -169,7 +169,7 @@ reset_local_tcc_after_ad_hoc_change() {
     fi
 
     echo "${YELLOW}The ad-hoc cdhash changed; cleared stale Accessibility and Screen Recording rows for $bundle_id.${NORMAL}" >&2
-    echo "Re-grant them to the new app with: cua-driver-local permissions grant" >&2
+    echo "Re-grant them to the new app with: opensky-driver permissions grant" >&2
 }
 
 # Signs a staged local app without touching the live installation. Strict mode
@@ -213,7 +213,7 @@ sign_staged_local_app() {
     clean_partial_bundle_signature "$app_stage"
     if ! codesign_bounded 20 --force --deep --sign - "$app_stage" 2>/dev/null; then
         clean_partial_bundle_signature "$app_stage"
-        echo "${RED}Error: codesign of staged CuaDriverLocal.app failed; live installation was not changed.${NORMAL}" >&2
+        echo "${RED}Error: codesign of staged OpenSkyDriver.app failed; live installation was not changed.${NORMAL}" >&2
         return 1
     fi
     requirement="$(designated_requirement "$app_stage")"
@@ -221,7 +221,7 @@ sign_staged_local_app() {
         echo "${RED}Error: could not verify the staged app's ad-hoc designated requirement; live installation was not changed.${NORMAL}" >&2
         return 1
     fi
-    echo "${YELLOW}WARNING: CuaDriverLocal.app was signed ad-hoc (designated requirement uses cdhash).${NORMAL}" >&2
+    echo "${YELLOW}WARNING: OpenSkyDriver.app was signed ad-hoc (designated requirement uses cdhash).${NORMAL}" >&2
     echo "${YELLOW}Accessibility and Screen Recording grants WILL become invalid on the next rebuild.${NORMAL}" >&2
     print_local_signing_bootstrap
 }

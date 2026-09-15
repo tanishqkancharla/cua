@@ -192,7 +192,7 @@ esac
     assert (
         custom_target / "release/cua-cursor-theme"
     ).read_text() == "fresh cursor theme compiler\n"
-    assert (install_bin / "cua-driver-local").read_text() == "fresh custom target\n"
+    assert (install_bin / "opensky-driver").read_text() == "fresh custom target\n"
     assert (
         local_home / "packages/current/cua-cursor-theme"
     ).read_text() == "fresh cursor theme compiler\n"
@@ -274,7 +274,7 @@ def test_dispatcher_forwards_bin_dir_override(tmp_path: Path, flag_form: list[st
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert (flag_bin / "cua-driver-local").read_text() == "fresh driver\n"
+    assert (flag_bin / "opensky-driver").read_text() == "fresh driver\n"
     assert not (tmp_path / "env-bin").exists()
 
 
@@ -303,7 +303,7 @@ def test_reinstall_over_a_running_driver(tmp_path: Path) -> None:
     """Staging must replace the versioned binary by rename, not write through it.
 
     The version tag is stable per build config, so every rebuild targets the
-    same path. If a previous cua-driver-local is still executing out of it, a
+    same path. If a previous opensky-driver is still executing out of it, a
     write-in-place `cp` fails with ETXTBSY ("Text file busy") and the install
     dies mid-stage. Reproduce that with a real running executable.
     """
@@ -312,7 +312,7 @@ def test_reinstall_over_a_running_driver(tmp_path: Path) -> None:
         tmp_path / "local-home/packages/releases/0.0.0-local-debug-x86_64-unknown-linux-gnu"
     )
     versioned.mkdir(parents=True)
-    busy = versioned / "cua-driver-local"
+    busy = versioned / "opensky-driver"
     shutil.copy2("/bin/sleep", busy)
 
     running = subprocess.Popen([str(busy), "60"])

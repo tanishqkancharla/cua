@@ -1,3 +1,4 @@
+# Retained upstream regression coverage; public OpenSky entry points use uninstall-local.
 from __future__ import annotations
 
 import os
@@ -8,7 +9,7 @@ import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
-UNINSTALL = REPO_ROOT / "libs/cua-driver/scripts/uninstall.sh"
+UNINSTALL = REPO_ROOT / "libs/cua-driver/scripts/_upstream-uninstall.sh"
 
 
 def _write_executable(path: Path, body: str) -> None:
@@ -24,6 +25,8 @@ def _sandbox(tmp_path: Path, os_name: str) -> tuple[Path, Path, dict[str, str]]:
     fake_bin.mkdir()
 
     _write_executable(fake_bin / "uname", f"printf '%s\\n' '{os_name}'\n")
+    # The fixture owns no daemon; do not inspect unrelated host processes.
+    _write_executable(fake_bin / "pgrep", "exit 1\n")
     for command in ("launchctl", "systemctl", "tccutil", "sudo"):
         _write_executable(
             fake_bin / command,

@@ -80,6 +80,13 @@ pub struct PrepareProfile {
     pub mode: PrepareProfileMode,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Launch the driver-owned isolated browser without a native window.
+    #[serde(default)]
+    pub headless: bool,
+    /// Return the loopback HTTP debugger endpoint to the trusted caller.
+    /// This is limited to driver-owned headless profiles.
+    #[serde(default)]
+    pub expose_debugger_endpoint: bool,
 }
 
 /// Acting strategy for browser preparation that is not a driver-owned profile
