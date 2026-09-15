@@ -302,7 +302,8 @@ impl GetBrowserStateTool {
             description: "Read-only browser inspection. Mode 1 (bind): pass pid + \
                 window_id of a native browser window to classify it, correlate it to \
                 a CDP target (exact-or-refuse), and mint a session-scoped target id \
-                plus tab ids. Mode 2 (snapshot): pass target_id + tab_id. The \
+                plus tab ids. A driver-owned headless browser binds with pid alone. \
+                Mode 2 (snapshot): pass target_id + tab_id. The \
                 dom_refs_v1 compatibility format returns composed DOM refs. \
                 semantic_v2 joins accessibility, DOM, layout, and viewport state; \
                 ranks visible content before retained/offscreen state; and returns a \
@@ -682,12 +683,8 @@ impl Tool for GetBrowserStateTool {
             return snapshot;
         }
 
-        // Bind mode: pid + window_id.
+        // Bind mode: pid + window_id, or pid alone for a driver-owned headless browser.
         let pid = match args.require_i64("pid") {
-            Ok(v) => v,
-            Err(e) => return e,
-        };
-        let window_id = match args.require_u64("window_id") {
             Ok(v) => v,
             Err(e) => return e,
         };
@@ -697,11 +694,16 @@ impl Tool for GetBrowserStateTool {
         };
 
         let transport_session = args.opt_str("_transport_session_id");
-        match self
-            .engine
-            .bind_native(&session, transport_session.as_deref(), pid, window_id)
-            .await
-        {
+        let bound = if let Some(window_id) = args.opt_u64("window_id") {
+            self.engine
+                .bind_native(&session, transport_session.as_deref(), pid, window_id)
+                .await
+        } else {
+            self.engine
+                .bind_driver_owned_headless(&session, transport_session.as_deref(), pid)
+                .await
+        };
+        match bound {
             Ok((target_id, record)) => {
                 let tabs: Vec<Value> = record
                     .tabs
@@ -719,7 +721,9 @@ impl Tool for GetBrowserStateTool {
                     BindingQuality::Exact => "exact",
                     BindingQuality::Heuristic => "heuristic",
                 };
-                let binding_route = if record.cdp_window_id.is_some() {
+                let binding_route = if record.window_id == 0 {
+                    "driver_owned_headless"
+                } else if record.cdp_window_id.is_some() {
                     "native_cdp_window"
                 } else {
                     "embedded_single_page"
@@ -790,7 +794,9 @@ impl BrowserPrepareTool {
                         "type": "object",
                         "properties": {
                             "mode": { "type": "string", "enum": ["isolated_new", "isolated_named"] },
-                            "name": { "type": "string", "description": "Required only for isolated_named; 1-64 path-safe ASCII characters." }
+                            "name": { "type": "string", "description": "Required only for isolated_named; 1-64 path-safe ASCII characters." },
+                            "headless": { "type": "boolean", "default": false, "description": "Launch a driver-owned isolated Chromium process without a native window." },
+                            "expose_debugger_endpoint": { "type": "boolean", "default": false, "description": "Return the loopback HTTP debugger endpoint for a driver-owned headless browser so a trusted test host can attach." }
                         },
                         "required": ["mode"],
                         "additionalProperties": false
@@ -866,6 +872,9 @@ impl Tool for BrowserPrepareTool {
                 Err(error) => error,
             };
         }
+        let debugger_endpoint_requested = profile
+            .as_ref()
+            .is_some_and(|profile| profile.headless && profile.expose_debugger_endpoint);
         let request = PrepareRequest {
             pid,
             window_id: args.opt_u64("window_id"),
@@ -878,6 +887,10 @@ impl Tool for BrowserPrepareTool {
         match self.engine.prepare_browser(request).await {
             Ok(outcome) => {
                 let prepared = outcome.endpoint.is_some();
+                let debugger_http_url = debugger_endpoint_requested
+                    .then(|| outcome.endpoint.as_ref()?.http_port)
+                    .flatten()
+                    .map(|port| format!("http://127.0.0.1:{port}"));
                 ToolResult::text(format!(
                     "browser_prepare: {} — {}",
                     if prepared {
@@ -894,6 +907,7 @@ impl Tool for BrowserPrepareTool {
                     "message": outcome.message,
                     // The ws_url itself stays internal; expose only proof metadata.
                     "endpoint_ownership": outcome.endpoint.map(|e| e.ownership),
+                    "debugger_http_url": debugger_http_url,
                     "prepared_pid": outcome.prepared_pid,
                     "side_effects": outcome.side_effects,
                     "attachment": outcome.attachment,

@@ -58,7 +58,8 @@ use super::store::{
 };
 use super::types::{
     BindingQuality, BrowserClassification, BrowserEngineFamily, BrowserProcessRole,
-    EndpointAccessClass, NativeWindowInfo, OwnedEndpoint, Rect,
+    EndpointAccessClass, NativeOwnershipMethod, NativeOwnershipProof, NativeWindowInfo,
+    OwnedEndpoint, Rect,
 };
 
 /// Bounds tolerance (device pixels) for native ↔ CDP window correlation.
@@ -1238,6 +1239,70 @@ impl BrowserEngine {
         Ok(out)
     }
 
+    /// Enumerate exact page targets without requiring a native-window mapping.
+    /// This is used only for a browser process launched and owned by this driver
+    /// session in headless mode.
+    async fn headless_page_candidates(
+        &self,
+        conn: &CdpConnection,
+    ) -> Result<Vec<CdpWindowCandidate>, BrowserRefusal> {
+        let targets = conn
+            .call(None, "Target.getTargets", json!({}))
+            .await
+            .map_err(|error| route_err("Target.getTargets failed", error))?;
+        let infos = targets
+            .get("targetInfos")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                refuse(
+                    BrowserRefusalCode::BrowserRouteUnavailable,
+                    "Target.getTargets returned no targetInfos array",
+                )
+            })?;
+        let mut out = Vec::new();
+        for info in infos {
+            if info.get("type").and_then(Value::as_str) != Some("page") {
+                continue;
+            }
+            let url = info
+                .get("url")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned();
+            if url.starts_with("devtools://") {
+                continue;
+            }
+            let cdp_target_id = info
+                .get("targetId")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    refuse(
+                        BrowserRefusalCode::BrowserRouteUnavailable,
+                        "Target.getTargets returned a page without targetId",
+                    )
+                })?;
+            out.push(CdpWindowCandidate {
+                cdp_target_id,
+                cdp_window_id: None,
+                title: info
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_owned(),
+                url,
+                bounds: None,
+            });
+        }
+        if out.is_empty() {
+            return Err(refuse(
+                BrowserRefusalCode::BrowserTabNotFound,
+                "the driver-owned headless browser has no page target",
+            ));
+        }
+        Ok(out)
+    }
+
     /// Attach (flattened) to a tab's target and return the CDP session id.
     async fn attach(
         &self,
@@ -1270,6 +1335,77 @@ impl BrowserEngine {
     }
 
     // ── Binding (get_browser_state, pid + window_id mode) ──────────────
+
+    /// Bind every page in an exact driver-owned headless Chromium process.
+    /// Process and endpoint ownership replace native-window correlation; the
+    /// returned opaque tab ids still select one exact CDP page target.
+    pub(crate) async fn bind_driver_owned_headless(
+        &self,
+        session: &str,
+        transport_session: Option<&str>,
+        pid: i64,
+    ) -> Result<(String, TargetRecord), BrowserRefusal> {
+        let lifecycle_is_live = self.is_driver_owned_pid_for_session(session, pid)
+            || transport_session
+                .is_some_and(|owner| self.is_driver_owned_pid_for_session(owner, pid));
+        if !lifecycle_is_live {
+            return Err(refuse(
+                BrowserRefusalCode::BrowserWrongTargetRefused,
+                "pid-only binding requires a browser launched and owned by this driver session",
+            ));
+        }
+        let class = self.platform.classify_browser(pid).await?;
+        if !class.is_browser || !class.supports_cdp {
+            return Err(unsupported_engine_refusal(
+                &class,
+                "bind_driver_owned_headless",
+            ));
+        }
+        let fingerprint = self.platform.process_fingerprint(pid).await?;
+        let endpoint = self.owned_endpoint(pid).await?;
+        let conn = self.connect(&endpoint.ws_url).await?;
+        let candidates = self.headless_page_candidates(&conn).await?;
+        let mut tabs = HashMap::new();
+        for candidate in &candidates {
+            let tab_id = self.store.mint_tab_id();
+            tabs.insert(
+                tab_id.clone(),
+                TabRecord {
+                    tab_id,
+                    cdp_target_id: candidate.cdp_target_id.clone(),
+                    title: candidate.title.clone(),
+                    url: candidate.url.clone(),
+                    active: None,
+                    generation: 0,
+                    snapshots: HashMap::new(),
+                },
+            );
+        }
+        let representative = &candidates[0];
+        let record = TargetRecord {
+            target_id: String::new(),
+            pid,
+            // Zero is an internal sentinel for a driver-owned headless target;
+            // it is never accepted as a caller-supplied native window id.
+            window_id: 0,
+            ws_url: endpoint.ws_url.clone(),
+            endpoint_owner_pid: endpoint.ownership.owner_pid,
+            endpoint_transport: endpoint.transport,
+            endpoint_access_class: EndpointAccessClass::DriverOwned,
+            generation: 0,
+            transport_session: transport_session.map(str::to_owned),
+            fingerprint,
+            native_title: "Driver-owned headless Chromium".to_owned(),
+            native_bounds: Rect::default(),
+            cdp_target_id: representative.cdp_target_id.clone(),
+            cdp_window_id: None,
+            quality: BindingQuality::Exact,
+            tabs,
+        };
+        let target_id = self.store.mint_target(session, record.clone());
+        let record = self.store.get_target(session, &target_id)?;
+        Ok((target_id, record))
+    }
 
     /// Classify, inspect, discover, correlate — and mint a target
     /// capability on success. `session` must already be explicit.
@@ -1556,10 +1692,29 @@ impl BrowserEngine {
             ));
         }
 
-        // 2. Native window still exists and is still owned by the pid.
-        let native = self
-            .native_window_checked(record.pid, record.window_id)
-            .await?;
+        let driver_owned_headless = record.window_id == 0
+            && record.endpoint_access_class == EndpointAccessClass::DriverOwned;
+
+        // 2. Native window still exists and is still owned by the pid, except
+        // for an exact driver-owned headless process where no native window
+        // exists by construction.
+        let native = if driver_owned_headless {
+            NativeWindowInfo {
+                pid: record.pid,
+                window_id: 0,
+                title: record.native_title.clone(),
+                bounds: record.native_bounds,
+                geometry_exact: true,
+                ownership: NativeOwnershipProof {
+                    method: NativeOwnershipMethod::PlatformAttested,
+                    owner_pid: record.pid,
+                    detail: Some("driver-owned headless browser process".to_owned()),
+                },
+            }
+        } else {
+            self.native_window_checked(record.pid, record.window_id)
+                .await?
+        };
 
         // 3. Endpoint still owned and unchanged.
         let endpoint = if record.generation > 0 {
@@ -1585,7 +1740,11 @@ impl BrowserEngine {
         // 4. CDP target still a page in the bound CDP window, with either
         //    matching geometry or the same singleton cardinality proof.
         let conn = self.connection_for_record(session, &record).await?;
-        let candidates = self.window_candidates(&conn).await?;
+        let candidates = if driver_owned_headless {
+            self.headless_page_candidates(&conn).await?
+        } else {
+            self.window_candidates(&conn).await?
+        };
         let live = candidates
             .iter()
             .find(|c| c.cdp_target_id == tab.cdp_target_id)
@@ -1595,7 +1754,10 @@ impl BrowserEngine {
                     format!("tab {tab_id} no longer has a live CDP page target"),
                 )
             })?;
-        if let Some(bound_window_id) = record.cdp_window_id {
+        if driver_owned_headless {
+            // Endpoint/process ownership and the opaque CDP page capability are
+            // the complete proof for a target with no native window.
+        } else if let Some(bound_window_id) = record.cdp_window_id {
             if live.cdp_window_id != Some(bound_window_id) {
                 return Err(refuse(
                     BrowserRefusalCode::BrowserWrongTargetRefused,
@@ -1720,6 +1882,9 @@ impl BrowserEngine {
         viewport_y: f64,
         kind: BrowserVisualActionKind,
     ) {
+        if validated.native.window_id == 0 {
+            return;
+        }
         // `document.visibilityState` distinguishes the selected tab without
         // focusing its native window or invoking any CDP activation command.
         // Treat an unavailable or malformed proof as inactive: omitting
