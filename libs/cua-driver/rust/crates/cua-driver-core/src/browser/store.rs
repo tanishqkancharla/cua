@@ -271,6 +271,7 @@ pub struct TargetRecord {
 #[derive(Default)]
 struct SessionTargets {
     targets: HashMap<String, TargetRecord>,
+    tab_ids_by_cdp_target: HashMap<String, String>,
 }
 
 /// Parse an external page ref of the form `p<snapshot>:<index>`.
@@ -330,6 +331,19 @@ impl BrowserStore {
     /// Mint a fresh tab id (caller stores it via [`Self::update_target`]).
     pub fn mint_tab_id(&self) -> String {
         format!("tab-{}", Uuid::new_v4())
+    }
+
+    /// Return one stable opaque tab id for a live CDP target within a public
+    /// session. Rebinding the same browser window can refresh its inventory
+    /// without changing the provider-facing identity of unchanged tabs.
+    pub fn tab_id_for_cdp_target(&self, session: &str, cdp_target_id: &str) -> String {
+        let mut store = self.inner.lock().unwrap();
+        let session = store.entry(session.to_owned()).or_default();
+        session
+            .tab_ids_by_cdp_target
+            .entry(cdp_target_id.to_owned())
+            .or_insert_with(|| format!("tab-{}", Uuid::new_v4()))
+            .clone()
     }
 
     /// Mint a fresh snapshot id.
@@ -836,6 +850,18 @@ mod tests {
         store.invalidate_tab_snapshots("sess-a", &tid, &tab);
         let err = store.resolve_ref("sess-a", &tid, &tab, &ext).unwrap_err();
         assert_eq!(err.code, BrowserRefusalCode::BrowserRefStale);
+    }
+
+    #[test]
+    fn provider_tab_ids_are_stable_only_within_one_live_session() {
+        let store = BrowserStore::new();
+        let first = store.tab_id_for_cdp_target("sess-a", "CDP-1");
+        assert_eq!(store.tab_id_for_cdp_target("sess-a", "CDP-1"), first);
+        assert_ne!(store.tab_id_for_cdp_target("sess-a", "CDP-2"), first);
+        assert_ne!(store.tab_id_for_cdp_target("sess-b", "CDP-1"), first);
+
+        store.remove_session("sess-a");
+        assert_ne!(store.tab_id_for_cdp_target("sess-a", "CDP-1"), first);
     }
 
     #[test]

@@ -227,6 +227,9 @@ Choose a returned `tab_id`, then request the page snapshot. `active` is
 tri-state: `true` is a uniquely proven selected tab, `false` is a proven
 unselected tab, and `null` means native evidence cannot distinguish the
 selection. Never guess from list order when all tabs are `null`.
+Rebinding the same live CDP page under the same public session returns the same
+opaque `tab_id`. Ending the session drops that identity namespace; callers must
+not correlate IDs across sessions.
 
 ```bash
 cua-driver get_browser_state \
