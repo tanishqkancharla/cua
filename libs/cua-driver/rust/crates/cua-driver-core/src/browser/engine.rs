@@ -1367,7 +1367,9 @@ impl BrowserEngine {
         let candidates = self.headless_page_candidates(&conn).await?;
         let mut tabs = HashMap::new();
         for candidate in &candidates {
-            let tab_id = self.store.mint_tab_id();
+            let tab_id = self
+                .store
+                .tab_id_for_cdp_target(session, &candidate.cdp_target_id);
             tabs.insert(
                 tab_id.clone(),
                 TabRecord {
@@ -1523,7 +1525,7 @@ impl BrowserEngine {
             Some(window_id) => c.cdp_window_id == Some(window_id),
             None => c.cdp_target_id == candidate.cdp_target_id,
         }) {
-            let tab_id = self.store.mint_tab_id();
+            let tab_id = self.store.tab_id_for_cdp_target(session, &c.cdp_target_id);
             tabs.insert(
                 tab_id.clone(),
                 TabRecord {
