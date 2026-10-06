@@ -756,6 +756,12 @@ fn main() {
             } else if pip_cfg.enabled {
                 platform_macos::pip::run_appkit_main_loop();
             } else {
+                // OpenSky's rich native paste queues AppKit HTML import here.
+                // No-overlay still needs the main loop in a graphical session;
+                // reuse upstream's loop without creating a PiP/overlay window.
+                if platform_macos::session::has_graphic_access() {
+                    platform_macos::pip::run_appkit_main_loop();
+                }
                 let _ = serve_handle.join();
             }
         }
