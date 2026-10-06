@@ -19,6 +19,9 @@ pub trait SnapshotPayload: Send + Sync + 'static {
         self.len() == 0
     }
     fn retain(&self, index: usize) -> Option<Self::Element>;
+    /// Optional observation metadata, prepared while the prior exact-window
+    /// payload is still retained under the publication lock. Never input authority.
+    fn prepare_observation_identity(&mut self, _previous: Option<&Self>) {}
 }
 
 struct Snapshot<S> {
@@ -180,12 +183,19 @@ impl<S: SnapshotPayload> SnapshotStore<S> {
         screenshot_scale: Option<f64>,
         semantic: bool,
     ) -> Option<(u32, Vec<u32>)> {
+        let mut payload = payload;
         let (id, retired) = {
             let mut inner = self.inner.lock().unwrap();
             if session.is_some_and(crate::session::is_session_ended) {
                 return None;
             }
             let lane = inner.entry(pid).or_default();
+            if semantic {
+                let previous = lane
+                    .iter()
+                    .find(|entry| entry.window_id == window_id && entry.semantic);
+                payload.prepare_observation_identity(previous.map(|entry| &entry.payload));
+            }
             let mut retired = Vec::new();
             if let Some(position) = lane.iter().position(|entry| entry.window_id == window_id) {
                 retired.push(lane.remove(position));
@@ -208,6 +218,22 @@ impl<S: SnapshotPayload> SnapshotStore<S> {
         let invalidated = retired.iter().map(|snapshot| snapshot.id).collect();
         drop(retired);
         Some((id, invalidated))
+    }
+
+    /// Read metadata only from the still-current exact publication. If another
+    /// observation replaced it, omit metadata instead of borrowing its identity.
+    pub fn with_current_payload<R>(
+        &self,
+        pid: i32,
+        window_id: u64,
+        snapshot_id: u32,
+        read: impl FnOnce(&S) -> R,
+    ) -> Option<R> {
+        let inner = self.inner.lock().unwrap();
+        let entry = inner.get(&pid)?.iter().find(|entry| {
+            entry.window_id == window_id && entry.id == snapshot_id && entry.semantic
+        })?;
+        Some(read(&entry.payload))
     }
 
     /// Resolve the screenshot transform from the same authoritative latest
@@ -509,6 +535,47 @@ mod tests {
     use crate::element_token::token_for;
     use crate::snapshot_test_support::Payload;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn observation_identity_is_prepared_only_for_the_exact_semantic_publication() {
+        struct Identity(u32);
+        impl SnapshotPayload for Identity {
+            type Element = ();
+            fn len(&self) -> usize {
+                0
+            }
+            fn retain(&self, _: usize) -> Option<()> {
+                None
+            }
+            fn prepare_observation_identity(&mut self, previous: Option<&Self>) {
+                self.0 = previous.map_or(1, |old| old.0 + 1);
+            }
+        }
+        let store = SnapshotStore::new();
+        let first = store.publish(1, 2, Identity(0));
+        assert_eq!(store.with_current_payload(1, 2, first, |s| s.0), Some(1));
+        let next = store.publish(1, 2, Identity(0));
+        assert_eq!(store.with_current_payload(1, 2, first, |s| s.0), None);
+        assert_eq!(store.with_current_payload(1, 2, next, |s| s.0), Some(2));
+        assert_eq!(store.with_current_payload(1, 3, next, |s| s.0), None);
+        let sibling = store.publish(1, 3, Identity(0));
+        assert_eq!(store.with_current_payload(1, 3, sibling, |s| s.0), Some(1));
+        let other_pid = store.publish(9, 2, Identity(0));
+        assert_eq!(
+            store.with_current_payload(9, 2, other_pid, |s| s.0),
+            Some(1)
+        );
+        let capture = store
+            .publish_capture_for_session(1, 2, Identity(0), None, Some(1.0))
+            .unwrap()
+            .0;
+        assert_eq!(store.with_current_payload(1, 2, capture, |s| s.0), None);
+        let after_capture = store.publish(1, 2, Identity(0));
+        assert_eq!(
+            store.with_current_payload(1, 2, after_capture, |s| s.0),
+            Some(1)
+        );
+    }
 
     #[test]
     fn publish_then_resolve_returns_projection() {
