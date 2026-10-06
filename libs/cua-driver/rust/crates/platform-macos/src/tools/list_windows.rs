@@ -106,6 +106,20 @@ impl Tool for ListWindowsTool {
                 })
             });
 
+        // A focused AXSheet has its own CG surface, but its controls are walked
+        // within the exact parent AXWindow. Keep both identities; never infer a
+        // parent from title, size, stacking, or merely sharing a process.
+        let focused_sheet_parent_window_id = pid_filter
+            .and_then(|pid| focused_sheet_parent_window_id_of_pid(pid, focused_window_id))
+            .filter(|id| {
+                windows.iter().any(|window| {
+                    window.window_id == *id
+                        && Some(window.pid) == pid_filter
+                        && window.is_on_screen
+                        && window.on_current_space != Some(false)
+                })
+            });
+
         let mut windows_json: Vec<Value> = windows.iter().map(window_record_json).collect();
         if include_documents {
             let documents = document_urls(pid_filter.unwrap(), &windows);
@@ -119,7 +133,8 @@ impl Tool for ListWindowsTool {
                 "windows": windows_json,
                 "current_space_id": current_space_id,
                 "focused_window_id": focused_window_id,
-                "focused_element_window_id": focused_element_window_id
+                "focused_element_window_id": focused_element_window_id,
+                "focused_sheet_parent_window_id": focused_sheet_parent_window_id
             }),
         )
     }
@@ -140,6 +155,54 @@ fn focused_element_window_id_of_pid(pid: i32) -> Option<u32> {
         };
         CFRelease(focused as CFTypeRef);
         id
+    }
+}
+
+/// Observe the parent only through the actual focused sheet's same-process
+/// AXParent chain. The expected surface check rejects a focus change between
+/// the two reads. This metadata grants no input or handle-close authority.
+fn focused_sheet_parent_window_id_of_pid(pid: i32, expected_sheet: Option<u32>) -> Option<u32> {
+    use crate::ax::bindings::*;
+    use core_foundation::base::{CFRelease, CFTypeRef};
+    let expected_sheet = expected_sheet?;
+    unsafe {
+        let app = AXUIElementCreateApplication(pid);
+        if app.is_null() {
+            return None;
+        }
+        AXUIElementSetMessagingTimeout(app, 0.5);
+        let focused = copy_element_attr(app, "AXFocusedWindow");
+        CFRelease(app as CFTypeRef);
+        let mut current = focused?;
+        let mut result = None;
+        for depth in 0..=8 {
+            let mut owner = 0;
+            if AXUIElementGetPid(current, &mut owner) != kAXErrorSuccess || owner != pid {
+                break;
+            }
+            let role = copy_string_attr(current, "AXRole");
+            if depth == 0
+                && (role.as_deref() != Some("AXSheet")
+                    || ax_get_window_id(current) != Some(expected_sheet))
+            {
+                break;
+            }
+            match role.as_deref() {
+                Some("AXWindow") if depth > 0 => {
+                    result = ax_get_window_id(current).filter(|id| *id != expected_sheet);
+                    break;
+                }
+                Some("AXSheet") => {}
+                _ => break,
+            }
+            let Some(parent) = copy_element_attr(current, "AXParent") else {
+                break;
+            };
+            CFRelease(current as CFTypeRef);
+            current = parent;
+        }
+        CFRelease(current as CFTypeRef);
+        result
     }
 }
 
