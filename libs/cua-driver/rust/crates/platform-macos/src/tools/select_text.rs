@@ -139,20 +139,35 @@ impl Tool for SelectTextTool {
         // A verified AXSelectedTextRange alone can belong to a background
         // editor while the next formatting shortcut goes to another restored
         // document. Selection must establish the exact first responder too.
-        let activation = super::bring_to_front::BringToFrontTool
-            .invoke(serde_json::json!({"pid": pid, "window_id": window_id}))
-            .await;
-        if activation.is_error == Some(true) {
-            return activation;
-        }
         let address = ptr as usize;
+        // A focused auxiliary editor (for example Chrome Find) can own a
+        // separate AX window while AXFocusedWindow remains its main document.
+        // Preserve the already verified exact first responder in the frontmost
+        // app. Ownership was checked above; background or other editors still
+        // require the original exact-window activation path.
+        let already_focused = tokio::task::spawn_blocking(move || {
+            crate::apps::frontmost_pid() == Some(pid)
+                && crate::input::ax_actions::is_element_focused(pid, address)
+        })
+        .await
+        .unwrap_or(false);
+        if !already_focused {
+            let activation = super::bring_to_front::BringToFrontTool
+                .invoke(serde_json::json!({"pid": pid, "window_id": window_id}))
+                .await;
+            if activation.is_error == Some(true) {
+                return activation;
+            }
+        }
         let prefix = args.opt_str("prefix");
         let suffix = args.opt_str("suffix");
         match tokio::task::spawn_blocking(move || unsafe {
             let _retained = guard;
             let element = address as AXUIElementRef;
-            crate::input::ax_actions::focus_element(address)
-                .map_err(|error| format!("selection_focus_failed:{error}"))?;
+            if !crate::input::ax_actions::is_element_focused(pid, address) {
+                crate::input::ax_actions::focus_element(address)
+                    .map_err(|error| format!("selection_focus_failed:{error}"))?;
+            }
             // AX focus can settle asynchronously after a successful request.
             // Observe the retained exact element without replaying input or
             // accepting a different first responder.
@@ -164,6 +179,9 @@ impl Tool for SelectTextTool {
             }
             if !crate::input::ax_actions::is_element_focused(pid, address) {
                 return Err("selection_focus_unverified".to_owned());
+            }
+            if crate::apps::frontmost_pid() != Some(pid) {
+                return Err("selection_app_not_frontmost".to_owned());
             }
             if !is_attribute_settable(element, "AXSelectedTextRange") {
                 return Err("selection_range_not_settable".to_owned());

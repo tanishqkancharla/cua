@@ -35,3 +35,5 @@ failed fixtures remain retained, and no input is blindly replayed.
 
 Draft stacked on DriverPR27 (including PR25/26); companion SDK PR pending.
 Fresh affected serial Terra comparison next; no new causal resource claim.
+
+Fresh serial Terra1115/1116 exposed a second panel issue: indexed clicks now pass, but select_text requests an impossible child AXFocusedWindow transition. The extended FIND-N01 reproduces this exact refusal on unchanged dfbf383 runtime with cleanup clear. Selection now preserves the exact existing first responder only in the frontmost app after the existing ownership gate. Background/non-focused editors still use exact-window activation. Exact focus and foreground are rechecked before the existing UTF-16 range write/read-back. Companion SDK draft18; local acceptance and fresh resource comparison pending.
