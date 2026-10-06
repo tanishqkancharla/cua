@@ -602,6 +602,26 @@ impl Tool for GetWindowStateTool {
             (None, Some(r)) if scope_matched => build_elements_array_with_token(&r.nodes, None),
             _ => Vec::new(),
         };
+        // Additive observation metadata from this exact still-current publication.
+        // Passive/probe/degraded paths never borrow another snapshot's identity.
+        if let Some(sid) = snapshot_id {
+            if let Some(ids) = self.state.snapshots.with_current_payload(
+                pid,
+                u64::from(window_id),
+                sid,
+                |payload| payload.object_ids.clone(),
+            ) {
+                for element in &mut elements_json {
+                    if let Some(id) = element["element_index"]
+                        .as_u64()
+                        .and_then(|index| ids.get(index as usize))
+                        .and_then(Option::as_ref)
+                    {
+                        element["native_object_id"] = serde_json::json!(id);
+                    }
+                }
+            }
+        }
         let focused_index = if let Some(candidates) = focus_candidates {
             tokio::time::timeout(
                 std::time::Duration::from_millis(750),
