@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use core_foundation::base::{CFRelease, CFTypeRef, TCFType};
 use cua_driver_core::{
     protocol::ToolResult,
     tool::{Tool, ToolDef},
@@ -7,10 +8,12 @@ use serde_json::Value;
 use std::sync::Arc;
 
 use crate::ax::bindings::{
-    copy_action_names, element_screen_center, kAXErrorSuccess, perform_action, AXUIElementRef,
+    copy_action_names, copy_children, copy_string_attr, element_screen_center, kAXErrorSuccess,
+    perform_action, AXUIElementRef,
 };
 
 use super::ToolState;
+use crate::ax::open_document::{self, DocumentIdentity, normalize_resource as resource_url_for_comparison};
 
 pub struct DoubleClickTool {
     state: Arc<ToolState>,
@@ -305,6 +308,86 @@ impl Tool for DoubleClickTool {
 
 // ── Blocking AX path ─────────────────────────────────────────────────────────
 
+/// Resource identity must come from the actionable element (or its unique
+/// openable child), never from a filename/title converted into a path.
+unsafe fn open_destination_url(element: AXUIElementRef) -> Option<String> {
+    if let Some(url) = open_document::resource_url(element).filter(|url| !url.is_empty()) {
+        return resource_url_for_comparison(&url);
+    }
+    let mut urls = Vec::new();
+    for child in copy_children(element) {
+        if copy_action_names(child).iter().any(|action| action == "AXOpen") {
+            if let Some(url) = open_document::resource_url(child).filter(|url| !url.is_empty()) {
+                urls.push(url);
+            }
+        }
+        CFRelease(child as CFTypeRef);
+    }
+    if urls.len() == 1 {
+        urls.pop().and_then(|url| resource_url_for_comparison(&url))
+    } else {
+        None
+    }
+}
+
+/// A previously open matching document is not evidence that this input worked.
+/// Require a new/changed document on the exact newly focused, visible window.
+fn opened_document_window(
+    pid: i32,
+    destination: &str,
+    before: &std::collections::HashMap<u32, DocumentIdentity>,
+    windows: &[crate::windows::WindowInfo],
+    documents: &std::collections::HashMap<u32, String>,
+    focused: Option<u32>,
+) -> Option<u32> {
+    windows.iter().find(|window| {
+        window.pid == pid && window.layer == 0 && window.is_on_screen
+            && window.on_current_space != Some(false)
+            && focused == Some(window.window_id)
+            && documents.get(&window.window_id).map(String::as_str) == Some(destination)
+            && match before.get(&window.window_id) {
+                None => true,
+                Some(DocumentIdentity::Url(old)) => old != destination,
+                Some(DocumentIdentity::Absent) => true,
+                // An existing window without readable document identity does
+                // not establish a transition to this resource.
+                Some(DocumentIdentity::Unknown) => false,
+            }
+    }).map(|window| window.window_id)
+}
+
+/// A destination label read before AXOpen invalidates Finder's old row refs.
+unsafe fn open_destination_label(element: AXUIElementRef) -> Option<String> {
+    for attribute in ["AXTitle", "AXValue"] {
+        if let Some(value) = copy_string_attr(element, attribute).filter(|s| !s.trim().is_empty()) {
+            return Some(value);
+        }
+    }
+    let mut labels = Vec::new();
+    for child in copy_children(element) {
+        let role = copy_string_attr(child, "AXRole");
+        // A collection cell can expose its filename through an openable
+        // text field instead of a static label. Read it before AXOpen may
+        // invalidate the cell, and still refuse multiple candidate labels.
+        // Ordinary editable controls do not establish an Open destination.
+        let is_label = role.as_deref() == Some("AXStaticText")
+            || (role.as_deref() == Some("AXTextField")
+                && copy_action_names(child).iter().any(|action| action == "AXOpen"));
+        if is_label {
+            if let Some(value) = copy_string_attr(child, "AXValue").filter(|s| !s.trim().is_empty())
+            {
+                labels.push(value);
+            }
+        }
+        CFRelease(child as CFTypeRef);
+    }
+    if labels.len() == 1 {
+        labels.pop()
+    } else {
+        None
+    }
+}
+
 fn ax_double_click(
     pid: i32,
     wid: u32,
@@ -315,12 +398,59 @@ fn ax_double_click(
     allow_pointer_fallback: bool,
 ) -> anyhow::Result<String> {
     let element = element_ptr as AXUIElementRef;
+    let mut open_error = None;
 
     // Try AXOpen first (Finder items, openable list rows, document cells).
     if has_ax_open {
+        let before = crate::windows::window_info_by_id(wid)
+            .filter(|window| window.pid == pid)
+            .map(|window| window.title);
+        let destination = unsafe { open_destination_label(element) };
+        let resource = unsafe { open_destination_url(element) };
+        let before_documents = resource.as_ref().map(|_| {
+            let windows = crate::windows::all_windows();
+            open_document::snapshot(pid, &windows)
+        });
         let err = unsafe { perform_action(element, "AXOpen") };
         if err == kAXErrorSuccess {
             return Ok(format!("AXOpen performed on element [{idx}]."));
+        }
+        open_error = Some(err);
+        // Finder can navigate and invalidate this AX row while returning an
+        // AX error. Observe the exact window before any fallback actuator;
+        // only its requested destination title proves this Open completed.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(
+            if resource.is_some() { 1_000 } else { 500 }
+        );
+        let mut transitioned = false;
+        loop {
+            if let (Some(resource), Some(before_documents)) = (&resource, &before_documents) {
+                let windows = crate::windows::all_windows();
+                let documents = open_document::document_urls(pid, &windows).into_iter()
+                    .filter_map(|(id, url)| resource_url_for_comparison(&url).map(|url| (id, url)))
+                    .collect::<std::collections::HashMap<_, _>>();
+                if let Some(opened) = opened_document_window(pid, resource, before_documents,
+                    &windows, &documents, crate::ax::bindings::focused_window_id_of_pid(pid)) {
+                    return Ok(format!("Opened element [{idx}]; exact focused window {opened} now has requested document URL {resource:?} despite AXOpen receipt {err}. No fallback click was sent."));
+                }
+            }
+            let after = crate::windows::window_info_by_id(wid)
+                .filter(|window| window.pid == pid)
+                .map(|window| window.title);
+            if let (Some(before), Some(after), Some(destination)) = (&before, &after, &destination)
+            {
+                if before != after && after == destination {
+                    return Ok(format!("Opened element [{idx}]; exact window {wid} now shows {destination:?} despite AXOpen receipt {err}."));
+                }
+            }
+            transitioned |= after != before;
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        if transitioned {
+            anyhow::bail!("AXOpen returned {err} and changed window {wid}; requested resource={resource:?} is unverified, so no fallback click was sent");
         }
         if !allow_pointer_fallback {
             anyhow::bail!(
@@ -335,7 +465,10 @@ fn ax_double_click(
 
     // Resolve screen center and fall back to pixel double-click.
     let (cx, cy) = unsafe { element_screen_center(element) }
-        .ok_or_else(|| anyhow::anyhow!("Cannot resolve screen center for element [{idx}]"))?;
+        .ok_or_else(|| match open_error {
+            Some(err) => anyhow::anyhow!("AXOpen returned {err} for element [{idx}]; document outcome is unverified and the old element has no screen center. Observe the current app before another input; no fallback click was sent."),
+            None => anyhow::anyhow!("Cannot resolve screen center for element [{idx}]"),
+        })?;
 
     // Drive THIS session's cursor (threaded in via `cursor_key`), not "default".
     crate::cursor::overlay::send_command(
@@ -368,6 +501,73 @@ fn ax_double_click(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_reference_identity_follows_rename_without_guessing_a_filename() {
+        use core_foundation::url::*;
+        let directory = tempfile::tempdir().unwrap();
+        let directory = directory.path().canonicalize().unwrap();
+        let path = directory.join("requested α.pdf");
+        std::fs::write(&path, b"controlled URL identity").unwrap();
+        let url = CFURL::from_path(&path, false).unwrap();
+        let reference = unsafe {
+            let raw = CFURLCreateFileReferenceURL(std::ptr::null(), url.as_concrete_TypeRef(), std::ptr::null_mut());
+            assert!(!raw.is_null());
+            CFURL::wrap_under_create_rule(raw).get_string().to_string()
+        };
+        assert_eq!(resource_url_for_comparison(&reference), Some(url.get_string().to_string()));
+        let renamed = directory.join("same actual resource β.pdf");
+        std::fs::rename(path, &renamed).unwrap();
+        let expected = CFURL::from_path(&renamed, false).unwrap().get_string().to_string();
+        assert_eq!(resource_url_for_comparison(&reference), Some(expected));
+        assert_eq!(resource_url_for_comparison("https://example.test/path?q=1"), Some("https://example.test/path?q=1".into()));
+        assert_eq!(resource_url_for_comparison("file:///.file/id=0.0"), None);
+    }
+
+    fn document_window(pid: i32, id: u32) -> crate::windows::WindowInfo {
+        crate::windows::WindowInfo {
+            pid, window_id: id, app_name: "Document app".into(), title: "same display label".into(),
+            bounds: crate::windows::WindowBounds { x: 0.0, y: 0.0, width: 600.0, height: 400.0 },
+            layer: 0, z_index: 1, is_on_screen: true, on_current_space: Some(true),
+            current_space_id: Some(1), space_ids: Some(vec![1]),
+        }
+    }
+
+    #[test]
+    fn open_receipt_requires_new_or_changed_exact_focused_resource() {
+        use std::collections::HashMap;
+        let destination = "file:///controlled/requested.pdf";
+        let windows = vec![document_window(123, 42)];
+        let documents = HashMap::from([(42, destination.to_owned())]);
+        assert_eq!(opened_document_window(123, destination, &HashMap::new(), &windows, &documents, Some(42)), Some(42));
+        let changed = HashMap::from([(42, DocumentIdentity::Url("file:///controlled/old.pdf".to_owned()))]);
+        assert_eq!(opened_document_window(123, destination, &changed, &windows, &documents, Some(42)), Some(42));
+        for before in [HashMap::from([(42, DocumentIdentity::Url(destination.to_owned()))]), HashMap::from([(42, DocumentIdentity::Unknown)])] {
+            assert_eq!(opened_document_window(123, destination, &before, &windows, &documents, Some(42)), None);
+        }
+        let absent = HashMap::from([(42, DocumentIdentity::Absent)]);
+        assert_eq!(opened_document_window(123, destination, &absent, &windows, &documents, Some(42)), Some(42));
+        for focused in [None, Some(41)] {
+            assert_eq!(opened_document_window(123, destination, &HashMap::new(), &windows, &documents, focused), None);
+        }
+    }
+
+    #[test]
+    fn open_receipt_refuses_wrong_identity_hidden_and_other_space_windows() {
+        use std::collections::HashMap;
+        let destination = "file:///controlled/requested.pdf";
+        let documents = HashMap::from([(42, destination.to_owned())]);
+        let mut wrong_pid = document_window(124, 42);
+        let mut hidden = document_window(123, 42); hidden.is_on_screen = false;
+        let mut other_space = document_window(123, 42); other_space.on_current_space = Some(false);
+        let mut accessory = document_window(123, 42); accessory.layer = 3;
+        wrong_pid.title = "requested.pdf".into();
+        for window in [wrong_pid, hidden, other_space, accessory] {
+            assert_eq!(opened_document_window(123, destination, &HashMap::new(), &[window], &documents, Some(42)), None);
+        }
+        let wrong_resource = HashMap::from([(42, "file:///other/requested.pdf".to_owned())]);
+        assert_eq!(opened_document_window(123, destination, &HashMap::new(), &[document_window(123, 42)], &wrong_resource, Some(42)), None);
+    }
 
     #[test]
     fn background_element_route_does_not_guess_across_actuator_classes() {
