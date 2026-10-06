@@ -92,6 +92,20 @@ impl Tool for ListWindowsTool {
                 })
             });
 
+        // A child panel can own the focused control while AXFocusedWindow still
+        // names its main document (Chrome Find). This is observation metadata,
+        // never authority to send input to the document on the panel's behalf.
+        let focused_element_window_id = pid_filter
+            .and_then(focused_element_window_id_of_pid)
+            .filter(|id| {
+                windows.iter().any(|window| {
+                    window.window_id == *id
+                        && Some(window.pid) == pid_filter
+                        && window.is_on_screen
+                        && window.on_current_space != Some(false)
+                })
+            });
+
         let mut windows_json: Vec<Value> = windows.iter().map(window_record_json).collect();
         if include_documents {
             let documents = document_urls(pid_filter.unwrap(), &windows);
@@ -104,9 +118,28 @@ impl Tool for ListWindowsTool {
             serde_json::json!({
                 "windows": windows_json,
                 "current_space_id": current_space_id,
-                "focused_window_id": focused_window_id
+                "focused_window_id": focused_window_id,
+                "focused_element_window_id": focused_element_window_id
             }),
         )
+    }
+}
+
+/// Resolve only the actual focused element's own window. Foreign AX proxy
+/// elements are not app-scope focus evidence for the requested process.
+fn focused_element_window_id_of_pid(pid: i32) -> Option<u32> {
+    use crate::ax::bindings::*;
+    use core_foundation::base::{CFRelease, CFTypeRef};
+    unsafe {
+        let focused = focused_element_of_pid(pid)?;
+        let mut owner = 0;
+        let id = if AXUIElementGetPid(focused, &mut owner) == kAXErrorSuccess && owner == pid {
+            crate::ax::exact_target::element_window_id(focused)
+        } else {
+            None
+        };
+        CFRelease(focused as CFTypeRef);
+        id
     }
 }
 
