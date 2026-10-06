@@ -16,4 +16,8 @@ Implement a Mac AXDocument observation that distinguishes explicit NoValue from 
 
 Run relevant existing real Open/document/selection GUI gates, then unchanged affected CLI verification. Add focused regression for reused NoValue and refusal cases if practical. Canonical candidate matrix and Linux/Windows/release certification remain separate; no VM is authorized in the current campaign.
 
-Implementation pending. No candidate GUI or resource improvement claim.
+Implementation now distinguishes explicit AXNoValue from unreadable metadata and preserves unknown existing windows in the baseline. Only a new/changed exact focused visible resource identity acknowledges an AXOpen error; the semantic action is sent once.
+
+Validation: isolated cargo check passes; five focused unit checks pass (NoValue classification, new/changed/unknown/preexisting resource outcomes, wrong owner/focus/visibility/space and file-reference identity). Integrated local runtime SHA451ad0848491864384fa49c0dde1d5a827e8b59c69178cfc62c71130733ac5d2 passes existing real OPEN-N02 Preview and OPEN-F01 Finder GUI cases, with exact cleanup. The unchanged one-Open reproduction now returns no error; native AX independently proves the same window transitioned from explicit NoValue to the exact RTF URL, with unchanged source hash and exact cleanup.
+
+The integrated campaign runtime contains prior modifications; this is supporting Mac evidence, not standalone branch/full canonical desktop certification. Unchanged affected paid verification and a durable new GUI regression remain pending. No resource improvement or Linux/Windows/release acceptance claim.
