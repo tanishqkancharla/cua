@@ -466,13 +466,31 @@ impl Tool for HotkeyTool {
                             )?;
                             Ok(())
                         }
-                        // foreground rung: briefly front the window so NSMenu key
-                        // equivalents dispatch, then restore prior frontmost.
-                        (true, false, Some(wid), None) => {
-                            crate::input::skylight::with_menu_shortcut_activation(
+                        // Closing a Safari tab needs the exact window to stay
+                        // key through AppKit's close dispatch. The fast menu
+                        // shortcut path can restore the prior app before
+                        // Cmd+W is consumed, silently leaving the tab open.
+                        (true, false, Some(wid), None)
+                            if key.eq_ignore_ascii_case("w")
+                                && m.iter()
+                                    .any(|modifier| modifier.eq_ignore_ascii_case("cmd")) =>
+                        {
+                            crate::input::skylight::with_foreground_hid_activation(
                                 pid as libc::pid_t,
                                 wid,
                                 || crate::input::keyboard::hotkey_no_auth(pid, &key, &m),
+                            )?;
+                            Ok(())
+                        }
+                        // Foreground shortcuts must reach the guarded HID queue.
+                        // Brief menu activation plus PID-routed flags can return
+                        // before Safari consumes Cmd+[ or creates its new window.
+                        // Keep the exact window active through physical delivery.
+                        (true, false, Some(wid), None) => {
+                            crate::input::skylight::with_foreground_hid_activation(
+                                pid as libc::pid_t,
+                                wid,
+                                || crate::input::keyboard::press_key_global(&key, &m),
                             )?;
                             Ok(())
                         }

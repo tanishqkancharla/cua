@@ -149,6 +149,14 @@ impl FocusStealPreventer {
         }
     }
 
+    /// An explicit foreground request supersedes the late-launch watchdog.
+    /// Other suppression scopes (including a concurrent input mutation) are
+    /// deliberately left alone.
+    pub fn cancel_launch_watchdog(target_pid: i32) {
+        let shared = Self::shared();
+        shared.dispatcher.cancel_launch_watchdog(target_pid);
+    }
+
     /// Begin wildcard suppression while allowing one intentional activation.
     ///
     /// This is narrower than disabling suppression altogether: activation of
@@ -317,6 +325,19 @@ impl Dispatcher {
         let now_empty = {
             let mut guard = self.entries.lock().unwrap();
             guard.remove(&handle.0);
+            guard.is_empty()
+        };
+        if now_empty {
+            let _ = self.janitor_active.send(false);
+        }
+    }
+
+    fn cancel_launch_watchdog(&self, target_pid: i32) {
+        let now_empty = {
+            let mut guard = self.entries.lock().unwrap();
+            guard.retain(|_, entry| {
+                !(entry.target_pid == Some(target_pid) && entry.origin == "LaunchAppTool.watchdog")
+            });
             guard.is_empty()
         };
         if now_empty {

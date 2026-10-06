@@ -60,6 +60,12 @@ extern "C" {
         element: AXUIElementRef,
         names: *mut CFArrayRef,
     ) -> AXError;
+    pub fn AXUIElementCopyParameterizedAttributeValue(
+        element: AXUIElementRef,
+        attribute: CFStringRef,
+        parameter: CFTypeRef,
+        value: *mut CFTypeRef,
+    ) -> AXError;
     pub fn AXUIElementCopyActionNames(element: AXUIElementRef, names: *mut CFArrayRef) -> AXError;
     pub fn AXUIElementCopyElementAtPosition(
         application: AXUIElementRef,
@@ -127,6 +133,7 @@ pub unsafe fn element_at_screen_position(pid: i32, x: f64, y: f64) -> Option<AXU
 extern "C" {
     pub fn AXValueCreate(the_type: AXValueType, value_ptr: *const c_void) -> AXValueRef;
     pub fn AXValueGetType(value: AXValueRef) -> AXValueType;
+    pub fn AXValueGetTypeID() -> CFTypeID;
     pub fn AXValueGetValue(
         value: AXValueRef,
         the_type: AXValueType,
@@ -156,11 +163,19 @@ use core_foundation::{array::CFArray, base::TCFType, string::CFString as CFStr};
 ///
 /// `element` must be a valid, live `AXUIElementRef` for the duration of the call.
 pub unsafe fn is_attribute_settable(element: AXUIElementRef, attr_name: &str) -> bool {
+    attribute_settable(element, attr_name).unwrap_or(false)
+}
+
+/// Actual AX writability; preserve failed queries as unknown.
+///
+/// # Safety
+/// `element` must be valid and live for this call.
+pub unsafe fn attribute_settable(element: AXUIElementRef, attr_name: &str) -> Option<bool> {
     let attr = CFStr::new(attr_name);
     let mut settable = 0_u8;
-    AXUIElementIsAttributeSettable(element, attr.as_concrete_TypeRef(), &mut settable)
-        == kAXErrorSuccess
-        && settable != 0
+    (AXUIElementIsAttributeSettable(element, attr.as_concrete_TypeRef(), &mut settable)
+        == kAXErrorSuccess)
+        .then_some(settable != 0)
 }
 
 /// Copy a string attribute from an AX element. Returns `None` on any error.
@@ -184,26 +199,72 @@ pub unsafe fn copy_string_attr(element: AXUIElementRef, attr_name: &str) -> Opti
     Some(s.to_string())
 }
 
-/// Copy the `AXURL` attribute (a `CFURL`) as its absolute URL string.
-/// Returns `None` on any error or if the attribute is not a `CFURL`.
-///
-/// # Safety
-///
-/// `element` must be a valid, live `AXUIElementRef` for the duration of the call.
+/// Read AXURL whether the app reports a CFURL or CFString. This describes
+/// an observed resource, independently of an editable address or filename.
 pub unsafe fn copy_url_attr(element: AXUIElementRef) -> Option<String> {
-    use core_foundation::url::CFURL;
-    let attr = CFStr::new("AXURL");
+    copy_resource_url_attr(element, "AXURL")
+}
+
+/// Read an observed resource attribute as CFURL or CFString. The caller
+/// chooses the native attribute; no path is inferred from a display title.
+pub unsafe fn copy_resource_url_attr(element: AXUIElementRef, name: &str) -> Option<String> {
+    let attr = CFStr::new(name);
     let mut value: CFTypeRef = std::ptr::null();
-    let err = AXUIElementCopyAttributeValue(element, attr.as_concrete_TypeRef(), &mut value);
-    if err != kAXErrorSuccess || value.is_null() {
+    if AXUIElementCopyAttributeValue(element, attr.as_concrete_TypeRef(), &mut value)
+        != kAXErrorSuccess
+        || value.is_null()
+    {
         return None;
     }
-    if core_foundation::base::CFGetTypeID(value) != CFURL::type_id() {
-        CFRelease(value);
-        return None;
+    let type_id = core_foundation::base::CFGetTypeID(value);
+    if type_id == CFStr::type_id() {
+        let observed = CFStr::wrap_under_create_rule(value as _).to_string();
+        return Some(resolve_resource_url(&observed).unwrap_or(observed));
     }
-    let url = CFURL::wrap_under_create_rule(value as _);
-    Some(url.absolute().get_string().to_string())
+    if type_id == core_foundation::url::CFURL::type_id() {
+        let url = core_foundation::url::CFURL::wrap_under_create_rule(value as _);
+        let observed = url.get_string().to_string();
+        return Some(resolve_resource_url(&observed).unwrap_or(observed));
+    }
+    CFRelease(value);
+    None
+}
+
+#[link(name = "CoreFoundation", kind = "framework")]
+extern "C" {
+    fn CFURLIsFileReferenceURL(url: core_foundation::url::CFURLRef) -> u8;
+}
+
+/// Resolve an observed file-reference URL through the OS. The same resource
+/// can have an opaque reference in a collection and a path URL in its window.
+/// No filename or parent path is used to infer identity. Unresolved references
+/// cannot prove a destination; observations may retain their original value.
+pub fn resolve_resource_url(observed: &str) -> Option<String> {
+    use core_foundation::{string::CFString, url::*};
+    unsafe {
+        let string = CFString::new(observed);
+        let raw = CFURLCreateWithString(
+            std::ptr::null(),
+            string.as_concrete_TypeRef(),
+            std::ptr::null(),
+        );
+        if raw.is_null() {
+            return None;
+        }
+        let url = CFURL::wrap_under_create_rule(raw);
+        if CFURLIsFileReferenceURL(url.as_concrete_TypeRef()) == 0 {
+            return Some(observed.to_owned());
+        }
+        let mut error = std::ptr::null_mut();
+        let path = CFURLCreateFilePathURL(std::ptr::null(), url.as_concrete_TypeRef(), &mut error);
+        if !error.is_null() {
+            CFRelease(error as CFTypeRef);
+        }
+        if path.is_null() {
+            return None;
+        }
+        Some(CFURL::wrap_under_create_rule(path).get_string().to_string())
+    }
 }
 
 /// Copy a numeric attribute from an AX element as an `f64`. Returns `None` on
@@ -690,6 +751,54 @@ pub unsafe fn set_size_attr(
         AXUIElementSetAttributeValue(element, attr.as_concrete_TypeRef(), value as CFTypeRef);
     CFRelease(value as CFTypeRef);
     result
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AXTextRange {
+    pub location: isize,
+    pub length: isize,
+}
+
+/// Set a text element's UTF-16 selection/caret range.
+pub unsafe fn set_text_range_attr(element: AXUIElementRef, range: AXTextRange) -> AXError {
+    let attr = CFStr::new("AXSelectedTextRange");
+    let value = AXValueCreate(
+        kAXValueCFRangeType,
+        &range as *const AXTextRange as *const c_void,
+    );
+    if value.is_null() {
+        return kAXErrorFailure;
+    }
+    let result =
+        AXUIElementSetAttributeValue(element, attr.as_concrete_TypeRef(), value as CFTypeRef);
+    CFRelease(value as CFTypeRef);
+    result
+}
+
+/// Read back a text element's UTF-16 selection/caret range.
+pub unsafe fn copy_text_range_attr(element: AXUIElementRef) -> Option<AXTextRange> {
+    let attr = CFStr::new("AXSelectedTextRange");
+    let mut value: CFTypeRef = std::ptr::null();
+    if AXUIElementCopyAttributeValue(element, attr.as_concrete_TypeRef(), &mut value)
+        != kAXErrorSuccess
+        || value.is_null()
+    {
+        return None;
+    }
+    let mut range = AXTextRange {
+        location: 0,
+        length: 0,
+    };
+    let ok = core_foundation::base::CFGetTypeID(value) == AXValueGetTypeID()
+        && AXValueGetType(value as AXValueRef) == kAXValueCFRangeType
+        && AXValueGetValue(
+            value as AXValueRef,
+            kAXValueCFRangeType,
+            &mut range as *mut AXTextRange as *mut c_void,
+        );
+    CFRelease(value);
+    ok.then_some(range)
 }
 
 /// Set an AX attribute to a CFBoolean true value.

@@ -7,17 +7,18 @@
 //! top-level keyboard destinations, and addressed-element ancestry. All reads are
 //! bounded and fail closed — an unreadable fact never unlocks a route.
 
-use core_foundation::base::{CFRelease, CFTypeRef};
+use core_foundation::base::{CFEqual, CFRelease, CFTypeRef};
 use cua_driver_core::background_input::{
     BackgroundTargetFacts, ElementAncestry, WindowServerOwnership,
 };
 
 use super::bindings::{
-    ax_get_window_id, copy_ax_windows_including, copy_bool_attr, copy_element_attr,
-    copy_string_attr, focused_element_of_pid, AXUIElementCreateApplication, AXUIElementRef,
+    ax_get_window_id, copy_ax_windows, copy_ax_windows_including, copy_bool_attr,
+    copy_element_attr, copy_string_attr, element_screen_center, focused_element_of_pid,
+    focused_window_id_of_pid, AXUIElementCreateApplication, AXUIElementRef,
 };
 use super::snapshot::RetainedElement;
-use crate::windows::{all_windows, resolve_window_owner, WindowOwner};
+use crate::windows::{all_windows, resolve_window_owner, window_info_by_id, WindowOwner};
 
 /// Bounded `AXParent` ascent used when an element does not expose `AXWindow`.
 const MAX_ANCESTRY_DEPTH: usize = 40;
@@ -130,6 +131,153 @@ fn resolve_owning_window<E>(
     own_id
 }
 
+/// Follow the actual AXParent chain through an attached AXSheet. `AXWindow`
+/// on a sheet control may name the sheet's own CG surface; the parent document
+/// AXWindow is still an exact, independently mapped ancestry proof.
+unsafe fn parent_window_id(element: AXUIElementRef) -> Option<u32> {
+    let mut current = element;
+    let mut owned = false;
+    let mut resolved = None;
+    for _ in 0..MAX_ANCESTRY_DEPTH {
+        match copy_string_attr(current, "AXRole").as_deref() {
+            Some("AXWindow") => {
+                resolved = ax_get_window_id(current);
+                break;
+            }
+            Some("AXApplication") | None => break,
+            _ => {}
+        }
+        let parent = copy_element_attr(current, "AXParent");
+        if owned {
+            CFRelease(current as CFTypeRef);
+        }
+        match parent {
+            Some(parent) => {
+                current = parent;
+                owned = true;
+            }
+            None => return None,
+        }
+    }
+    if owned {
+        CFRelease(current as CFTypeRef);
+    }
+    resolved
+}
+
+/// AppKit can expose a document's modal Save sheet as a top-level AXSheet
+/// sibling while the sheet's WindowServer surface has a separate CGWindowID.
+/// Its controls still belong to the document only when that exact document
+/// AXWindow points to the same sheet through AXSheet. An arbitrary top-level
+/// sheet, title match, or same-pid window is insufficient proof.
+unsafe fn element_is_attached_sheet(
+    app: AXUIElementRef,
+    target_window_id: u32,
+    element: AXUIElementRef,
+) -> bool {
+    let mut current = element;
+    let mut owned = false;
+    let mut sheet = None;
+    for _ in 0..MAX_ANCESTRY_DEPTH {
+        match copy_string_attr(current, "AXRole").as_deref() {
+            Some("AXSheet") => {
+                sheet = Some(current);
+                break;
+            }
+            Some("AXWindow") | Some("AXApplication") | None => break,
+            _ => {}
+        }
+        let parent = copy_element_attr(current, "AXParent");
+        if owned {
+            CFRelease(current as CFTypeRef);
+        }
+        match parent {
+            Some(parent) => {
+                current = parent;
+                owned = true;
+            }
+            None => return false,
+        }
+    }
+    let matched = sheet.is_some_and(|sheet| {
+        let mut match_found = false;
+        for window in copy_ax_windows(app) {
+            if ax_get_window_id(window) == Some(target_window_id) {
+                if let Some(attached) = copy_element_attr(window, "AXSheet") {
+                    match_found = CFEqual(attached as CFTypeRef, sheet as CFTypeRef) != 0;
+                    CFRelease(attached as CFTypeRef);
+                }
+            }
+            CFRelease(window as CFTypeRef);
+        }
+        match_found
+    });
+    if owned {
+        CFRelease(current as CFTypeRef);
+    }
+    matched
+}
+
+/// Finder exposes its active inline rename field as a top-level AX sibling of
+/// the document window, with no AXParent/AXWindow ancestry. Accept only the
+/// PID's *currently focused* text editor while its focused window is the exact
+/// target and the editor is physically inside that visible ordinary window.
+/// This proof expires as soon as focus or window geometry changes.
+unsafe fn element_is_focused_inline_editor(
+    pid: i32,
+    window_id: u32,
+    element: AXUIElementRef,
+) -> bool {
+    if !matches!(
+        copy_string_attr(element, "AXRole").as_deref(),
+        Some("AXTextField" | "AXTextArea")
+    ) {
+        return false;
+    }
+    let focused_window = focused_window_id_of_pid(pid);
+    if focused_window != Some(window_id) {
+        // Finder's inline rename field can have a focused AX element while
+        // Finder reports no AXFocusedWindow at all. In that case, require the
+        // requested ordinary window to be the process's visible top window
+        // and Finder itself to be foreground. An explicitly different
+        // focused window still refuses.
+        if focused_window.is_some() || crate::apps::frontmost_pid() != Some(pid) {
+            return false;
+        }
+        let top_window = crate::windows::visible_windows()
+            .into_iter()
+            .filter(|window| {
+                window.pid == pid
+                    && window.layer == 0
+                    && window.bounds.width > 100.0
+                    && window.bounds.height > 100.0
+            })
+            .max_by_key(|window| window.z_index);
+        if top_window.as_ref().map(|window| window.window_id) != Some(window_id) {
+            return false;
+        }
+    }
+    let Some(window) = window_info_by_id(window_id) else {
+        return false;
+    };
+    if window.pid != pid || window.layer != 0 || !window.is_on_screen {
+        return false;
+    }
+    let Some((x, y)) = element_screen_center(element) else {
+        return false;
+    };
+    let bounds = window.bounds;
+    if x < bounds.x || x > bounds.x + bounds.width || y < bounds.y || y > bounds.y + bounds.height {
+        return false;
+    }
+    let Some(focused) = focused_element_of_pid(pid) else {
+        return false;
+    };
+    let same = CFEqual(focused as CFTypeRef, element as CFTypeRef) != 0;
+    CFRelease(focused as CFTypeRef);
+    same
+}
+
 /// The process's focused AX element, but only when it provably belongs to the
 /// requested window. Returns a retained element the caller must release.
 ///
@@ -142,7 +290,16 @@ fn resolve_owning_window<E>(
 /// Caller must `CFRelease` the returned element.
 pub unsafe fn focused_element_in_window(pid: i32, window_id: u32) -> Option<AXUIElementRef> {
     let element = focused_element_of_pid(pid)?;
-    if element_window_id(element) == Some(window_id) {
+    let app = AXUIElementCreateApplication(pid);
+    let attached = !app.is_null() && element_is_attached_sheet(app, window_id, element);
+    if !app.is_null() {
+        CFRelease(app as CFTypeRef);
+    }
+    if element_window_id(element) == Some(window_id)
+        || parent_window_id(element) == Some(window_id)
+        || attached
+        || element_is_focused_inline_editor(pid, window_id, element)
+    {
         Some(element)
     } else {
         CFRelease(element as CFTypeRef);
@@ -237,10 +394,20 @@ pub fn gather_background_facts(
             super::enablement::ensure_chromium_ax_enabled(pid, app);
             let records = ax_window_records(app, pid, window_id);
             let app_hidden = copy_bool_attr(app, "AXHidden");
-            let element = element_ptr.map(|ptr| match element_window_id(ptr as AXUIElementRef) {
-                Some(id) if id == window_id => ElementAncestry::ProvenDescendant,
-                Some(_) => ElementAncestry::OutsideTargetWindow,
-                None => ElementAncestry::Unproven,
+            let element = element_ptr.map(|ptr| {
+                let addressed = ptr as AXUIElementRef;
+                let direct_window = element_window_id(addressed);
+                if direct_window == Some(window_id)
+                    || parent_window_id(addressed) == Some(window_id)
+                    || element_is_attached_sheet(app, window_id, addressed)
+                    || element_is_focused_inline_editor(pid, window_id, addressed)
+                {
+                    ElementAncestry::ProvenDescendant
+                } else if direct_window.is_some() {
+                    ElementAncestry::OutsideTargetWindow
+                } else {
+                    ElementAncestry::Unproven
+                }
             });
             CFRelease(app as CFTypeRef);
             (records, app_hidden, element)

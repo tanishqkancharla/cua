@@ -21,14 +21,66 @@ use std::sync::Arc;
 
 use crate::apps;
 use crate::ax::bindings::{
-    copy_bool_attr, copy_children, copy_number_attr, copy_string_attr, copy_url_attr,
-    kAXErrorSuccess, perform_action, set_number_attr, set_string_attr, AXUIElementRef,
+    copy_action_names, copy_bool_attr, copy_children, copy_number_attr, copy_string_attr,
+    copy_url_attr, kAXErrorSuccess, perform_action, set_number_attr, set_string_attr,
+    AXUIElementRef,
 };
 use crate::focus_guard;
 use crate::window_change_detector::WindowChangeDetector;
 use core_foundation::base::CFRelease;
 
 use super::ToolState;
+
+#[derive(Debug)]
+struct ForegroundValueFocusRefused;
+impl std::fmt::Display for ForegroundValueFocusRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Exact text-control focus was not confirmed; no value was written")
+    }
+}
+impl std::error::Error for ForegroundValueFocusRefused {}
+
+fn supports_press_focus(role: &str, actions: &[String]) -> bool {
+    matches!(role, "AXTextField" | "AXTextArea") && actions.iter().any(|a| a == "AXPress")
+}
+
+fn wait_for_value_focus(pid: i32, ptr: usize) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
+    loop {
+        if crate::input::ax_actions::is_element_focused(pid, ptr) {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+fn focus_native_value_control(pid: i32, ptr: usize, role: &str) -> anyhow::Result<()> {
+    let element = ptr as AXUIElementRef;
+    crate::input::ax_actions::ensure_ax_action_enabled(ptr, "AXFocus")?;
+    if crate::input::ax_actions::is_element_focused(pid, ptr) {
+        return Ok(());
+    }
+    crate::input::ax_actions::focus_element(ptr)?;
+    if wait_for_value_focus(pid, ptr) {
+        return Ok(());
+    }
+    // Some native text fields (Maps search) enter editing through their
+    // advertised press action rather than an AXFocused attribute write.
+    // This is one focus request on the retained, window-guarded control;
+    // no value or keyboard input is replayed. Combo boxes and nontext controls
+    // cannot use this path, since pressing them can toggle or submit UI.
+    let actions = unsafe { copy_action_names(element) };
+    if supports_press_focus(role, &actions)
+        && crate::input::ax_actions::perform_ax_action(ptr, "press").is_ok()
+        && wait_for_value_focus(pid, ptr)
+    {
+        return Ok(());
+    }
+    Err(ForegroundValueFocusRefused.into())
+}
 
 pub struct SetValueTool {
     state: Arc<ToolState>,
@@ -78,6 +130,10 @@ fn def() -> &'static ToolDef {
                     "description": "CGWindowID. Omit when element_token is supplied (the token carries it)."
                 },
                 "element_token": cua_driver_core::tool_schema::element_token_schema(),
+                "delivery_mode": {
+                    "type": "string", "enum": ["background", "foreground"],
+                    "description": "Default background preserves semantic AX writes. Foreground keeps the exact window active and verifies focus of native text controls before writing; this does not submit the field."
+                },
                 "value": {
                     "type": "string",
                     "description": "New value. AX will coerce to the element's native type."
@@ -100,6 +156,8 @@ impl Tool for SetValueTool {
 
     async fn invoke(&self, args: Value) -> ToolResult {
         use cua_driver_core::tool_args::ArgsExt;
+        let foreground =
+            super::DeliveryMode::parse(args.opt_str("delivery_mode").as_deref()).is_foreground();
         let pid = match args.require_i32("pid") {
             Ok(v) => v,
             Err(e) => return e,
@@ -129,8 +187,8 @@ impl Tool for SetValueTool {
 
         let element_ptr = element_guard.as_ptr();
 
-        // set_value is an always-background semantic AX mutation. Re-prove
-        // that the retained element still belongs to the requested exact
+        // Re-prove exact semantic ownership even for foreground-assisted writes.
+        // The retained element must still belong to the requested exact
         // window immediately before any cursor or AX work; a cache hit alone
         // is not delivery proof after a window lifecycle or Space change.
         let _mutation_lease = match super::gate_background_window_action(
@@ -207,22 +265,62 @@ impl Tool for SetValueTool {
         // in Chromium-based apps; the AXPopUpButton path also AXPresses a
         // child option which can trigger app activation in some setups.
         let prior_front = apps::frontmost_pid();
-        let snapshot = WindowChangeDetector::snapshot(prior_front);
+        let snapshot = if foreground {
+            WindowChangeDetector::snapshot_without_suppression(prior_front)
+        } else {
+            WindowChangeDetector::snapshot(prior_front)
+        };
 
         let result = focus_guard::with_focus_suppressed(
-            Some(pid),
+            if foreground { None } else { Some(pid) },
             prior_front,
             "set_value.AXValue",
             || async move {
                 tokio::task::spawn_blocking(move || {
-                    set_value_blocking(element_guard.as_ptr(), element_index, pid, &value)
+                    if foreground {
+                        let mut outcome = None;
+                        crate::input::skylight::with_foreground_hid_activation(
+                            pid,
+                            window_id,
+                            || {
+                                let role = unsafe {
+                                    copy_string_attr(
+                                        element_guard.as_ptr() as AXUIElementRef,
+                                        "AXRole",
+                                    )
+                                };
+                                if matches!(
+                                    role.as_deref(),
+                                    Some("AXTextField" | "AXTextArea" | "AXComboBox")
+                                ) {
+                                    focus_native_value_control(
+                                        pid,
+                                        element_guard.as_ptr(),
+                                        role.as_deref().unwrap(),
+                                    )?;
+                                }
+                                outcome = Some(set_value_blocking(
+                                    element_guard.as_ptr(),
+                                    element_index,
+                                    pid,
+                                    &value,
+                                )?);
+                                Ok(())
+                            },
+                        )?;
+                        outcome.ok_or_else(|| {
+                            anyhow::anyhow!("foreground value write did not execute")
+                        })
+                    } else {
+                        set_value_blocking(element_guard.as_ptr(), element_index, pid, &value)
+                    }
                 })
                 .await
             },
         )
         .await;
 
-        let changes = snapshot.detect_async().await;
+        let changes = super::finish_window_observation(snapshot).await;
 
         match result {
             Ok(Ok(mut outcome)) => {
@@ -233,6 +331,7 @@ impl Tool for SetValueTool {
                 let verified = outcome.verified.unwrap_or(false);
                 let mut structured = serde_json::json!({
                     "path": "ax",
+                    "delivery": { "mode": if foreground { "foreground" } else { "background" } },
                     "verified": verified,
                     "effect": if verified { "confirmed" } else { "unverifiable" },
                 });
@@ -246,7 +345,17 @@ impl Tool for SetValueTool {
                 }
                 ToolResult::text(msg).with_structured(structured)
             }
-            Ok(Err(e)) => ToolResult::error(format!("set_value failed: {e}")),
+            Ok(Err(e)) => {
+                let result = ToolResult::error(format!("set_value failed: {e}"));
+                if e.downcast_ref::<ForegroundValueFocusRefused>().is_some() {
+                    result.with_structured(serde_json::json!({
+                        "code": "set_value_focus_unverified", "effect": "refused",
+                        "stage": "before_value_write", "pid": pid, "window_id": window_id,
+                    }))
+                } else {
+                    result
+                }
+            }
             Err(e) => ToolResult::error(format!("Task error: {e}")),
         }
     }
@@ -751,6 +860,7 @@ fn hex_digit(n: u8) -> char {
 
 #[cfg(test)]
 mod tests {
+    use super::supports_press_focus;
     use super::{
         apply_surface_trust, apply_verification_label, classify_write, file_name_needs_rename,
         is_file_name_cell, is_get_info_name_field, SetValueOutcome, GET_INFO_RENAME_ROUTE,
@@ -864,6 +974,25 @@ mod tests {
             "desktop",
         ] {
             assert!(reason.contains(needed), "missing {needed:?}: {reason}");
+        }
+    }
+
+    #[test]
+    fn press_focus_requires_an_advertised_native_text_action() {
+        let press = vec!["AXPress".to_owned()];
+        for role in ["AXTextField", "AXTextArea"] {
+            assert!(supports_press_focus(role, &press));
+            assert!(!supports_press_focus(role, &["AXConfirm".to_owned()]));
+            assert!(!supports_press_focus(role, &[]));
+        }
+        for role in [
+            "AXComboBox",
+            "AXPopUpButton",
+            "AXButton",
+            "AXCheckBox",
+            "AXWebArea",
+        ] {
+            assert!(!supports_press_focus(role, &press));
         }
     }
 

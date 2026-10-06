@@ -134,6 +134,54 @@ pub fn hotkey(pid: i32, key: &str, modifiers: &[&str]) -> anyhow::Result<()> {
 /// Required for NSMenu key equivalents: with the envelope, SLEventPostToPid
 /// forks onto a direct-mach path that bypasses IOHIDPostEvent — NSMenu never
 /// sees those events. Without the envelope the path goes through IOHIDPostEvent
+/// Bounded Unicode packets for an already guarded foreground text consumer.
+/// Control characters stay separate; packet boundaries never split a UTF-16
+/// surrogate pair. This does not touch the clipboard or change terminal input.
+pub fn type_text_batched(pid: i32, text: &str) -> anyhow::Result<()> {
+    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+        .map_err(|_| anyhow::anyhow!("CGEventSource::new failed"))?;
+    for packet in unicode_packets(text) {
+        for down in [true, false] {
+            let event = CGEvent::new_keyboard_event(source.clone(), 0, down)
+                .map_err(|_| anyhow::anyhow!("CGEvent keyboard packet failed"))?;
+            event.set_string(packet);
+            event.set_flags(CGEventFlags::CGEventFlagNull);
+            post_keyboard_event(pid, &event);
+            key_gap_sleep();
+        }
+    }
+    Ok(())
+}
+
+fn unicode_packets(text: &str) -> Vec<&str> {
+    const MAX_UNITS: usize = 20;
+    let mut packets = Vec::new();
+    let mut start = 0;
+    let mut units = 0;
+    for (offset, ch) in text.char_indices() {
+        if ch.is_control() {
+            if start < offset {
+                packets.push(&text[start..offset]);
+            }
+            let end = offset + ch.len_utf8();
+            packets.push(&text[offset..end]);
+            start = end;
+            units = 0;
+        } else {
+            if units + ch.len_utf16() > MAX_UNITS {
+                packets.push(&text[start..offset]);
+                start = offset;
+                units = 0;
+            }
+            units += ch.len_utf16();
+        }
+    }
+    if start < text.len() {
+        packets.push(&text[start..]);
+    }
+    packets
+}
+
 /// so NSApplication.sendEvent: dispatches NSMenu key equivalents.
 pub fn hotkey_no_auth(pid: i32, key: &str, modifiers: &[&str]) -> anyhow::Result<()> {
     let key_code = key_name_to_code(key)?;

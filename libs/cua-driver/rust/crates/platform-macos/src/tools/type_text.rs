@@ -108,7 +108,7 @@ fn def() -> &'static ToolDef {
                     "type": "integer",
                     "minimum": 0,
                     "maximum": 200,
-                    "description": "Milliseconds between characters in the CGEvent fallback path. Default 30. Ignored when the AX path succeeds."
+                    "description": "Milliseconds between characters in the CGEvent fallback path. Default 30. Zero uses bounded Unicode packets only for a confirmed editable text control in the guarded foreground non-terminal window; other keyboard consumers receive individual character events. Ignored when the AX path succeeds."
                 },
                 "scope": { "type": "string", "enum": ["window", "desktop"], "default": "window", "description": "Use desktop with no pid/window_id to type into the frontmost application." },
                 "delivery_mode": {
@@ -1070,6 +1070,33 @@ fn classify_target_web_area(
     }
 }
 
+fn accepts_unicode_packets(role: &str, value_settable: bool, selected_text_settable: bool) -> bool {
+    matches!(role, "AXTextField" | "AXTextArea") && (value_settable || selected_text_settable)
+}
+
+/// A guarded window is not necessarily a text consumer. Native keypads and
+/// other key handlers can consume only the first character in a Unicode event.
+/// Inspect the actual focused control after activation/focus settling, and
+/// retain per-character delivery when editable text capability is unproven.
+fn focused_control_accepts_unicode_packets(pid: i32, window_id: Option<u32>) -> bool {
+    let Some(window_id) = window_id else {
+        return false;
+    };
+    let Some(element) =
+        (unsafe { crate::ax::exact_target::focused_element_in_window(pid, window_id) })
+    else {
+        return false;
+    };
+    let role = unsafe { copy_string_attr(element, "AXRole") }.unwrap_or_default();
+    let allowed = accepts_unicode_packets(
+        &role,
+        unsafe { crate::ax::bindings::is_attribute_settable(element, "AXValue") },
+        unsafe { crate::ax::bindings::is_attribute_settable(element, "AXSelectedText") },
+    );
+    unsafe { CFRelease(element as _) };
+    allowed
+}
+
 /// Type via CGEvent keystrokes at the current insertion point, then verify by
 /// read-back. `type_text` is deliberately non-idempotent: it must never clear
 /// an existing value merely because AX cannot read that value back.
@@ -1081,6 +1108,7 @@ fn cgevent_type_verified(
     element_ptr_and_idx: Option<(usize, Option<usize>)>,
     settle_ms: u64,
     window_id: Option<u32>,
+    batch_unicode: bool,
 ) -> anyhow::Result<(bool, Option<usize>)> {
     // Focus the target element so the keystrokes land in IT. Critical in
     // foreground mode: a freshly-fronted window's keyboard focus may be on the
@@ -1108,7 +1136,11 @@ fn cgevent_type_verified(
     if settle_ms > 0 {
         std::thread::sleep(std::time::Duration::from_millis(settle_ms));
     }
-    crate::input::keyboard::type_text_with_delay(pid, text, delay_ms)?;
+    if batch_unicode && focused_control_accepts_unicode_packets(pid, window_id) {
+        crate::input::keyboard::type_text_batched(pid, text)?;
+    } else {
+        crate::input::keyboard::type_text_with_delay(pid, text, delay_ms)?;
+    }
 
     // CGEvent posting is asynchronous with respect to the renderer. In
     // particular, Chromium can acknowledge the posting process while a long
@@ -1247,6 +1279,10 @@ fn type_text_blocking(
                 element_ptr_and_idx,
                 foreground_settle_ms,
                 window_id,
+                delay_ms == 0
+                    && !is_terminal_target
+                    && !screen_sharing_target
+                    && window_id.is_some(),
             )
         };
         let ((verified, delivered_chars), fronted) = match window_id {
@@ -1321,6 +1357,7 @@ fn type_text_blocking(
             element_ptr_and_idx,
             /*settle_ms=*/ 0,
             window_id,
+            false,
         )?;
         return Ok(TypeTextDelivery::Typed(TypeTextOutcome {
             detail: format!(" via CGEvent (terminal emulator, {delay_ms}ms delay)"),
@@ -1433,6 +1470,7 @@ fn type_text_blocking(
         element_ptr_and_idx,
         /*settle_ms=*/ 0,
         window_id,
+        false,
     )?;
     Ok(TypeTextDelivery::Typed(TypeTextOutcome {
         detail: format!(" via CGEvent ({delay_ms}ms delay)"),
@@ -1445,6 +1483,27 @@ fn type_text_blocking(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unicode_packets_require_editable_text_capability() {
+        for role in ["AXTextField", "AXTextArea"] {
+            assert!(accepts_unicode_packets(role, true, false));
+            assert!(accepts_unicode_packets(role, false, true));
+            assert!(!accepts_unicode_packets(role, false, false));
+        }
+        // Writable values on controls such as sliders or combo boxes do not
+        // establish that their key handler accepts a multi-character event.
+        for role in [
+            "AXButton",
+            "AXStaticText",
+            "AXSlider",
+            "AXComboBox",
+            "AXWebArea",
+            "",
+        ] {
+            assert!(!accepts_unicode_packets(role, true, true));
+        }
+    }
 
     /// A semantic-only policy must refuse the terminal short-circuit before
     /// any CGEvent is posted: terminals have no semantic AX rung, so nothing

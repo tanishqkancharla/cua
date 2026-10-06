@@ -379,21 +379,20 @@ fn agent_instructions() -> String {
     };
 
     format!(
-        r#"cua-driver: cross-platform background computer-use automation.
+        r#"OpenSky Driver: cross-platform background computer use.
 
-For non-GUI outcomes, prefer a client-provided app API/SDK, headless/background interface, CLI, or filesystem operation and read the result back in that semantic domain. This server has no shell.
+Prefer a client-provided app API/SDK, headless/background interface, CLI, or filesystem operation; read the result back in that semantic domain. This server has no shell.
 
-On continuation/recent-work, when available, call `history_status`; if ready, make one bounded initial `history_query` before broad discovery; otherwise continue.
+On continuation/recent-work, call `history_status`; if ready, make one bounded initial `history_query` before broad discovery; otherwise continue.
 
-For app/window outcomes, use the narrowest semantic Cua route first: `close_window` for exact close, `set_window_frame` plus `list_windows` readback for geometry, typed browser tools for supported page content, and clipboard tools for clipboard state. Then climb through background `element_token` ({tree_kind}), background pixels, foreground delivery, and desktop fallback. Never advance on transport success alone.
+Use the narrowest semantic Cua route first: `close_window`, `set_window_frame` plus `list_windows` readback for geometry; typed browser tools for supported page content; clipboard tools. Escalate through background `element_token` ({tree_kind}), background pixels, foreground delivery, and desktop fallback. Never advance on transport success alone.
 
-Workflow per turn:
 0. `start_session` is optional. For multi-call work, prefer a short `session` label and repeat it on every call that accepts it. Unnamed calls use the transport's implicit session. Only `start_session` revives an ended name; `end_session` explicitly cleans up.
-1. `launch_app`, then `get_window_state(pid, window_id)` to refresh element indices.
-2. Act with the fresh index.
+1. `launch_app`; `get_window_state(pid, window_id)` refreshes indices.
+2. Act with a fresh index/token.
 3. `verify_state(pid, window_id, expect)` checks bounded postconditions. `unknown` is not success; `include_screenshot:true` lets the multimodal agent judge visual evidence.
 
-Read `skill://cua-driver/SKILL.md` via `skills/get` or `resources/read`. Hosts control activation/consent. When activated, follow SKILL.md and {platform_skill_pointer}."#
+Read `skill://cua-driver/SKILL.md` via `skills/get` or `resources/read`. Hosts control activation/consent. Follow SKILL.md and {platform_skill_pointer}."#
     )
 }
 

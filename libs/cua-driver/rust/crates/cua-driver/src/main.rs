@@ -52,6 +52,7 @@ fn print_opensky_identity_if_requested() -> bool {
         serde_json::json!({
             "product": "opensky-driver",
             "protocolVersion": 1,
+            "inputCompatibility": "token-only-v1",
             "version": env!("CARGO_PKG_VERSION"),
             "source": option_env!("CUA_DRIVER_SOURCE_SHA"),
         })

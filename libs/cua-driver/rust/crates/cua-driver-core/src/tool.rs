@@ -340,6 +340,7 @@ pub fn default_capabilities_for(tool_name: &str) -> Vec<String> {
             "input.keyboard.type",
             "accessibility.element_tokens",
         ],
+        "select_text" => &["accessibility.element_tokens", "input.keyboard.selection"],
 
         // ── screen / capture ─────────────────────────────────────────
         // Note: the regular `screenshot` tool was removed from the
@@ -2867,6 +2868,7 @@ fn is_physical_desktop_action(tool: &str) -> bool {
             | "press_key"
             | "hotkey"
             | "set_value"
+            | "select_text"
             | "bring_to_front"
             | "close_window"
             | "set_window_frame"

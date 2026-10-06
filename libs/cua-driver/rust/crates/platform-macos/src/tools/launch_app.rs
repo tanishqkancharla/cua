@@ -4,11 +4,35 @@ use cua_driver_core::{
     tool::{Tool, ToolDef},
 };
 use serde_json::Value;
-use std::path::PathBuf;
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, OnceLock,
+    },
+};
 
 pub struct LaunchAppTool;
 
 static DEF: std::sync::OnceLock<ToolDef> = std::sync::OnceLock::new();
+
+fn watchdogs() -> &'static Mutex<HashMap<i32, Vec<Arc<AtomicBool>>>> {
+    static WATCHDOGS: OnceLock<Mutex<HashMap<i32, Vec<Arc<AtomicBool>>>>> = OnceLock::new();
+    WATCHDOGS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// A caller's explicit foreground request supersedes late self-activation
+/// protection for that process, including the polling tail after the observer
+/// lease's five-second deadline.
+pub(super) fn cancel_watchdog(pid: i32) {
+    if let Some(tokens) = watchdogs().lock().unwrap().get(&pid) {
+        for token in tokens {
+            token.store(true, Ordering::Release);
+        }
+    }
+    crate::focus_steal::FocusStealPreventer::cancel_launch_watchdog(pid);
+}
 
 fn def() -> &'static ToolDef {
     DEF.get_or_init(|| ToolDef {
@@ -406,16 +430,32 @@ impl Tool for LaunchAppTool {
                     if slow_launch_path {
                         let launched_pid = *pid;
                         let prior_pid = prior;
+                        let cancelled = Arc::new(AtomicBool::new(false));
+                        watchdogs()
+                            .lock()
+                            .unwrap()
+                            .entry(launched_pid)
+                            .or_default()
+                            .push(cancelled.clone());
+                        // Register before returning the launch receipt so an
+                        // immediate explicit bring_to_front can cancel it.
+                        let lease = crate::focus_steal::FocusStealPreventer::begin_suppression(
+                            Some(launched_pid),
+                            prior_pid,
+                            "LaunchAppTool.watchdog",
+                        );
                         tokio::spawn(async move {
-                            let _lease = crate::focus_steal::FocusStealPreventer::begin_suppression(
-                                Some(launched_pid),
-                                prior_pid,
-                                "LaunchAppTool.watchdog",
-                            );
+                            let _lease = lease;
                             let mut late_activations = 0u32;
                             for _ in 0..32 {
+                                if cancelled.load(Ordering::Acquire) {
+                                    break;
+                                }
                                 // 32 × 250ms = 8s
                                 tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                                if cancelled.load(Ordering::Acquire) {
+                                    break;
+                                }
                                 if crate::apps::frontmost_pid() == Some(launched_pid) {
                                     late_activations += 1;
                                     let _ = crate::apps::activate_pid(prior_pid);
@@ -430,6 +470,13 @@ impl Tool for LaunchAppTool {
                                     "watchdog demoted post-RPC late activations \
                                      — slow-path window may need tuning"
                                 );
+                            }
+                            let mut guard = watchdogs().lock().unwrap();
+                            if let Some(tokens) = guard.get_mut(&launched_pid) {
+                                tokens.retain(|token| !Arc::ptr_eq(token, &cancelled));
+                                if tokens.is_empty() {
+                                    guard.remove(&launched_pid);
+                                }
                             }
                         });
                     }

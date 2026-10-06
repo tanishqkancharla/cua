@@ -57,13 +57,26 @@ pub struct AXNode {
     pub title: Option<String>,
     /// AXValue — shown as `= "value"` in the tree line.
     pub value: Option<String>,
+    /// AXPlaceholderValue is a hint, never an editable value or control state.
+    pub placeholder: Option<String>,
+    /// Attributed native value rendered for display only; never used as input
+    /// text, structured AXValue or UTF-16 selection coordinates.
+    pub formatted_value: Option<String>,
     /// AXDescription — shown as `(description)` in the tree line.
     /// Kept separate from `title` so `_find_calc_button("2")` can find
     /// Calculator buttons where AXTitle="" but AXDescription="2".
     pub description: Option<String>,
+    /// Observed resource URI: AXURL on web roots/openable elements and
+    /// AXDocument on windows. The historical field name is kept for clients.
+    /// Resource identity does not establish that edits are persisted to disk.
+    pub document_url: Option<String>,
     pub identifier: Option<String>,
     pub help: Option<String>,
     pub actions: Vec<String>,
+    /// Actual AXValue writability for value controls; failed/unqueried is unknown.
+    pub value_settable: Option<bool>,
+    /// Explicit parent-backed selection, separate from native action names.
+    pub selection_via_parent: bool,
     /// The raw AXUIElementRef pointer value, for caching.
     pub element_ptr: usize,
     /// Depth in the rendered markdown tree (matches the indent level used in
@@ -78,9 +91,8 @@ pub struct AXNode {
     pub frame: Option<[f64; 4]>,
     /// AXValue coerced to a string for ALL CF types (CFNumber → "8",
     /// CFBoolean → "1"/"0", CFString as-is). Kept separate from `value`
-    /// (string-only) so tree_markdown and the has_content gate — both of
-    /// which read `value` — stay byte-identical; only the structured
-    /// `elements` array consumes this.
+    /// (string-only); only the structured `elements` array consumes this.
+    /// Preserve empty/whitespace strings as actual observed control content.
     pub value_state: Option<String>,
     /// AXValueDescription — human-readable value form (e.g. "8 dB").
     pub value_description: Option<String>,
@@ -429,8 +441,41 @@ unsafe fn walk_element(
 
     let in_web_content = in_web_content || is_web_content_role(&role);
 
-    // Skip pure layout containers that have no interesting content.
-    if role == "AXScrollArea" || role == "AXGroup" {
+    // Probe only hosting groups; ordinary layout/display nodes keep the cheap path.
+    let parent_selected = if role == "AXGroup"
+        && !in_web_content
+        && copy_string_attr(element, "AXSubrole").as_deref() == Some("AXHostingView")
+    {
+        super::collection_selection::observe(element)
+    } else {
+        None
+    };
+
+    // A group may be an aggregate control rather than layout (for example a
+    // duration picker with a value and increment/decrement actions). Read its
+    // own semantics before collapsing it; reuse those reads below.
+    let group_attributes = (role == "AXGroup").then(|| {
+        (
+            copy_string_attr(element, "AXTitle"),
+            copy_stringish_attr(element, "AXValue"),
+            copy_string_attr(element, "AXDescription"),
+            copy_action_names(element),
+        )
+    });
+    let collapse_group =
+        group_attributes
+            .as_ref()
+            .is_some_and(|(title, value, description, actions)| {
+                collapse_layout_group(
+                    parent_selected.is_some(),
+                    title.as_deref(),
+                    value.as_ref().map(|v| v.state_value.as_str()),
+                    description.as_deref(),
+                    actions,
+                )
+            });
+    // Skip only pure layout groups; their children remain addressable.
+    if role == "AXScrollArea" || collapse_group {
         // Still recurse — children may be interesting. Layout containers
         // collapse, so children inherit the parent's depth AND the same
         // parent_index (no actionable node was emitted here).
@@ -457,47 +502,70 @@ unsafe fn walk_element(
     // This is critical for Calculator where AXTitle="" but AXDescription="2"
     // (digit buttons). Merging them would produce "2" (quoted) instead of (2)
     // (parens), breaking _find_calc_button which searches for "(2)".
-    let title = copy_string_attr(element, "AXTitle");
+    let (title, copied_value, description, actions) = group_attributes.unwrap_or_else(|| {
+        (
+            copy_string_attr(element, "AXTitle"),
+            copy_stringish_attr(element, "AXValue"),
+            copy_string_attr(element, "AXDescription"),
+            copy_action_names(element),
+        )
+    });
     // Read AXValue once with enough type information to preserve the existing
     // string-only markdown while also exposing numeric/boolean control state.
-    let copied_value = copy_stringish_attr(element, "AXValue");
     let value = copied_value
         .as_ref()
         .and_then(|copied| copied.string_value.clone());
-    // AXPlaceholderValue as fallback for empty text fields.
-    let value = value
-        .filter(|v| !v.trim().is_empty())
-        .or_else(|| copy_string_attr(element, "AXPlaceholderValue"));
-    let description = copy_string_attr(element, "AXDescription");
+    // Read hints on text entry controls without adding an AX call to every
+    // populated display-only row. A hint never substitutes for AXValue.
+    let placeholder = matches!(role.as_str(), "AXTextField" | "AXTextArea" | "AXComboBox")
+        .then(|| copy_string_attr(element, "AXPlaceholderValue"))
+        .flatten()
+        .filter(|v| !v.trim().is_empty());
+    let document_url = if role == "AXWebArea" || actions.iter().any(|action| action == "AXOpen") {
+        // Ordinary filename fields expose resource identity too. Read the
+        // native attribute only; neither an editable label nor a parent path
+        // is evidence of this element's URI or a committed rename/save.
+        copy_url_attr(element)
+    } else if role == "AXWindow" {
+        // Resource identity belongs to this exact observed window. AXDocument
+        // does not establish that edits have been persisted to disk.
+        copy_resource_url_attr(element, "AXDocument").filter(|url| !url.is_empty())
+    } else {
+        None
+    };
     let identifier = copy_string_attr(element, "AXIdentifier");
     let help = copy_string_attr(element, "AXHelp").filter(|h| !h.trim().is_empty());
-    let actions = copy_action_names(element);
 
     let visible_title = title.as_deref().unwrap_or("").trim().to_owned();
     let visible_description = description.as_deref().unwrap_or("").trim().to_owned();
-    let visible_value = value.as_deref().unwrap_or("").trim().to_owned();
+    let visible_value = value.as_deref().unwrap_or("").to_owned();
+    let formatted_value = value
+        .as_deref()
+        .and_then(|raw| super::text_style::copy_formatted_value(element, &role, raw));
 
-    let has_content =
-        !visible_title.is_empty() || !visible_description.is_empty() || !visible_value.is_empty();
+    let has_content = !visible_title.is_empty()
+        || !visible_description.is_empty()
+        || !visible_value.is_empty()
+        || placeholder.is_some();
     // Some native controls expose no AX action names but do expose a writable
-    // AXValue. Finder's transient inline-rename field is the important case:
-    // rendering it without an element_index leaves an agent able to see the
-    // field but unable to call set_value on it. Probe writability only for the
-    // small family of value controls so arbitrary display nodes do not pay an
-    // extra AX round trip.
-    let value_settable = actions.is_empty()
-        && role_supports_value_addressing(&role)
-        && is_attribute_settable(element, "AXValue");
+    // AXValue. Probe the small family of value controls even when they expose
+    // actions: a press action is not evidence that AXValue is writable. This
+    // also keeps actionless inline-rename fields addressable as before.
+    let value_settable = role_supports_value_addressing(&role)
+        .then(|| attribute_settable(element, "AXValue"))
+        .flatten();
     // A closed submenu can keep its descendants in AXChildren while reporting
     // those controls disabled. Never assign such a row a live element index:
     // the same native state also causes dispatch to refuse it, and exposing an
     // index for it invites agents to retain an unusable menu target.
-    let enabled = if !actions.is_empty() || value_settable {
-        copy_bool_attr(element, "AXEnabled")
-    } else {
-        None
-    };
-    let is_actionable = is_addressable(!actions.is_empty(), value_settable, enabled);
+    let enabled =
+        if !actions.is_empty() || value_settable == Some(true) || parent_selected.is_some() {
+            copy_bool_attr(element, "AXEnabled")
+        } else {
+            None
+        };
+    let is_actionable = is_addressable(!actions.is_empty(), value_settable == Some(true), enabled)
+        || (parent_selected.is_some() && enabled != Some(false));
 
     if !is_actionable && !has_content && role != "AXWindow" && role != "AXSheet" {
         let children = copy_children(element);
@@ -525,17 +593,14 @@ unsafe fn walk_element(
     let control_state = read_control_state_if_actionable(is_actionable, || ControlState {
         value_state: copied_value
             .map(|copied| copied.state_value)
-            .filter(|v| !v.trim().is_empty())
-            .or_else(|| value.clone())
-            .map(|v| v.trim().to_owned())
-            .filter(|v| !v.is_empty()),
+            .or_else(|| value.clone()),
         value_description: copy_string_attr(element, "AXValueDescription")
             .map(|v| v.trim().to_owned())
             .filter(|v| !v.is_empty()),
         min_value: copy_number_attr(element, "AXMinValue"),
         max_value: copy_number_attr(element, "AXMaxValue"),
         enabled,
-        selected: copy_bool_attr(element, "AXSelected"),
+        selected: parent_selected.or_else(|| copy_bool_attr(element, "AXSelected")),
     });
     let node = if is_actionable {
         let idx = *counter;
@@ -561,9 +626,14 @@ unsafe fn walk_element(
             } else {
                 Some(visible_description.clone())
             },
+            formatted_value: formatted_value.clone(),
+            placeholder: placeholder.clone(),
+            document_url: document_url.clone(),
             identifier: identifier.clone(),
             help: help.clone(),
             actions: actions.clone(),
+            value_settable,
+            selection_via_parent: parent_selected.is_some(),
             element_ptr,
             depth,
             parent_element_index: parent_index,
@@ -595,9 +665,14 @@ unsafe fn walk_element(
             } else {
                 Some(visible_description.clone())
             },
+            formatted_value: formatted_value.clone(),
+            placeholder: placeholder.clone(),
+            document_url: document_url.clone(),
             identifier: identifier.clone(),
             help: help.clone(),
             actions: vec![],
+            value_settable,
+            selection_via_parent: parent_selected.is_some(),
             element_ptr,
             depth,
             parent_element_index: parent_index,
@@ -635,6 +710,92 @@ unsafe fn walk_element(
             max_depth,
         );
         CFRelease(child as CFTypeRef);
+    }
+}
+
+/// Generic press/cancel/scroll-to-visible surfaces occur on empty layout
+/// groups. Named/value-bearing groups and other advertised operations carry
+/// independent state or interaction semantics and must survive compaction.
+fn collapse_layout_group(
+    parent_selected: bool,
+    title: Option<&str>,
+    value: Option<&str>,
+    description: Option<&str>,
+    actions: &[String],
+) -> bool {
+    !parent_selected
+        && [title, value, description]
+            .into_iter()
+            .flatten()
+            .all(|s| s.trim().is_empty())
+        && actions.iter().all(|action| {
+            matches!(
+                action.as_str(),
+                "AXPress" | "AXCancel" | "AXScrollToVisible"
+            )
+        })
+}
+
+#[cfg(test)]
+mod layout_group_tests {
+    use super::collapse_layout_group;
+
+    #[test]
+    fn aggregate_state_and_operations_survive_layout_compaction() {
+        let defaults = vec!["AXPress".into(), "AXCancel".into()];
+        for value in ["00:15:00", "0", "false"] {
+            assert!(!collapse_layout_group(
+                false,
+                None,
+                Some(value),
+                None,
+                &defaults
+            ));
+        }
+        for action in ["AXIncrement", "AXDecrement", "AXConfirm", "AXShowMenu"] {
+            assert!(!collapse_layout_group(
+                false,
+                None,
+                None,
+                None,
+                &[action.into()]
+            ));
+        }
+    }
+
+    #[test]
+    fn named_and_parent_selected_groups_keep_their_identity() {
+        assert!(!collapse_layout_group(
+            false,
+            Some("Duration"),
+            None,
+            None,
+            &[]
+        ));
+        assert!(!collapse_layout_group(
+            false,
+            None,
+            None,
+            Some("Timer"),
+            &[]
+        ));
+        assert!(!collapse_layout_group(true, None, None, None, &[]));
+    }
+
+    #[test]
+    fn empty_layout_and_generic_actions_still_collapse() {
+        assert!(collapse_layout_group(false, None, None, None, &[]));
+        assert!(collapse_layout_group(
+            false,
+            Some(" "),
+            Some("\n"),
+            None,
+            &[
+                "AXPress".into(),
+                "AXCancel".into(),
+                "AXScrollToVisible".into()
+            ]
+        ));
     }
 }
 
@@ -677,13 +838,26 @@ fn format_node_line(node: &AXNode) -> String {
         parts.push_str(&format!(" \"{}\"", t));
     }
     // AXValue → = "value"
-    if let Some(v) = &node.value {
+    if let Some(v) = node.formatted_value.as_ref().or(node.value.as_ref()) {
         parts.push_str(&format!(" = \"{}\"", v));
     }
     // AXDescription → (description) — critical for Calculator digit buttons
     // where AXTitle="" but AXDescription="2".
     if let Some(d) = &node.description {
         parts.push_str(&format!(" ({})", d));
+    }
+    if let Some(placeholder) = &node.placeholder {
+        parts.push_str(&format!(" [placeholder={placeholder:?}]"));
+    }
+
+    if let Some(url) = &node.document_url {
+        let preview: String = url.chars().take(512).collect();
+        let label = if preview.len() == url.len() {
+            "url"
+        } else {
+            "urlPreview"
+        };
+        parts.push_str(&format!(" [{label}={preview:?}]"));
     }
 
     // Bracketed metadata block (identifier, help, actions).
@@ -703,6 +877,12 @@ fn format_node_line(node: &AXNode) -> String {
                 .collect::<Vec<_>>()
                 .join(",");
             attrs.push(format!("actions=[{}]", action_str));
+        }
+        if node.value_settable == Some(true) && node.enabled != Some(false) {
+            attrs.push("settable".into());
+        }
+        if node.selection_via_parent {
+            attrs.push("selectable via parent".into());
         }
         if !attrs.is_empty() {
             parts.push_str(" [");

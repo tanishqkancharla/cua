@@ -79,6 +79,19 @@ impl Tool for ListWindowsTool {
         }
         crate::windows::retain_ax_reachable(&mut windows, current_space_id);
 
+        // App scope follows the exact AX-focused window even when a newly
+        // created background window has not reached the top of CG stacking.
+        let focused_window_id = pid_filter
+            .and_then(crate::ax::bindings::focused_window_id_of_pid)
+            .filter(|id| {
+                windows.iter().any(|window| {
+                    window.window_id == *id
+                        && Some(window.pid) == pid_filter
+                        && window.is_on_screen
+                        && window.on_current_space != Some(false)
+                })
+            });
+
         let mut windows_json: Vec<Value> = windows.iter().map(window_record_json).collect();
         if include_documents {
             let documents = document_urls(pid_filter.unwrap(), &windows);
@@ -90,7 +103,8 @@ impl Tool for ListWindowsTool {
         ToolResult::text(format!("Found {} window(s).", windows_json.len())).with_structured(
             serde_json::json!({
                 "windows": windows_json,
-                "current_space_id": current_space_id
+                "current_space_id": current_space_id,
+                "focused_window_id": focused_window_id
             }),
         )
     }
@@ -98,7 +112,7 @@ impl Tool for ListWindowsTool {
 
 /// AXDocument is evidence about a specific window, not a process-wide active
 /// document. Join AX and WindowServer only by exact CGWindowID and owner PID.
-fn document_urls(
+pub(super) fn document_urls(
     pid: i32,
     windows: &[crate::windows::WindowInfo],
 ) -> std::collections::HashMap<u32, String> {
@@ -122,7 +136,7 @@ fn document_urls(
                         .iter()
                         .any(|row| row.pid == pid && row.window_id == id)
                     {
-                        if let Some(url) = copy_string_attr(window, "AXDocument") {
+                        if let Some(url) = copy_resource_url_attr(window, "AXDocument") {
                             if !url.is_empty() {
                                 documents.insert(id, url);
                             }

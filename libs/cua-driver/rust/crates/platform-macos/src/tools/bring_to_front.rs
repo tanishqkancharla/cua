@@ -32,6 +32,36 @@ const VERIFY_TIMEOUT: Duration = Duration::from_millis(900);
 const VERIFY_POLL: Duration = Duration::from_millis(20);
 const VERIFY_STABLE: Duration = Duration::from_millis(100);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActivationScope {
+    ExactWindow,
+    AppMenu,
+}
+
+impl ActivationScope {
+    fn name(self) -> &'static str {
+        match self {
+            Self::ExactWindow => "exact_window",
+            Self::AppMenu => "app_menu",
+        }
+    }
+
+    fn verified(self, pid: i32, window_id: u32, observation: ExactWindowObservation) -> bool {
+        match self {
+            Self::ExactWindow => observation.exact_postcondition(pid, window_id),
+            // Application menu bars are not owned by an AXWindow. An owned
+            // popover can be ordered above the exact focused document without
+            // changing the app's menu context. Still require that exact live
+            // ordinary window and both semantic process/window focus proofs.
+            Self::AppMenu => {
+                observation.process_activated(pid)
+                    && observation.exact_window_focused(window_id)
+                    && observation.target_visible_ordinary
+            }
+        }
+    }
+}
+
 fn def() -> &'static ToolDef {
     DEF.get_or_init(|| ToolDef {
         name: "bring_to_front".into(),
@@ -52,8 +82,10 @@ fn def() -> &'static ToolDef {
             "type": "object",
             "required": ["pid"],
             "properties": {
-                "pid": { "type": "integer", "description": "Process ID of the app to activate." },
-                "window_id": { "type": "integer", "description": "CGWindowID to verify as the focused, frontmost window. Omit to activate the app only." }
+                "pid": { "type": "integer" },
+                "window_id": { "type": "integer" },
+                "activation_scope": { "type": "string", "enum": ["exact_window", "app_menu"],
+                    "description": "Default exact_window. app_menu requires window_id and verifies only the persistent app-global menu context." }
             },
             "additionalProperties": false,
         }),
@@ -113,13 +145,30 @@ enum ExactOutcome {
     Failed,
 }
 
+#[cfg(test)]
 fn classify_exact_outcome(
     request_accepted: bool,
     pid: i32,
     window_id: u32,
     observation: ExactWindowObservation,
 ) -> ExactOutcome {
-    if observation.exact_postcondition(pid, window_id) {
+    classify_scoped_outcome(
+        request_accepted,
+        pid,
+        window_id,
+        observation,
+        ActivationScope::ExactWindow,
+    )
+}
+
+fn classify_scoped_outcome(
+    request_accepted: bool,
+    pid: i32,
+    window_id: u32,
+    observation: ExactWindowObservation,
+    scope: ActivationScope,
+) -> ExactOutcome {
+    if scope.verified(pid, window_id, observation) {
         ExactOutcome::Activated
     } else if request_accepted
         || observation.process_activated(pid)
@@ -213,14 +262,18 @@ fn observe_exact_window(pid: i32, window_id: u32) -> ExactWindowObservation {
     }
 }
 
-fn wait_for_exact_window(pid: i32, window_id: u32) -> ExactWindowObservation {
+fn wait_for_exact_window(
+    pid: i32,
+    window_id: u32,
+    scope: ActivationScope,
+) -> ExactWindowObservation {
     let deadline = Instant::now() + VERIFY_TIMEOUT;
     let mut stable_since = None;
     let mut observation;
     loop {
         let now = Instant::now();
         observation = observe_exact_window(pid, window_id);
-        if observation.exact_postcondition(pid, window_id) {
+        if scope.verified(pid, window_id, observation) {
             let since = stable_since.get_or_insert(now);
             if now.duration_since(*since) >= VERIFY_STABLE {
                 return observation;
@@ -263,6 +316,7 @@ fn raise_exact_ax_window(pid: i32, window_id: u32) -> bool {
     }
 }
 
+#[cfg(test)]
 fn exact_result(
     pid: i32,
     window_id: u32,
@@ -270,7 +324,25 @@ fn exact_result(
     request_accepted: bool,
     observation: ExactWindowObservation,
 ) -> ToolResult {
-    let outcome = classify_exact_outcome(request_accepted, pid, window_id, observation);
+    scoped_result(
+        pid,
+        window_id,
+        path,
+        request_accepted,
+        observation,
+        ActivationScope::ExactWindow,
+    )
+}
+
+fn scoped_result(
+    pid: i32,
+    window_id: u32,
+    path: &'static str,
+    request_accepted: bool,
+    observation: ExactWindowObservation,
+    scope: ActivationScope,
+) -> ToolResult {
+    let outcome = classify_scoped_outcome(request_accepted, pid, window_id, observation, scope);
     let activated = outcome == ExactOutcome::Activated;
     let process_activated = observation.process_activated(pid);
     let frontmost_pid = observation.frontmost_pid(pid);
@@ -285,7 +357,13 @@ fn exact_result(
     };
     let structured = json!({
         "status": status,
-        "code": if activated { "bring_to_front_exact_window_verified" } else { "bring_to_front_exact_window_unverified" },
+        "code": match (scope, activated) {
+            (ActivationScope::ExactWindow, true) => "bring_to_front_exact_window_verified",
+            (ActivationScope::ExactWindow, false) => "bring_to_front_exact_window_unverified",
+            (ActivationScope::AppMenu, true) => "bring_to_front_menu_context_verified",
+            (ActivationScope::AppMenu, false) => "bring_to_front_menu_context_unverified",
+        },
+        "activation_scope": scope.name(),
         "pid": pid,
         "window_id": window_id,
         "activated": activated,
@@ -293,7 +371,7 @@ fn exact_result(
         "request_accepted": request_accepted,
         "process_activated": process_activated,
         "exact_window_effect": {
-            "verified": activated,
+            "verified": observation.exact_postcondition(pid, window_id),
             "focused": exact_window_focused,
             "front_in_process_on_display": exact_window_front_on_display,
             "frontmost_ordinary": exact_window_frontmost_ordinary,
@@ -308,16 +386,31 @@ fn exact_result(
             "process_front_window_on_display": observation.process_front_window_on_display,
         }
     });
+    let structured = if scope == ActivationScope::AppMenu {
+        let mut structured = structured;
+        structured["menu_context_effect"] = json!({ "verified": activated });
+        structured
+    } else {
+        structured
+    };
     if activated {
-        ToolResult::text(format!(
-            "Brought exact window {window_id} for pid {pid} to the foreground."
-        ))
+        ToolResult::text(match scope {
+            ActivationScope::ExactWindow => {
+                format!("Brought exact window {window_id} for pid {pid} to the foreground.")
+            }
+            ActivationScope::AppMenu => format!(
+                "Activated app-menu context for pid {pid} with exact focused window {window_id}."
+            ),
+        })
         .with_structured(structured)
     } else {
+        let requirement = match scope {
+            ActivationScope::ExactWindow => "as frontmost and focused",
+            ActivationScope::AppMenu => "as the focused app-menu context",
+        };
         ToolResult::error(format!(
             "bring_to_front: exact window {window_id} for pid {pid} was not verified \
-             as the frontmost process's focused window and the front window of that process \
-             on its display (request_accepted={request_accepted}, \
+             {requirement} (request_accepted={request_accepted}, \
              process_activated={process_activated}, focused={exact_window_focused}, \
              front_in_process_on_display={exact_window_front_on_display})."
         ))
@@ -332,6 +425,16 @@ impl Tool for BringToFrontTool {
     }
 
     async fn invoke(&self, args: Value) -> ToolResult {
+        let scope = match args.get("activation_scope") {
+            None => ActivationScope::ExactWindow,
+            Some(Value::String(scope)) if scope == "exact_window" => ActivationScope::ExactWindow,
+            Some(Value::String(scope)) if scope == "app_menu" => ActivationScope::AppMenu,
+            _ => {
+                return ToolResult::error(
+                    "bring_to_front: activation_scope must be exact_window or app_menu",
+                )
+            }
+        };
         let pid = match args.get("pid").and_then(Value::as_i64) {
             Some(p) => match libc::pid_t::try_from(p) {
                 Ok(pid) => pid,
@@ -363,6 +466,11 @@ impl Tool for BringToFrontTool {
             },
             None => None,
         };
+        if scope == ActivationScope::AppMenu && window_id.is_none() {
+            return ToolResult::error(
+                "bring_to_front: app_menu activation requires an exact window_id",
+            );
+        }
 
         let Some(app) =
             (unsafe { NSRunningApplication::runningApplicationWithProcessIdentifier(pid) })
@@ -377,6 +485,8 @@ impl Tool for BringToFrontTool {
                 "request_accepted": false,
             }));
         };
+
+        super::launch_app::cancel_watchdog(pid);
 
         if let Some(window_id) = window_id {
             let Some(window) = crate::windows::window_info_by_id(window_id) else {
@@ -425,15 +535,21 @@ impl Tool for BringToFrontTool {
             // kCPSUserGenerated sequence then makes only the requested window
             // native-key. Pair both with public Cocoa activation and re-assert
             // only the exact AX window below; the three independent
-            // postconditions remain authoritative over every request receipt.
+            // requested scope's postconditions remain authoritative over every
+            // request receipt; app-menu scope never claims WindowServer order.
             let skylight_process_accepted =
                 crate::input::skylight::set_front_process_persistently(pid, window_id);
             let skylight_exact_accepted =
                 crate::input::skylight::make_exact_window_key(pid, window_id);
             let cocoa_accepted = unsafe {
-                app.activateWithOptions(
+                let all_windows = app.activateWithOptions(
                     NSApplicationActivationOptions::NSApplicationActivateAllWindows,
-                )
+                );
+                // A regular activation is needed on hosts where the
+                // AllWindows request raises the AX window but leaves another
+                // process (notably Finder) as the workspace-frontmost app.
+                let regular = app.activateWithOptions(NSApplicationActivationOptions(0));
+                all_windows || regular
             };
             let ax_window_requested = raise_exact_ax_window(pid, window_id);
             let path = match (
@@ -457,12 +573,13 @@ impl Tool for BringToFrontTool {
                 || skylight_exact_accepted
                 || cocoa_accepted
                 || ax_window_requested;
-            return exact_result(
+            return scoped_result(
                 pid,
                 window_id,
                 path,
                 request_accepted,
-                wait_for_exact_window(pid, window_id),
+                wait_for_exact_window(pid, window_id, scope),
+                scope,
             );
         }
 
@@ -668,6 +785,54 @@ mod tests {
                 classify_exact_outcome(true, 42, 7, incomplete),
                 ExactOutcome::Partial
             );
+        }
+    }
+
+    #[test]
+    fn app_menu_accepts_focused_window_below_popover_without_claiming_exact_order() {
+        let observation = observation(Some(42), Some(true), Some(7), Some(8), true);
+        assert!(!ActivationScope::ExactWindow.verified(42, 7, observation));
+        assert!(ActivationScope::AppMenu.verified(42, 7, observation));
+        let result = scoped_result(
+            42,
+            7,
+            "skylight_ax",
+            true,
+            observation,
+            ActivationScope::AppMenu,
+        );
+        assert_ne!(result.is_error, Some(true));
+        let structured = result.structured_content.expect("menu result");
+        assert_eq!(structured["activated"], true);
+        assert_eq!(structured["code"], "bring_to_front_menu_context_verified");
+        assert_eq!(structured["menu_context_effect"]["verified"], true);
+        assert_eq!(structured["exact_window_effect"]["verified"], false);
+        assert_eq!(
+            structured["exact_window_effect"]["frontmost_ordinary"],
+            false
+        );
+    }
+
+    #[test]
+    fn app_menu_refuses_wrong_process_wrong_window_and_hidden_target() {
+        for observation in [
+            observation(Some(42), Some(false), Some(7), Some(7), true),
+            observation(Some(42), Some(true), Some(8), Some(7), true),
+            observation(Some(42), Some(true), None, Some(7), true),
+            observation(Some(42), Some(true), Some(7), Some(7), false),
+        ] {
+            let result = scoped_result(
+                42,
+                7,
+                "skylight_ax",
+                true,
+                observation,
+                ActivationScope::AppMenu,
+            );
+            assert_eq!(result.is_error, Some(true));
+            let structured = result.structured_content.expect("refusal");
+            assert_eq!(structured["menu_context_effect"]["verified"], false);
+            assert_eq!(structured["activated"], false);
         }
     }
 

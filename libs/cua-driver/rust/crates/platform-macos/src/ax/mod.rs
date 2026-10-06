@@ -19,9 +19,13 @@
 pub mod bindings;
 pub mod enablement;
 pub mod exact_target;
+pub(crate) mod focus_observation;
 pub mod launch;
 pub mod snapshot;
+pub(crate) mod text_selection;
+mod text_style;
 pub mod tree;
+pub(crate) mod web_content;
 pub mod window_scope;
 
 pub use snapshot::Snapshots;
@@ -29,3 +33,7 @@ pub use tree::{
     walk_tree, walk_tree_bounded, AXNode, TreeWalkResult, DEFAULT_MAX_DEPTH, DEFAULT_MAX_ELEMENTS,
 };
 pub use window_scope::WindowScope;
+
+pub(crate) mod collection_selection;
+
+pub mod open_document;

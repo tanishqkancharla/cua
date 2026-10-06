@@ -520,7 +520,6 @@
         "additionalProperties": false,
         "properties": {
           "pid": {
-            "format": "uint32",
             "minimum": 0,
             "type": "integer"
           },
@@ -531,7 +530,6 @@
             "type": "string"
           },
           "window_id": {
-            "format": "uint64",
             "minimum": 0,
             "type": "integer"
           }

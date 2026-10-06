@@ -5,7 +5,7 @@
 //! * **AX path** (`element_token`): performs AXAction on the cached
 //!   element. Fires via AX RPC — the target app never needs to be frontmost.
 //!   Extra behaviors vs. the naive dispatch:
-//!   - AXTextField / AXTextArea: 800 ms post-click delay for WebKit DOM focus settle.
+//!   - Web/unknown AXTextField / AXTextArea: 800 ms for renderer focus settling.
 //!   - AXPopUpButton: appends the list of available options and redirects to set_value.
 //!   - Advertised-action warning if the element didn't list the requested action.
 //!
@@ -40,6 +40,42 @@ pub struct ClickTool {
     state: Arc<ToolState>,
 }
 
+// CannotComplete is a post-dispatch RPC outcome, not proof that the app did
+// nothing. Safari can reload a document before returning this error.
+#[derive(Debug)]
+struct AxActionOutcomeUnknown {
+    action: String,
+    code: i32,
+}
+
+impl std::fmt::Display for AxActionOutcomeUnknown {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "AXUIElementPerformAction({}) returned {}",
+            self.action, self.code
+        )
+    }
+}
+
+impl std::error::Error for AxActionOutcomeUnknown {}
+
+fn ax_action_error(error: anyhow::Error) -> ToolResult {
+    if error.downcast_ref::<AxActionOutcomeUnknown>().is_some() {
+        return ToolResult::error(format!(
+            "AX action outcome unknown: {error}. The action was attempted and may \
+             already have taken effect. Observe the current UI before deciding \
+             whether another input is needed; do not automatically replay the \
+             click or send an equivalent shortcut."
+        ))
+        .with_structured(serde_json::json!({
+            "path": "ax", "verified": false, "effect": "unknown",
+            "dispatch_attempted": true, "retry": "observe_before_deciding"
+        }));
+    }
+    ToolResult::error(format!("AX action failed: {error}"))
+}
+
 impl ClickTool {
     pub fn new(state: Arc<ToolState>) -> Self {
         Self { state }
@@ -47,6 +83,112 @@ impl ClickTool {
 }
 
 static DEF: std::sync::OnceLock<ToolDef> = std::sync::OnceLock::new();
+
+/// A visual primary click is not authority to invent an unadvertised AXPress.
+/// Select the physical route before dispatch, never as a post-AX-error retry.
+fn primary_button_needs_pointer(
+    role: &str,
+    advertised: &[String],
+    action: &str,
+    button: &str,
+    count: usize,
+    has_modifiers: bool,
+) -> bool {
+    role == "AXButton"
+        && action == "press"
+        && button == "left"
+        && count == 1
+        && !has_modifiers
+        && !advertised.iter().any(|name| name == "AXPress")
+}
+
+#[cfg(test)]
+mod primary_button_tests {
+    use super::primary_button_needs_pointer;
+
+    #[test]
+    fn unadvertised_primary_button_uses_physical_intent() {
+        for actions in [
+            vec![],
+            vec!["AXShowMenu".into()],
+            vec!["Name:Move next\nTarget:0x0".into()],
+        ] {
+            assert!(primary_button_needs_pointer(
+                "AXButton", &actions, "press", "left", 1, false
+            ));
+        }
+        assert!(!primary_button_needs_pointer(
+            "AXButton",
+            &["AXPress".into()],
+            "press",
+            "left",
+            1,
+            false
+        ));
+    }
+
+    #[test]
+    fn other_roles_and_secondary_operations_keep_their_routes() {
+        for role in [
+            "AXMenuButton",
+            "AXMenuItem",
+            "AXCell",
+            "AXTextField",
+            "AXGroup",
+        ] {
+            assert!(!primary_button_needs_pointer(
+                role,
+                &[],
+                "press",
+                "left",
+                1,
+                false
+            ));
+        }
+        for action in ["show_menu", "increment", "close tab"] {
+            assert!(!primary_button_needs_pointer(
+                "AXButton",
+                &[],
+                action,
+                "left",
+                1,
+                false
+            ));
+        }
+    }
+
+    #[test]
+    fn modified_and_non_single_left_gestures_are_not_plain_primary_clicks() {
+        assert!(!primary_button_needs_pointer(
+            "AXButton",
+            &[],
+            "press",
+            "left",
+            1,
+            true
+        ));
+        for button in ["right", "middle"] {
+            assert!(!primary_button_needs_pointer(
+                "AXButton",
+                &[],
+                "press",
+                button,
+                1,
+                false
+            ));
+        }
+        for count in [0, 2, 3] {
+            assert!(!primary_button_needs_pointer(
+                "AXButton",
+                &[],
+                "press",
+                "left",
+                count,
+                false
+            ));
+        }
+    }
+}
 
 /// Focus posture for the raw pixel transport after AX hit-testing has failed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -267,7 +409,7 @@ fn def() -> &'static ToolDef {
                 "capture_id": { "type": "string", "description": "Optional immutable source capture ID returned by get_window_state or get_desktop_state. With x,y, Driver atomically admits and consumes that exact capture before dispatch; stale, mismatched, or out-of-bounds captures are refused without fallback." },
                 "x":             { "type": "number",  "description": "X in screenshot pixels. A window target uses the get_window_state PNG; a desktop target uses the native get_desktop_state PNG. The driver reverses Retina backing scale and any window-image downscale." },
                 "y":             { "type": "number",  "description": "Y in screenshot pixels from the image selected by target." },
-                "action":        { "type": "string",  "description": "AX action: press, show_menu, pick, confirm, cancel, open." },
+                "action":        { "type": "string",  "description": "AX action: press, show_menu, pick, confirm, cancel, open. select_collection_item selects an indexed Mac item only through its independently validated enabled parent AXSelectedChildren capability." },
                 "button":        {
                     "type": "string",
                     "enum": ["left", "right", "middle"],
@@ -510,6 +652,15 @@ impl Tool for ClickTool {
         let debug_image_out = args.opt_str("debug_image_out");
         let modifiers: Vec<String> = args.str_array("modifier");
 
+        if action == "select_collection_item"
+            && (element_index.is_none()
+                || count != 1
+                || button_str != "left"
+                || !modifiers.is_empty())
+        {
+            return ToolResult::error("Parent-backed collection selection supports one unmodified left indexed click; no input was sent");
+        }
+
         // PID-routed key transitions can look correct for one AX poll and then
         // collapse to a plain click once AppKit resolves the gesture. Refuse
         // that false-success path. The explicit foreground rung uses physical
@@ -534,6 +685,56 @@ impl Tool for ClickTool {
         {
             let element_ptr = element_guard.as_ptr();
 
+            let button_pointer = match tokio::task::spawn_blocking({
+                let action = action.clone();
+                let button = button_str.clone();
+                let has_modifiers = !modifiers.is_empty();
+                move || unsafe {
+                    let element = element_ptr as AXUIElementRef;
+                    let role = copy_string_attr(element, "AXRole")
+                        .ok_or_else(|| anyhow::anyhow!("current element role unavailable"))?;
+                    Ok::<_, anyhow::Error>(primary_button_needs_pointer(
+                        &role,
+                        &copy_action_names(element),
+                        &action,
+                        &button,
+                        count,
+                        has_modifiers,
+                    ))
+                }
+            })
+            .await
+            {
+                Ok(Ok(value)) => value,
+                Ok(Err(error)) => {
+                    return ToolResult::error(format!(
+                        "Cannot select current click route: {error}; no input was sent"
+                    ))
+                }
+                Err(error) => {
+                    return ToolResult::error(format!(
+                        "Cannot inspect current click target: {error}; no input was sent"
+                    ))
+                }
+            };
+            if button_pointer && !delivery_mode.is_foreground() {
+                return ToolResult::error("This button has no advertised AXPress; a primary click requires exact-window foreground physical delivery. No input was sent.")
+                    .with_structured(serde_json::json!({
+                        "code": "background_unavailable", "effect": "refused", "dispatch_attempted": false,
+                        "stage": "before_input", "escalation": {"recommended": "foreground"}
+                    }));
+            }
+
+            let sidebar_pointer = button_str == "left"
+                && action == "press"
+                && modifiers.is_empty()
+                && count == 1
+                && tokio::task::spawn_blocking(move || {
+                    crate::input::ax_actions::is_sidebar_navigation_item(element_ptr)
+                })
+                .await
+                .unwrap_or(false);
+
             // ── Exact-target background gate (macOS background input v1) ──
             // The element branch is semantic AX delivery, except button=middle
             // which falls back to a routed pixel click at the element's center
@@ -541,7 +742,7 @@ impl Tool for ClickTool {
             // BEFORE any cursor/dispatch work so a stale or sibling-owned
             // target refuses instead of acting on the wrong window.
             let _mutation_lease = if !delivery_mode.is_foreground() {
-                let gate_action = if button_str == "middle" {
+                let gate_action = if button_str == "middle" || sidebar_pointer {
                     cua_driver_core::background_input::BackgroundAction::WindowPointer
                 } else {
                     cua_driver_core::background_input::BackgroundAction::AxSemantic
@@ -663,6 +864,135 @@ impl Tool for ClickTool {
                 self.state.cursor_registry.note_press(&cursor_key, cx, cy);
             }
 
+            if button_pointer {
+                let Some((cx, cy)) = center else {
+                    return ToolResult::error(
+                        "Button has no usable current pointer geometry; no input was sent",
+                    );
+                };
+                let frame = match super::px_frame::resolve_or_refuse(wid).await {
+                    Ok(frame) => frame,
+                    Err(refusal) => return refusal,
+                };
+                if cx < frame.bounds.x
+                    || cy < frame.bounds.y
+                    || cx >= frame.bounds.x + frame.bounds.width
+                    || cy >= frame.bounds.y + frame.bounds.height
+                {
+                    return ToolResult::error(
+                        "Button center is outside the exact window; no input was sent",
+                    );
+                }
+                let snapshot =
+                    WindowChangeDetector::snapshot_without_suppression(apps::frontmost_pid());
+                let result = tokio::task::spawn_blocking(move || {
+                    crate::input::skylight::with_foreground_hid_activation(pid, wid, || unsafe {
+                        let element = element_ptr as AXUIElementRef;
+                        let mut actual_pid = 0;
+                        if crate::ax::bindings::AXUIElementGetPid(element, &mut actual_pid)
+                            != kAXErrorSuccess
+                            || actual_pid != pid
+                            || crate::ax::exact_target::element_window_id(element) != Some(wid)
+                        {
+                            anyhow::bail!(
+                                "button is no longer in the exact target window; no input was sent"
+                            );
+                        }
+                        if !primary_button_needs_pointer(
+                            &copy_string_attr(element, "AXRole").unwrap_or_default(),
+                            &copy_action_names(element),
+                            "press",
+                            "left",
+                            1,
+                            false,
+                        ) {
+                            anyhow::bail!(
+                                "button primary action changed; observe again before input"
+                            );
+                        }
+                        crate::input::ax_actions::ensure_ax_action_enabled(element_ptr, "AXPress")?;
+                        let live = crate::ax::bindings::element_screen_center(element).ok_or_else(
+                            || anyhow::anyhow!("button geometry unavailable; no input was sent"),
+                        )?;
+                        if (live.0 - cx).abs() > 0.5 || (live.1 - cy).abs() > 0.5 {
+                            anyhow::bail!(
+                                "button geometry changed during activation; no input was sent"
+                            );
+                        }
+                        crate::input::mouse::click_at_xy_desktop_with_modifiers_preserving_cursor(
+                            cx,
+                            cy,
+                            1,
+                            "left",
+                            &[],
+                        )
+                    })
+                })
+                .await;
+                let changes = super::finish_window_observation(snapshot).await;
+                return match result {
+                    Ok(Ok(())) => ToolResult::text(format!(
+                        "Clicked button [{idx}] once in exact window {wid} using foreground physical input; confirm the effect in the next observation.{}",
+                        changes.result_suffix(),
+                    )).with_structured(serde_json::json!({
+                        "path": "cgevent_hid", "verified": false, "effect": "unverifiable",
+                        "dispatch_attempted": true, "ax_action_attempted": false,
+                    })),
+                    Ok(Err(error)) => ToolResult::error(format!("Physical button click failed: {error}")),
+                    Err(error) => ToolResult::error(format!("Physical button click task failed: {error}")),
+                };
+            }
+
+            // Sidebar AXSelected read-back proves selection, not navigation.
+            // Deliver the original single click through the exact pointer rung
+            // instead of returning a successful but hollow selection write.
+            if sidebar_pointer {
+                let Some((cx, cy)) = center else {
+                    return ToolResult::error(
+                        "Sidebar item has no usable pointer geometry; no click was sent",
+                    );
+                };
+                let frame = match super::px_frame::resolve_or_refuse(wid).await {
+                    Ok(frame) => frame,
+                    Err(refusal) => return refusal,
+                };
+                let wx = cx - frame.bounds.x;
+                let wy = cy - frame.bounds.y;
+                if wx < 0.0 || wy < 0.0 || wx >= frame.bounds.width || wy >= frame.bounds.height {
+                    return ToolResult::error(
+                        "Sidebar item center is outside the exact window; no click was sent",
+                    );
+                }
+                let foreground = delivery_mode.is_foreground();
+                let result = tokio::task::spawn_blocking(move || {
+                    let click = || {
+                        crate::input::mouse::click_at_xy_with_window_local(
+                            pid,
+                            cx,
+                            cy,
+                            wx,
+                            wy,
+                            wid,
+                            1,
+                            &[],
+                            crate::input::mouse::WindowClickDelivery::from_foreground(foreground),
+                        )
+                    };
+                    if foreground {
+                        crate::input::skylight::with_foreground_assist(pid, wid, click).map(|_| ())
+                    } else {
+                        click()
+                    }
+                })
+                .await;
+                return match result {
+                    Ok(Ok(())) => ToolResult::text(format!("Clicked sidebar item [{idx}] in exact window {wid}; confirm navigation in the next observation."))
+                        .with_structured(serde_json::json!({"path": if foreground {"cgevent_fg"} else {"cgevent"}, "verified": false, "effect": "unverifiable"})),
+                    Ok(Err(error)) => ToolResult::error(format!("Sidebar click failed: {error}")),
+                    Err(error) => ToolResult::error(format!("Sidebar click task failed: {error}")),
+                };
+            }
+
             // Finder icon/list items can expose a readable AXSelected state
             // while refusing both AXSelected writes and AXPress. Resolve a
             // verified coordinate frame only for those collection-like
@@ -745,6 +1075,40 @@ impl Tool for ClickTool {
                         if foreground {
                             let mut outcome = None;
                             let has_modifiers = !selection_modifiers.is_empty();
+                            // The live attached sheet owns this exact semantic
+                            // menu item. Do not re-key the parent document: that
+                            // can dismiss the popup, and it is not a HID target.
+                            if !has_modifiers
+                                && unsafe {
+                                    crate::input::semantic_menu::is_exact_attached_sheet_menu(
+                                        element_ptr as AXUIElementRef,
+                                        pid,
+                                        wid,
+                                        &action_clone,
+                                    )?
+                                }
+                            {
+                                let result = perform_ax_click(
+                                    (element_ptr, idx),
+                                    (pid, wid),
+                                    &action_clone,
+                                    &ck,
+                                    None,
+                                    &[],
+                                    true,
+                                )?;
+                                std::thread::sleep(std::time::Duration::from_millis(150));
+                                return Ok((result, false));
+                            }
+
+                            // Re-keying a window dismisses its transient context
+                            // menu and invalidates the retained AXMenuItem. The
+                            // existing exact-focus helper preserves an already
+                            // focused window while keeping its foreground guard.
+                            let menu_item = unsafe {
+                                copy_string_attr(element_ptr as AXUIElementRef, "AXRole").as_deref()
+                                    == Some("AXMenuItem")
+                            };
                             let action = || {
                                 outcome = Some(perform_ax_click(
                                     (element_ptr, idx),
@@ -758,7 +1122,7 @@ impl Tool for ClickTool {
                                 std::thread::sleep(std::time::Duration::from_millis(150));
                                 Ok(())
                             };
-                            let fronted = if has_modifiers {
+                            let fronted = if has_modifiers || menu_item {
                                 crate::input::skylight::with_foreground_hid_activation(
                                     pid as libc::pid_t,
                                     wid,
@@ -808,8 +1172,8 @@ impl Tool for ClickTool {
                     ),
                     fronted,
                 ))) => {
-                    // For text inputs, wait 800ms for WebKit DOM focus to settle
-                    // before returning — matches the Swift reference behaviour.
+                    // Retain renderer focus settling for web/unknown text inputs.
+                    // Exact native window ancestry has no DOM focus to settle.
                     if needs_webkit_delay {
                         tokio::time::sleep(std::time::Duration::from_millis(800)).await;
                     }
@@ -856,7 +1220,7 @@ impl Tool for ClickTool {
                     }
                     ToolResult::text(msg).with_structured(structured)
                 }
-                Ok(Err(e)) => ToolResult::error(format!("AX action failed: {e}")),
+                Ok(Err(e)) => ax_action_error(e),
                 Err(e) => ToolResult::error(format!("Task error: {e}")),
             }
         } else if let (Some(mut cx), Some(mut cy)) = (x, y) {
@@ -1352,6 +1716,23 @@ impl Tool for ClickTool {
     }
 }
 
+/// Plain editable-control clicks focus the field when it has no usable AXPress.
+/// Collection selection is attempted first so Finder labels retain their behavior.
+fn focus_editable_click(element_ptr: usize, pid: i32, role: &str) -> anyhow::Result<bool> {
+    if !matches!(role, "AXTextField" | "AXTextArea" | "AXComboBox")
+        || !unsafe {
+            crate::ax::bindings::is_attribute_settable(element_ptr as AXUIElementRef, "AXValue")
+        }
+    {
+        return Ok(false);
+    }
+    crate::input::ax_actions::focus_element(element_ptr)?;
+    if !crate::input::ax_actions::is_element_focused(pid, element_ptr) {
+        anyhow::bail!("editable click could not confirm the exact field has focus");
+    }
+    Ok(true)
+}
+
 // ── AX click implementation (blocking) ───────────────────────────────────────
 
 /// Returns `(summary_text, needs_webkit_delay, suspected_noop,
@@ -1376,18 +1757,19 @@ fn perform_ax_click(
 ) -> anyhow::Result<(String, bool, bool, bool, bool)> {
     let (element_ptr, idx) = element;
     let (pid, window_id) = window;
-    let ax_action = map_action(action_str);
     let element = element_ptr as AXUIElementRef;
+    if action_str == "select_collection_item" {
+        crate::ax::collection_selection::select(element_ptr, pid, window_id)?;
+        return Ok((format!("Selected collection item [{idx}]; confirmed parent AXSelectedChildren membership. Keyboard focus is not established by this selection."), false, false, true, false));
+    }
+    let advertised = unsafe { copy_action_names(element) };
+    let ax_action = crate::input::ax_actions::resolve_action(action_str, &advertised)?;
 
     // Check the live value immediately before dispatch. Foreground assist can
     // enable menu items that were disabled in the cached snapshot, while a
     // background transition can disable them after that snapshot. macOS may
     // otherwise return success for a disabled action that did nothing.
-    crate::input::ax_actions::ensure_ax_action_enabled(element_ptr, ax_action)?;
-
-    // Capture advertised actions BEFORE dispatching so we can detect silent no-ops
-    // (AX returns success even when the element doesn't advertise the action).
-    let advertised = unsafe { copy_action_names(element) };
+    crate::input::ax_actions::ensure_ax_action_enabled(element_ptr, &ax_action)?;
 
     let role = unsafe { copy_string_attr(element, "AXRole") }.unwrap_or_default();
     let title = unsafe { copy_string_attr(element, "AXTitle") }.unwrap_or_default();
@@ -1396,8 +1778,18 @@ fn perform_ax_click(
     // label child or row that does not advertise AXPress. Prefer a bounded,
     // read-back-verified AXSelected write over dispatching a known hollow press
     // or forcing the caller onto a less stable pixel coordinate.
-    if ax_action == "AXPress" && !advertised.iter().any(|action| action == ax_action) {
-        if modifiers.is_empty() {
+    if ax_action == "AXPress" && !advertised.iter().any(|action| action == &ax_action) {
+        // Reaffirming AXSelected on an already selected collection item does
+        // not deliver a click's keyboard-focus change. In particular, a text
+        // selection can remain active in another control and consume Return.
+        // Deliver one exact-window pointer click instead of rewriting the bit.
+        let selected_collection =
+            crate::input::ax_actions::nearest_container_selection_state(element_ptr)
+                .is_some_and(|(_, selected)| selected);
+        if selected_collection && selection_pixel.is_none() {
+            anyhow::bail!("selected collection click needs an exact visible pointer target; no click was sent");
+        }
+        if modifiers.is_empty() && !selected_collection {
             if let Some(selected_role) =
                 crate::input::ax_actions::select_nearest_container(element_ptr)
             {
@@ -1412,6 +1804,22 @@ fn perform_ax_click(
                     false,
                 ));
             }
+        }
+
+        // An already-selected collection label remains a collection target.
+        // Its AXValue may be settable for rename without being an editor that
+        // can receive AXFocusedUIElement. Deliver the verified pointer route.
+        if modifiers.is_empty()
+            && !selected_collection
+            && focus_editable_click(element_ptr, pid, &role)?
+        {
+            return Ok((
+                format!("✅ Focused [{idx}] {role}; confirmed exact AXFocusedUIElement identity."),
+                false,
+                false,
+                true,
+                false,
+            ));
         }
 
         if let (Some(target), Some(selection)) = (
@@ -1475,9 +1883,8 @@ fn perform_ax_click(
                             {
                                 return Ok((
                                     format!(
-                                        "✅ Selected nearest {selected_role} for [{idx}] {role} \
-                                         \"{title}\"; AX selection write was unavailable, so a \
-                                         coordinate click was delivered and confirmed by stable \
+                                        "✅ Clicked nearest {selected_role} for [{idx}] {role} \
+                                         \"{title}\"; one coordinate click was delivered and confirmed by stable \
                                          AXSelected read-back."
                                     ),
                                     false,
@@ -1512,10 +1919,10 @@ fn perform_ax_click(
     let read_value = || unsafe {
         crate::ax::bindings::copy_stringish_attr(element, "AXValue").map(|value| value.state_value)
     };
-    let toggle_before = is_toggle_press(ax_action, &role, &advertised)
+    let toggle_before = is_toggle_press(&ax_action, &role, &advertised)
         .then(read_value)
         .flatten();
-    let err = unsafe { crate::ax::bindings::perform_action(element, ax_action) };
+    let err = unsafe { crate::ax::bindings::perform_action(element, &ax_action) };
     if err != crate::ax::bindings::kAXErrorSuccess {
         // Checked before the row-selection fallback, which writes AXSelected
         // on an ancestor: a toggle whose press landed needs no other write.
@@ -1543,7 +1950,7 @@ fn perform_ax_click(
         // Some collection rows claim a click-like action but Finder returns
         // kAXErrorCannotComplete. Use the same verified selection fallback
         // before surfacing the dispatch error.
-        if ax_action == "AXPress" && modifiers.is_empty() {
+        if role != "AXMenuItem" && ax_action == "AXPress" && modifiers.is_empty() {
             if let Some(selected_role) =
                 crate::input::ax_actions::select_nearest_container(element_ptr)
             {
@@ -1558,6 +1965,20 @@ fn perform_ax_click(
                     false,
                 ));
             }
+        }
+        if role != "AXMenuItem"
+            && ax_action == "AXPress"
+            && modifiers.is_empty()
+            && focus_editable_click(element_ptr, pid, &role)?
+        {
+            return Ok((format!("✅ Focused [{idx}] {role} after unsupported press; confirmed exact AXFocusedUIElement identity."), false, false, true, false));
+        }
+        if err == -25204 {
+            return Err(AxActionOutcomeUnknown {
+                action: ax_action,
+                code: err,
+            }
+            .into());
         }
         anyhow::bail!("AXUIElementPerformAction({ax_action}) returned {err}");
     }
@@ -1618,9 +2039,13 @@ fn perform_ax_click(
         ));
     }
 
-    // WebKit DOM focus settle: 800 ms for text inputs (returned to async caller).
-    let needs_webkit_delay =
-        ax_action == "AXPress" && (role == "AXTextField" || role == "AXTextArea");
+    // Skip only when the live addressed control reaches this exact native
+    // window. Missing parents/roles, detached nodes and capped ancestry retain
+    // the existing delay; "not known web" is not proof of native content.
+    let needs_webkit_delay = ax_action == "AXPress"
+        && (role == "AXTextField" || role == "AXTextArea")
+        && unsafe { crate::ax::web_content::classify(element, pid, window_id) }
+            != crate::ax::web_content::Surface::NativeWindow;
 
     // Show focus-rect highlight around the element (matches Swift showFocusRect).
     // Also move the cursor to the element center so the glide animation plays.
@@ -1672,18 +2097,6 @@ mod selection_fallback_tests {
         assert!(selection_readback_confirms(true, false, true, true));
         assert!(!selection_readback_confirms(true, true, true, true));
         assert!(!selection_readback_confirms(false, true, true, false));
-    }
-}
-
-fn map_action(action: &str) -> &'static str {
-    match action.to_lowercase().as_str() {
-        "press" | "click" => "AXPress",
-        "show_menu" | "right_click" => "AXShowMenu",
-        "pick" => "AXPick",
-        "confirm" => "AXConfirm",
-        "cancel" => "AXCancel",
-        "open" => "AXOpen",
-        _ => "AXPress",
     }
 }
 
@@ -1754,6 +2167,35 @@ mod tests {
         assert_eq!(settled(vec![Some("1"), None]), None, "second read failed");
         assert_eq!(settled(vec![Some("0")]), None, "never moved");
         assert_eq!(settled(vec![None]), None, "unreadable");
+    }
+
+    #[test]
+    fn ax_cannot_complete_preserves_unknown_effect_without_success_or_replay() {
+        let result = ax_action_error(
+            AxActionOutcomeUnknown {
+                action: "AXPress".into(),
+                code: -25204,
+            }
+            .into(),
+        );
+        assert_eq!(result.is_error, Some(true));
+        let receipt = result.structured_content.as_ref().unwrap();
+        assert_eq!(receipt["effect"], "unknown");
+        assert_eq!(receipt["verified"], false);
+        assert_eq!(receipt["dispatch_attempted"], true);
+        let text = serde_json::to_string(&result).unwrap();
+        assert!(text.contains("may already have taken effect"));
+        assert!(text.contains("do not automatically replay"));
+    }
+
+    #[test]
+    fn ax_predispatch_refusal_does_not_claim_an_attempted_action() {
+        let result = ax_action_error(anyhow::anyhow!("element_outside_target_window"));
+        assert_eq!(result.is_error, Some(true));
+        assert!(result.structured_content.is_none());
+        let text = serde_json::to_string(&result).unwrap();
+        assert!(text.contains("AX action failed"));
+        assert!(!text.contains("may already have taken effect"));
     }
 
     /// Surface 5: schema must advertise the new `button` field with the three

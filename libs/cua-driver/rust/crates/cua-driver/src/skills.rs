@@ -661,6 +661,14 @@ fn fetch_into(dest: &Path, from_main: bool, all_platforms: bool) -> Result<()> {
                 include_str!("../../../Skills/cua-driver/SKILL.md"),
             ),
             (
+                "WORKFLOW.md",
+                include_str!("../../../Skills/cua-driver/WORKFLOW.md"),
+            ),
+            (
+                "RUNTIME.md",
+                include_str!("../../../Skills/cua-driver/RUNTIME.md"),
+            ),
+            (
                 "WINDOWS.md",
                 include_str!("../../../Skills/cua-driver/WINDOWS.md"),
             ),
@@ -1059,7 +1067,7 @@ mod tests {
             link_agent_paths("Claude Code", &parent, Some(&marker), &local_skill).unwrap(),
             LinkStatus::Existing
         );
-        assert!(parent.join("cua-driver").exists());
+        assert!(parent.join("opensky-driver").exists());
     }
 
     #[test]
@@ -1123,7 +1131,7 @@ mod tests {
             link_agent_paths("Pi", &parent, Some(&pi_marker), &local_skill).unwrap(),
             LinkStatus::Created
         );
-        assert!(parent.join("cua-driver").exists());
+        assert!(parent.join("opensky-driver").exists());
 
         // Codex and Pi intentionally share ~/.agents/skills. Once Pi has
         // created the managed link, the Codex path must converge on that same
@@ -1132,7 +1140,7 @@ mod tests {
             link_agent_paths("Codex", &parent, None, &local_skill).unwrap(),
             LinkStatus::Existing
         );
-        assert!(parent.join("cua-driver").exists());
+        assert!(parent.join("opensky-driver").exists());
     }
 
     #[test]

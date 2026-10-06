@@ -2877,18 +2877,18 @@ mod tests {
     fn shared_cua_switches_turn_the_driver_off() {
         let _guard = ENV_LOCK.lock().unwrap();
         with_isolated_home(|home| {
-            assert_eq!(effective_enabled(), (true, "default"));
+            assert_eq!(effective_enabled(), (false, "opensky_source"));
             unsafe {
                 std::env::set_var("DO_NOT_TRACK", "1");
                 std::env::set_var(ENV_TELEMETRY_ENABLED, "true");
             }
-            assert_eq!(effective_enabled(), (false, "do_not_track"));
+            assert_eq!(effective_enabled(), (false, "opensky_source"));
             unsafe {
                 std::env::remove_var("DO_NOT_TRACK");
                 std::env::remove_var(ENV_TELEMETRY_ENABLED);
                 std::env::set_var("CUA_TELEMETRY", "0");
             }
-            assert_eq!(effective_enabled(), (false, "environment_shared"));
+            assert_eq!(effective_enabled(), (false, "opensky_source"));
             unsafe {
                 std::env::remove_var("CUA_TELEMETRY");
             }
@@ -2902,12 +2902,12 @@ mod tests {
             unsafe {
                 std::env::set_var("CUA_HOME", &cua_home);
             }
-            assert_eq!(effective_enabled(), (false, "shared_config"));
-            // The driver's own switch still wins over the shared file.
+            assert_eq!(effective_enabled(), (false, "opensky_source"));
+            // Source-managed OpenSky remains off even when the driver switch is enabled.
             unsafe {
                 std::env::set_var(ENV_TELEMETRY_ENABLED, "true");
             }
-            assert_eq!(effective_enabled(), (true, "environment"));
+            assert_eq!(effective_enabled(), (false, "opensky_source"));
             unsafe {
                 std::env::remove_var(ENV_TELEMETRY_ENABLED);
                 std::env::remove_var("CUA_HOME");

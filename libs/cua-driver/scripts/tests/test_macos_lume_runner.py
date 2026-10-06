@@ -88,6 +88,50 @@ def _fields(output: str) -> dict[str, str]:
     return fields
 
 
+def test_runner_defaults_match_installer_and_runtime_identity() -> None:
+    """A product rename must update its certification consumer as well as its installer."""
+    driver_root = REPO_ROOT / "libs/cua-driver"
+    bundle = (driver_root / "rust/crates/cua-driver/src/bundle.rs").read_text()
+    installer = (driver_root / "scripts/_install-local-rust.sh").read_text()
+    signing = (driver_root / "scripts/_local-signing.sh").read_text()
+
+    def runtime_literal(function: str) -> str:
+        match = re.search(rf'pub fn {function}\(\) -> &\x27static str \{{\s*"([^"]+)"', bundle)
+        assert match is not None, function
+        return match.group(1)
+
+    app_name = runtime_literal("app_name")
+    cli_name = runtime_literal("cli_name")
+    namespace = runtime_literal("state_namespace")
+    client = runtime_literal("bundle_id")
+    installer_app = re.search(r'^APP_DEST="([^"]+)"', installer, re.MULTILINE)
+    signing_cn = re.search(r'^CUA_LOCAL_SIGN_CN="([^"]+)"', signing, re.MULTILINE)
+    assert installer_app is not None and signing_cn is not None
+    assert installer_app.group(1) == f"/Applications/{app_name}.app"
+
+    completed = _run(
+        RUN_ALL,
+        'printf "app=%s\\nbin=%s\\nplist=%s\\nsocket=%s\\ncn=%s\\n" '
+        '"$LOCAL_APP" "$INSTALLED_BIN" "$LOCAL_PLIST" '
+        '"$CUA_E2E_MACOS_DAEMON_SOCKET" "$SIGNING_CN"',
+        env={"CUA_E2E_MACOS_DAEMON_SOCKET": "", "CUA_E2E_SIGNING_CN": ""},
+    )
+    assert completed.returncode == 0, completed.stderr
+    fields = _fields(completed.stdout)
+    assert fields["app"] == installer_app.group(1)
+    assert fields["bin"] == str(Path.home() / ".local/bin" / cli_name)
+    assert fields["plist"] == str(Path.home() / "Library/LaunchAgents" / f"{client}.plist")
+    assert fields["socket"] == str(Path.home() / "Library/Caches" / namespace / f"{namespace}.sock")
+    assert fields["cn"] == signing_cn.group(1)
+
+    host_seed = SEED_TCC.read_text()
+    guest_seed = SEED_TCC_GUEST.read_text()
+    assert f'APP_PATH="{installer_app.group(1)}"' in host_seed
+    assert f'EXPECTED_CLIENT="{client}"' in host_seed
+    assert f'CUA_TCC_APP_PATH:-{installer_app.group(1)}' in guest_seed
+    assert f'CUA_TCC_EXPECTED_CLIENT:-{client}' in guest_seed
+
+
 # --------------------------------------------------------------------------
 # Syntax
 # --------------------------------------------------------------------------
@@ -346,16 +390,28 @@ def _guest_seed_assignment(name: str) -> str:
     return match.group("body")
 
 
+def test_tcc_guest_seed_grants_both_driver_permissions() -> None:
+    text = SEED_TCC_GUEST.read_text(encoding="utf-8")
+    sql_body = _guest_seed_assignment("SQL")
+    assert re.search(
+        r"\('kTCCServiceAccessibility','\$\{CLIENT_SQL\}',\$\{CLIENT_TYPE\},2,2,1,",
+        sql_body,
+    )
+    assert re.search(
+        r"\('kTCCServiceScreenCapture','\$\{CLIENT_SQL\}',\$\{CLIENT_TYPE\},2,2,1,",
+        sql_body,
+    )
+    assert "auth_value" in sql_body
+    assert "csreq" in sql_body
+    assert "allowed" not in sql_body
+    assert "auth_value=2" in text
+    assert "com.opensky.driver" in text
+
+
 def test_tcc_guest_seed_sql_executes_against_modern_tcc_schema(tmp_path: Path) -> None:
     sql_body = _guest_seed_assignment("SQL")
     verify_sql = _guest_seed_assignment("VERIFY_SQL")
-    # The seed targets the local developer build unless told otherwise.
-    assert re.search(
-        r'^EXPECTED_CLIENT="\$\{CUA_TCC_EXPECTED_CLIENT:-com\.trycua\.driver\.local\}"$',
-        SEED_TCC_GUEST.read_text(encoding="utf-8"),
-        re.MULTILINE,
-    )
-    client = "com.trycua.driver.local"
+    client = "com.opensky.driver"
     client_type = "0"
     csreq_hex = "01020304"
     substitutions = {

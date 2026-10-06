@@ -11,8 +11,8 @@ use std::sync::Arc;
 
 use crate::apps;
 use crate::ax::bindings::{
-    copy_children, copy_element_attr, copy_string_attr, element_screen_center, kAXErrorSuccess,
-    perform_action, AXUIElementRef,
+    copy_children, copy_element_attr, copy_string_attr, element_screen_center, element_screen_rect,
+    kAXErrorSuccess, perform_action, AXUIElementRef,
 };
 use crate::focus_guard;
 use crate::window_change_detector::WindowChangeDetector;
@@ -382,9 +382,21 @@ impl Tool for ScrollTool {
                     );
                 }
                 std::thread::sleep(std::time::Duration::from_millis(40));
-                let center = unsafe { element_screen_center(element_ptr as AXUIElementRef) };
-                let rect = unsafe {
-                    crate::ax::bindings::element_screen_rect(element_ptr as AXUIElementRef)
+                let rect = unsafe { element_screen_rect(element_ptr as AXUIElementRef) };
+                let center = if let Some(wid) = wid {
+                    let bounds = crate::windows::window_bounds_by_id(wid);
+                    let center = rect.zip(bounds).and_then(|(rect, bounds)| {
+                        cua_driver_core::geometry::visible_target_center(
+                            rect,
+                            [bounds.x, bounds.y, bounds.width, bounds.height],
+                        )
+                    });
+                    if center.is_none() {
+                        return Err(ToolResult::error("scroll: target has no positive visible intersection with its exact window; delivery refused"));
+                    }
+                    center
+                } else {
+                    unsafe { element_screen_center(element_ptr as AXUIElementRef) }
                 };
                 Ok(center.map(|(cx, cy)| {
                     let win_local = wid

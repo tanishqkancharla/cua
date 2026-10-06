@@ -53,7 +53,7 @@ export CUA_DRIVER_LOCAL_SIGNING_IDENTITY="<40-hex-character SHA-1>"
 The installer fails closed when that exact usable code-signing identity is not
 present in `CUA_DRIVER_LOCAL_SIGNING_KEYCHAIN`.
 
-The first install creates `CuaDriver Local Signing (cua-driver-rs)` in that
+The first install creates `OpenSky Driver Signing` in that
 keychain. If `codesign` cannot use its private key non-interactively, unlock
 the keychain, trust the certificate in Keychain Access, and authorize Apple
 code-signing tools:

@@ -16,6 +16,7 @@
 //! If anything fails to resolve the functions return `false` and callers
 //! fall back to the public `CGEvent::post_to_pid`.
 
+use core_foundation::base::{CFRelease, CFTypeRef};
 use libc::pid_t;
 use std::ffi::{c_void, CStr};
 use std::os::raw::{c_char, c_int, c_uint};
@@ -842,6 +843,18 @@ fn await_window_focused(pid: libc::pid_t, window_id: u32) -> bool {
     loop {
         if crate::ax::bindings::focused_window_id_of_pid(pid) == Some(window_id) {
             return true;
+        }
+        // Finder reports AXFocusedWindow=None during inline rename even
+        // while its focused edit field belongs to the exact front window.
+        // Keep the global HID route closed unless both WindowServer process
+        // focus and the exact scoped AX element can be proven.
+        if front_process_matches(pid, window_id) == Some(true) {
+            if let Some(element) =
+                unsafe { crate::ax::exact_target::focused_element_in_window(pid, window_id) }
+            {
+                unsafe { CFRelease(element as CFTypeRef) };
+                return true;
+            }
         }
         if std::time::Instant::now() >= deadline {
             return false;

@@ -858,7 +858,10 @@ mod tests {
                 assert!(state.selected_channel.is_none());
                 assert!(state.install_command.is_none());
                 assert!(state.release_notes_url.is_none());
-                assert!(state.error.unwrap().contains("sudo pacman -Syu"));
+                assert!(state
+                    .error
+                    .unwrap()
+                    .contains("OpenSky Driver is source-managed"));
                 assert_eq!(std::fs::read(cache_path().unwrap()).unwrap(), before);
             }
         });
