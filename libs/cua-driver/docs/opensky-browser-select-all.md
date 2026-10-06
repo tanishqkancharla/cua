@@ -18,3 +18,11 @@ unchanged; delivery uncertainty and releases retain their existing behavior.
 Core905 whole-crate tests pass, including serialized event assertions for Meta+A,
 Ctrl+A, Meta+Shift+A and Meta+B. Removing the editing command fails the keeper.
 Actual post-fix owned browser gate pending.
+
+Acceptance: current public clean SDK PR15 passes actual KEY-B01 on signed
+Driver d0b065bf12bf81cab99c7566a43a466277a3c722, along with existing PASTE-B01 and
+TEXT-B01. Before typing the page's observer proves trusted Meta+A and range0..11
+for “Old café 😀”; after fresh semantic focus observation, exact “New 東京 😀”
+replacement and trusted input/current owned title pass. Core905 tests and the
+keeper mutation check pass. No Linux/Windows or canonical full matrix claim.
+Current final diff after installed SHA consists only of reconciliation docs.
