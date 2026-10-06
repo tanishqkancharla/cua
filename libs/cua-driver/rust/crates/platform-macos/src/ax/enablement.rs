@@ -224,6 +224,12 @@ pub unsafe fn ensure_chromium_ax_enabled(pid: i32, app_element: AXUIElementRef) 
         Attempt::Skip => return,
         Attempt::Run { prior_timeouts } => prior_timeouts,
     };
+    // Chrome enables native accessibility in its application-role getter.
+    // A window-only walk never queries that root and can otherwise expose only
+    // browser chrome, even when opt-in setters return success. Read the standard
+    // root role before the existing bounded opt-in/materialization path.
+    // https://chromium.googlesource.com/chromium/src/+/refs/heads/main/chrome/browser/chrome_browser_application_mac.mm
+    let _ = copy_string_attr(app_element, "AXRole");
     let outcome = wait_outcome(
         enable_chromium_accessibility(app_element),
         prior_timeouts,
