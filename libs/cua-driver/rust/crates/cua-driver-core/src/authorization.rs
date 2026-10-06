@@ -231,6 +231,7 @@ const PRIVATE_OBSERVATION_OPERATIONS: &[&str] = &[
     "get_desktop_state",
     "get_accessibility_tree",
     "get_window_state",
+    "parse_visual_regions",
     "verify_state",
     "list_apps",
     "list_windows",
@@ -282,6 +283,8 @@ const DESKTOP_INPUT_OPERATIONS: &[&str] = &[
     "press_key",
     "hotkey",
     "set_value",
+    "select_text",
+    "native_paste",
     "bring_to_front",
     "close_window",
     "set_window_frame",
@@ -308,6 +311,7 @@ const FILE_TRANSFER_OPERATIONS: &[&str] = &[
     "stop_recording",
     "replay_trajectory",
     "install_ffmpeg",
+    "install_extension",
 ];
 const FILE_TRANSFER_SCOPE_KEYS: &[&str] = &[
     "daemon_generation",
@@ -601,7 +605,7 @@ pub const ENFORCEMENT_ADAPTERS: &[EnforcementAdapterDescriptor] = &[
     },
     EnforcementAdapterDescriptor {
         id: "clipboard",
-        operations: &["clipboard_read", "clipboard_write"],
+        operations: &["clipboard_read", "clipboard_write", "native_paste"],
         state: RiskEnforcement::Active,
         risk_class: RiskClass::R2,
         resource_kind: "system_clipboard",
@@ -766,7 +770,7 @@ pub fn enforcement_adapters_for_call(
         add("desktop_input");
     }
 
-    if matches!(tool, "clipboard_read" | "clipboard_write")
+    if matches!(tool, "clipboard_read" | "clipboard_write" | "native_paste")
         || (tool == "browser_type" && args.get("mode").and_then(Value::as_str) == Some("paste"))
     {
         add("clipboard");
@@ -788,7 +792,8 @@ pub fn enforcement_adapters_for_call(
         || (tool == "clipboard_write"
             && (args.get("image_path").and_then(Value::as_str).is_some()
                 || args.get("file_path").and_then(Value::as_str).is_some()))
-        || (tool == "install_ffmpeg" && args.get("confirm").and_then(Value::as_bool) == Some(true))
+        || (matches!(tool, "install_ffmpeg" | "install_extension")
+            && args.get("confirm").and_then(Value::as_bool) == Some(true))
     {
         add("file_transfer_and_output");
     }
@@ -893,6 +898,7 @@ pub fn advertised_risk_for(tool: &str) -> RiskAssessment {
         | "press_key"
         | "hotkey"
         | "set_value"
+        | "select_text"
         | "invoke_menu"
         | "launch_app"
         | "bring_to_front"
@@ -911,6 +917,7 @@ pub fn advertised_risk_for(tool: &str) -> RiskAssessment {
         // the canonical registry boundary before platform dispatch.
         "zoom"
         | "clipboard_read"
+        | "native_paste"
         | "list_apps"
         | "list_windows"
         | "debug_window_info"
@@ -928,7 +935,8 @@ pub fn advertised_risk_for(tool: &str) -> RiskAssessment {
         | "browser_key"
         | "browser_pointer"
         | "history_status"
-        | "history_query" => RiskClass::R2,
+        | "history_query"
+        | "parse_visual_regions" => RiskClass::R2,
 
         // External/file side effects or generic compound action surfaces.
         "get_desktop_state"
@@ -937,6 +945,7 @@ pub fn advertised_risk_for(tool: &str) -> RiskAssessment {
         | "stop_recording"
         | "replay_trajectory"
         | "install_ffmpeg"
+        | "install_extension"
         | "page"
         | "browser_dialog"
         | "browser_set_input_files"
@@ -1072,7 +1081,7 @@ pub fn classify_tool_call(tool: &str, args: &Value) -> RiskAssessment {
             enforcement: RiskEnforcement::Active,
             operation_sensitive: true,
         },
-        "install_ffmpeg" => {
+        "install_ffmpeg" | "install_extension" => {
             let confirmed = args.get("confirm").and_then(Value::as_bool) == Some(true);
             RiskAssessment {
                 class: if confirmed {
@@ -1193,6 +1202,8 @@ fn enforce_hard_invariants(
             | "press_key"
             | "hotkey"
             | "set_value"
+            | "select_text"
+            | "native_paste"
             | "kill_app"
             | "bring_to_front"
             | "close_window"
@@ -1585,6 +1596,30 @@ mod tests {
     }
 
     #[test]
+    fn native_paste_requires_both_target_and_clipboard_guards() {
+        let args = serde_json::json!({"pid": 42, "window_id": 7, "text": "line one\nline two"});
+        let risk = classify_tool_call("native_paste", &args);
+        assert_eq!(risk.class, RiskClass::R2);
+        assert_eq!(risk.enforcement, RiskEnforcement::Active);
+        assert_eq!(
+            enforcement_adapters_for_call("native_paste", &args)
+                .iter()
+                .map(|adapter| adapter.id)
+                .collect::<Vec<_>>(),
+            vec!["desktop_input", "clipboard"]
+        );
+        assert!(enforce_hard_invariants(
+            "native_paste",
+            &serde_json::json!({"pid": std::process::id()})
+        )
+        .is_err());
+        assert_eq!(
+            advertised_risk_for("native_paste_unreviewed").class,
+            RiskClass::Unclassified
+        );
+    }
+
+    #[test]
     fn clipboard_risk_distinguishes_reads_text_writes_and_local_files() {
         let read = classify_tool_call("clipboard_read", &serde_json::json!({}));
         assert_eq!(read.class, RiskClass::R2);
@@ -1918,6 +1953,17 @@ mod tests {
         );
         assert_eq!(
             ids("install_ffmpeg", serde_json::json!({"confirm": true})),
+            vec!["file_transfer_and_output"]
+        );
+        assert_eq!(
+            ids("install_extension", serde_json::json!({})),
+            Vec::<&str>::new()
+        );
+        assert_eq!(
+            ids(
+                "install_extension",
+                serde_json::json!({"name": "perception", "confirm": true})
+            ),
             vec!["file_transfer_and_output"]
         );
         assert_eq!(

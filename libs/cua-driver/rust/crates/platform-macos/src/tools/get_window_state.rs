@@ -20,20 +20,26 @@ impl GetWindowStateTool {
 
 static DEF: std::sync::OnceLock<ToolDef> = std::sync::OnceLock::new();
 
+/// Slack past `timeout_ms` before the walk task is abandoned: one in-flight AX
+/// call may still be waiting on its messaging timeout.
+const AX_WALK_BACKSTOP_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
 fn def() -> &'static ToolDef {
     DEF.get_or_init(|| ToolDef {
         name: "get_window_state".into(),
         description: "Walk a running app's AX tree and return BOTH a structured \
             `elements` array (preferred) AND a Markdown rendering of the same tree \
             (back-compat). Every actionable element is tagged with [element_index N] \
-            in the markdown and as `element_index` in the structured array — pass \
-            those indices to click, type_text, press_key, etc.\n\n\
+            in the markdown and as `element_index` in the structured array; pass \
+            each element's `element_token` to click, type_text, press_key, etc.\n\n\
             INVARIANT: call get_window_state once per turn per (pid, window_id) before any \
-            element-indexed action. The index map is replaced by the next snapshot.\n\n\
+            element action. The next snapshot of the window replaces this one, stales its \
+            element tokens, and lists the replaced ids in `invalidated_snapshot_ids`.\n\n\
             PREFERRED CONSUMERS read `structuredContent.elements` (one entry per \
             indexed row with `element_index`, `role`, `label`, `value` (the \
             element's text/AXValue when present — use it to verify what a field \
-            holds), `frame: {x,y,w,h}`, `parent_index`, `depth`). The markdown \
+            holds), `actions` (names of AX actions exposed by the element, \
+            omitted when empty), `frame: {x,y,w,h}`, `parent_index`, `depth`). The markdown \
             `tree_markdown` stays available \
             and unchanged in shape for existing text-parsing callers — but new \
             fields will only be added to the structured side.\n\n\
@@ -41,22 +47,23 @@ fn def() -> &'static ToolDef {
             both and cross-check (the tree lies on some surfaces: Electron \
             echo-confirms, Catalyst null values, virtualized off-viewport rows \
             with `h:1` frames). You choose the modality at ACTION time, not here: \
-            an element ax action (pass `element_index`/`element_token` → the \
+            an element ax action (pass `element_token` → the \
             accessibility rung) or an element px action (pass `x`,`y` → the pixel \
             rung, read straight off this screenshot). `capture_mode` is deprecated \
             and ignored. Pass `include_screenshot:false` to skip the grab and get \
             the tree only — the cheap path when you're just re-indexing before an \
             element ax action.\n\n\
             The mirror image: pass `include_accessibility_tree:false` to SKIP the \
-            AX walk entirely (the expensive part, up to 20 s) and return just the \
+            AX walk entirely (the expensive part, bounded by timeout_ms) and return just the \
             screenshot plus window metadata — `window_bounds`, `screenshot_scale`, \
             `screenshot_width`/`screenshot_height`, `app_name`, and `window_title` \
             — the capture-only path for rendering a live window preview / \
             picture-in-picture without paying for perception. Setting BOTH \
             `include_accessibility_tree:false` and `include_screenshot:false` is an \
-            error (nothing to return). Optional `max_dimension` caps the returned \
-            screenshot's long edge in pixels (aspect preserved) for a cheap \
-            thumbnail.\n\n\
+            error (nothing to return). Optional `max_image_dimension` overrides the \
+            configured screenshot long-edge limit for this call; use 0 for native \
+            resolution. The legacy `max_dimension` remains a tighter cap for \
+            compatibility.\n\n\
             The snapshot is SCOPED to `window_id`: a window_id that no longer exists is \
             refused with `window_id_not_found`, and one owned by another process is \
             refused with `window_owner_pid_mismatch` naming the real `owner_pid` to retry \
@@ -64,7 +71,13 @@ fn def() -> &'static ToolDef {
             window belongs to the panel service, not the app). If the window is live under \
             this pid but its accessibility surface can't be resolved, the tree comes back \
             EMPTY with `degraded_reason: ax_window_unresolved` and the screenshot of the \
-            requested window — act by pixel there. This tool never returns another \
+            requested window; background input is refused until it resolves, so \
+            re-snapshot or act with `delivery_mode:\"foreground\"`. When that pid is an \
+            app still launching (its window exists before it answers accessibility), the \
+            walk first waits up to `timeout_ms` for it; if it never answers, the tree comes \
+            back EMPTY with `degraded_reason: ax_app_launching`, `truncated: true` and \
+            `truncation_reason: app_lookup_timeout`. A window on another \
+            Space still resolves by its exact CGWindowID. This tool never returns another \
             surface's elements under your window_id. Before exposing a screenshot, \
             its raw dimensions are validated as a coherent 1x/2x representation of \
             the requested WindowServer bounds. `px_frame_mismatch` or \
@@ -75,6 +88,9 @@ fn def() -> &'static ToolDef {
             element_index values are unchanged, the complete snapshot remains actionable, \
             and `element_count` continues to report its total size; \
             `filtered_element_count` reports the projected response size.\n\n\
+            `probe_only:true` checks exact WindowServer ownership and AXWindow matching \
+            without replacing action caches, tokens or screenshot bindings. It returns \
+            only window-match metadata, never elements, a tree or a screenshot.\n\n\
             Optional `max_elements` / `max_depth` bound the AX walk to mitigate \
             context-window blow-up on Electron / Obsidian / large web apps that \
             produce 10k+ element trees. When applied, BOTH the markdown \
@@ -87,11 +103,12 @@ fn def() -> &'static ToolDef {
                 "session": { "type": "string", "description": "For multi-call work, prefer a short public session label and repeat it on every call that accepts it. Omit it to use the authenticated transport's implicit lifecycle session." },
                 "pid": { "type": "integer", "description": "Target process ID." },
                 "window_id": { "type": "integer", "description": "Target window ID from list_windows." },
+                "probe_only": { "type": "boolean", "description": "Default false. Check exact ownership and AXWindow matching with a bounded walk without replacing action caches, snapshot tokens or screenshot bindings. Returns only pid, window_id, probe_only, window_matched and a degraded_reason when unresolved. No controls or screenshot are returned. Incompatible with query, screenshot_out_file, include_screenshot:true or include_accessibility_tree:false." },
                 "query": { "type": "string", "description": "Case-insensitive filter for tree_markdown and structured elements. Returns matching actionable rows plus their actionable ancestors without renumbering element_index values." },
                 "capture_mode": cua_driver_core::capture_mode::capture_mode_schema(),
                 "include_accessibility_tree": {
                     "type": "boolean",
-                    "description": "Default true — walk the AX tree and return `elements` + `tree_markdown` alongside the screenshot. Set false to SKIP the AX walk entirely (the expensive part, up to 20 s) and return just the screenshot plus window metadata (bounds, scale, app_name, window_title) — the capture-only path for rendering a live window preview / picture-in-picture. Mirrors include_screenshot. Setting BOTH include_accessibility_tree:false AND include_screenshot:false is an error (nothing to return)."
+                    "description": "Default true — walk the AX tree and return `elements` + `tree_markdown` alongside the screenshot. Set false to SKIP the AX walk entirely (the expensive part, bounded by timeout_ms) and return just the screenshot plus window metadata (bounds, scale, app_name, window_title) — the capture-only path for rendering a live window preview / picture-in-picture. Mirrors include_screenshot. Setting BOTH include_accessibility_tree:false AND include_screenshot:false is an error (nothing to return)."
                 },
                 "include_screenshot": {
                     "type": "boolean",
@@ -111,10 +128,16 @@ fn def() -> &'static ToolDef {
                     "minimum": 1,
                     "description": "Cap on the AX-tree walk depth. Nodes whose rendered indent would exceed this are omitted. Omit for the default (25). Lower this for deep menu/Electron trees."
                 },
+                "timeout_ms": cua_driver_core::tool_schema::timeout_ms_schema(),
                 "max_dimension": {
                     "type": "integer",
                     "minimum": 1,
                     "description": "Optional cap on the returned screenshot's long edge, in pixels (aspect ratio preserved) — the cheap path for a small preview / thumbnail. Applied on top of the session/global max_image_dimension ceiling; the tighter of the two wins. Omit for the configured default."
+                },
+                "max_image_dimension": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Per-call override for the returned screenshot's long edge in pixels. An explicit value wins over the session/global setting; 0 returns native resolution. Omit to preserve configured behavior."
                 }
             },
             "additionalProperties": false
@@ -124,19 +147,6 @@ fn def() -> &'static ToolDef {
         idempotent: false,
         open_world: false,
     })
-}
-
-/// Fold a per-call `max_dimension` cap with the session/global
-/// `max_image_dimension` ceiling. `resize_png_if_needed` treats `0` as "no
-/// limit", so when the ceiling is unlimited the per-call cap stands alone;
-/// otherwise the tighter (smaller, non-zero) of the two wins. Returns `0` only
-/// when neither imposes a limit.
-fn fold_max_dimension(ceiling: u32, per_call: Option<u32>) -> u32 {
-    match per_call {
-        Some(md) if ceiling == 0 => md,
-        Some(md) => ceiling.min(md),
-        None => ceiling,
-    }
 }
 
 fn chromium_browser_window(pid: i32) -> bool {
@@ -181,9 +191,17 @@ impl Tool for GetWindowStateTool {
             Ok(v) => v,
             Err(e) => return e,
         };
+        let probe_only = args.get("probe_only").and_then(Value::as_bool) == Some(true);
+        if probe_only && invalid_probe_options(&args) {
+            return ToolResult::error(
+                "probe_only returns only exact-window matching metadata; omit query and \
+                 screenshot_out_file, and do not set include_screenshot:true or \
+                 include_accessibility_tree:false.",
+            );
+        }
 
         // Issue #2237: pre-flight the requested window against WindowServer
-        // BEFORE the (up to 20 s) AX walk. An id that no window carries, or
+        // BEFORE the (timeout_ms-bounded) AX walk. An id that no window carries, or
         // that another process owns, used to fall through the scoped filter and
         // return the app's MENU BAR as a healthy snapshot of the requested
         // window — with a screenshot of the requested window beside it. macOS
@@ -242,7 +260,8 @@ impl Tool for GetWindowStateTool {
         // just re-indexing before an element ax action. `screenshot_out_file`
         // still forces a capture (an explicit "write the frame to disk").
         let include_screenshot = args.get("include_screenshot").and_then(|v| v.as_bool());
-        let should_capture = include_screenshot != Some(false) || screenshot_out_file.is_some();
+        let should_capture =
+            !probe_only && (include_screenshot != Some(false) || screenshot_out_file.is_some());
         // `include_accessibility_tree` (default true) is the mirror image of
         // `include_screenshot`: set false to SKIP the AX walk (the expensive
         // part) and return just the screenshot + window metadata — the
@@ -266,6 +285,10 @@ impl Tool for GetWindowStateTool {
             .get("max_dimension")
             .and_then(|v| v.as_u64())
             .map(|v| v.max(1) as u32);
+        let max_image_dimension = args
+            .get("max_image_dimension")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
         // Internal direct-tool mode used by verify_state. Registry ingress
         // strips underscore-prefixed arguments before public dispatch; only
         // a trusted direct in-process invocation can enable this mode.
@@ -287,41 +310,44 @@ impl Tool for GetWindowStateTool {
             .and_then(|v| v.as_u64())
             .map(|v| v.max(1) as usize)
             .unwrap_or(crate::ax::tree::DEFAULT_MAX_DEPTH);
+        let timeout_ms = cua_driver_core::tool_schema::resolve_timeout_ms(args.get("timeout_ms"));
 
-        // Walk the AX tree unless the caller opted out via
-        // `include_accessibility_tree:false` (the capture-only / preview path,
-        // which skips the expensive walk and returns screenshot + metadata).
-        let tree_result = if want_tree {
+        let (tree_result, prepared_snapshot) = if want_tree {
             let q = query.clone();
-            // Keep the product deadline below the public client's 25-second
-            // deadline so callers receive a structured driver error. The AX
-            // walker also applies a native per-element messaging timeout because
-            // dropping a spawn_blocking JoinHandle cannot cancel a blocked AX call.
+            // `timeout_ms` bounds the walk itself: it returns the partial tree
+            // when the budget runs out. The outer deadline is only a backstop
+            // for an AX call that ignores the per-element messaging timeout
+            // (dropping a spawn_blocking JoinHandle cannot cancel it).
             let walk_future = tokio::task::spawn_blocking(move || {
-                crate::ax::tree::walk_tree_bounded(
+                let tree = crate::ax::tree::walk_tree_budgeted(
                     pid,
                     Some(window_id),
                     q.as_deref(),
-                    max_elements,
                     max_depth,
-                )
+                    cua_driver_core::walk_budget::WalkBudget::new(timeout_ms, max_elements),
+                );
+                let payload = crate::ax::snapshot::AxSnapshot::from_nodes(&tree.nodes);
+                (tree, payload)
             });
-            match tokio::time::timeout(std::time::Duration::from_secs(20), walk_future).await {
-                Ok(Ok(r)) => Some(r),
+            // A launching app is waited on for up to `timeout_ms` before the
+            // walk's own `timeout_ms` starts (see `ax::launch`).
+            let backstop =
+                std::time::Duration::from_millis(timeout_ms) * 2 + AX_WALK_BACKSTOP_GRACE;
+            match tokio::time::timeout(backstop, walk_future).await {
+                Ok(Ok((tree, payload))) => (Some(tree), Some(payload)),
                 Ok(Err(e)) => return ToolResult::error(format!("AX tree walk failed: {e}")),
                 Err(_elapsed) => {
                     return ToolResult::error(format!(
-                        "AX tree walk for pid={pid} timed out after 20 s. \
-                         The app (likely Arc, Electron, or Safari with many tabs) has a \
-                         pathologically large accessibility tree. \
-                         Workaround: re-call with a depth-limited scan \
-                         (max_elements / max_depth), then act by pixel (x,y) off \
-                         the screenshot if the tree stays unusable."
+                        "AX tree walk for pid={pid} did not return within {} s: an \
+                         accessibility call stopped answering past the {timeout_ms} ms \
+                         timeout_ms budget. Retry, or act by pixel (x,y) off a \
+                         screenshot-only get_window_state (include_accessibility_tree:false).",
+                        backstop.as_secs()
                     ));
                 }
             }
         } else {
-            None
+            (None, None)
         };
 
         // The window can close, or its CGWindow can be re-parented onto another
@@ -333,53 +359,64 @@ impl Tool for GetWindowStateTool {
                 return refusal;
             }
         }
+        // Public probe responses carry no actionable indices. Return before
+        // touching retained AX refs, token snapshots or screenshot transforms.
+        // WindowServer ownership and the actual AX scope were both checked.
+        if probe_only {
+            return window_probe_result(pid, window_id, window_scope.as_ref());
+        }
         // `window_scope` is None only when no window_id was requested, which
         // this tool never does — so treat that as resolved.
         let scope_matched = window_scope.as_ref().is_none_or(|s| s.is_matched());
 
-        // Update element cache — ONLY for a resolved window scope. Caching an
-        // unresolved scope's nodes under (pid, window_id) is what turned a
-        // wrong-surface snapshot into a wrong-surface *action*: a follow-up
-        // click(element_index=N) picked whatever the walk happened to return.
-        // For an unresolved scope, replace any prior entry with an empty
-        // snapshot so a stale index map cannot be clicked through either.
-        if !observation_only {
-            if let Some(ref r) = tree_result {
-                if scope_matched {
-                    self.state.element_cache.update(pid, window_id, &r.nodes);
-                } else {
-                    self.state.element_cache.update(pid, window_id, &[]);
-                }
-            }
-        }
+        // Retain the exact walk's objects before the cache takes ownership.
+        // The optional focus read runs near publication, after capture work.
+        let focus_candidates = if scope_matched && !observation_only {
+            tree_result
+                .as_ref()
+                .map(|walk| crate::ax::focus_observation::Candidates::retain(&walk.nodes))
+        } else {
+            None
+        };
+
+        let removed = (!scope_matched && !observation_only)
+            .then(|| self.state.snapshots.remove(pid, u64::from(window_id)))
+            .flatten();
 
         // Capture the screenshot and deliver it alongside the tree — the
         // grounding frame the agent cross-checks the (sometimes-lying) tree
         // against. Skipped only when `include_screenshot:false` (and no
         // screenshot_out_file). With `screenshot_out_file` set, write to disk and
         // surface the path instead of embedding base64; otherwise embed base64.
-        // Fold the per-call `max_dimension` with the session/global ceiling
-        // (the tighter of the two wins).
-        let max_dim = fold_max_dimension(effective_max_dim, max_dimension);
-        // Returns the encoded/file capture, delivered dimensions, optional
-        // downscale source width, the WindowServer bounds it was validated
+        // The portable `max_image_dimension` is an explicit per-call override,
+        // including 0 for native resolution. Without it, preserve the existing
+        // configured ceiling and legacy `max_dimension` tighter-cap behavior.
+        let max_dim = cua_driver_core::image_utils::ImageDimensionLimits {
+            configured: effective_max_dim,
+            legacy_max_dimension: max_dimension,
+            max_image_dimension,
+        }
+        .resolve();
+        // Returns the exact delivered PNG bytes, optional file path, delivered
+        // and native dimensions, the WindowServer bounds it was validated
         // against, and the raw capture's backing scale.
         let mut screenshot_frame_error = None;
+        let mut screenshot_resize_scale = None;
         let screenshot = if should_capture {
             let out_file = screenshot_out_file.clone();
             let res = tokio::task::spawn_blocking(move || -> Result<
                 (
-                    Option<String>,
+                    Vec<u8>,
                     Option<String>,
                     u32,
                     u32,
-                    Option<u32>,
+                    u32,
+                    u32,
                     crate::windows::WindowBounds,
                     f64,
                 ),
                 super::px_frame::PxFrameError,
             > {
-                use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
                 let bounds = crate::windows::window_bounds_by_id(window_id)
                     .filter(|b| b.width > 0.0 && b.height > 0.0)
                     .ok_or(super::px_frame::PxFrameError::WindowNotFound { window_id })?;
@@ -409,7 +446,6 @@ impl Tool for GetWindowStateTool {
                         reason: e.to_string(),
                     }
                 })?;
-                let original_w = if w < orig_w { Some(orig_w) } else { None };
                 if let Some(ref path) = out_file {
                     std::fs::write(path, &png).map_err(|e| {
                         super::px_frame::PxFrameError::CaptureUnavailable {
@@ -418,55 +454,39 @@ impl Tool for GetWindowStateTool {
                         }
                     })?;
                     Ok((
-                        None,
+                        png,
                         Some(path.clone()),
                         w,
                         h,
-                        original_w,
+                        orig_w,
+                        orig_h,
                         bounds,
                         scale,
                     ))
                 } else {
                     Ok((
-                        Some(BASE64.encode(&png)),
+                        png,
                         None,
                         w,
                         h,
-                        original_w,
+                        orig_w,
+                        orig_h,
                         bounds,
                         scale,
                     ))
                 }
             }).await;
             match res {
-                Ok(Ok((b64, file_path, w, h, orig_w, bounds, scale))) => {
-                    // Record resize ratio so ClickTool can scale coordinates back
-                    // up. Keyed per window: two windows of one pid can carry
-                    // different ratios (only the large one downscales), and a
-                    // pid-only key leaked one window's ratio into the other's
-                    // pixel clicks.
+                Ok(Ok((png, file_path, w, h, orig_w, orig_h, bounds, scale))) => {
                     if !observation_only {
-                        if let Some(ow) = orig_w {
-                            if w > 0 {
-                                self.state.resize_registry.set_ratio(
-                                    pid,
-                                    window_id,
-                                    ow as f64 / w as f64,
-                                );
-                            }
-                        } else {
-                            self.state.resize_registry.clear_ratio(pid, window_id);
-                        }
+                        screenshot_resize_scale = Some(orig_w as f64 / w as f64);
                     }
-                    Some((b64, file_path, w, h, bounds, scale))
+                    Some((png, file_path, w, h, orig_w, orig_h, bounds, scale))
                 }
                 Ok(Err(e)) => {
                     tracing::warn!(
                         "Screenshot frame could not be verified for window {window_id}: {e:?}"
                     );
-                    if !observation_only {
-                        self.state.resize_registry.clear_ratio(pid, window_id);
-                    }
                     screenshot_frame_error = Some(e);
                     None
                 }
@@ -480,20 +500,21 @@ impl Tool for GetWindowStateTool {
         };
 
         // Capture screenshot dimensions before consuming.
-        let screenshot_dims = screenshot.as_ref().map(|(_, _, w, h, _, _)| (*w, *h));
+        let screenshot_dims = screenshot.as_ref().map(|(_, _, w, h, _, _, _, _)| (*w, *h));
         let screenshot_file_path = screenshot
             .as_ref()
-            .and_then(|(_, fp, _, _, _, _)| fp.clone());
+            .and_then(|(_, fp, _, _, _, _, _, _)| fp.clone());
         let screenshot_frame = screenshot
             .as_ref()
-            .map(|(_, _, _, _, bounds, scale)| (bounds.clone(), *scale));
+            .map(|(_, _, _, _, _, _, bounds, scale)| (bounds.clone(), *scale));
 
         // Build response.
         let mut content: Vec<Content> = Vec::new();
 
-        if let Some((b64_opt, _file_path, w, h, _bounds, _scale)) = screenshot {
-            if let Some(b64) = b64_opt {
-                content.push(Content::image_png(b64));
+        if let Some((png, ref file_path, w, h, _, _, _, _)) = screenshot.as_ref() {
+            if file_path.is_none() {
+                use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+                content.push(Content::image_png(BASE64.encode(png)));
             }
 
             // Summary text line (matching Swift reference format).
@@ -533,29 +554,38 @@ impl Tool for GetWindowStateTool {
             .map(|r| r.tree_markdown.clone())
             .unwrap_or_default();
 
-        // Surface 6: register a snapshot in the global token registry so
-        // every actionable element gets an opaque `element_token` keyed
-        // to (pid, this snapshot id). The integer `element_index` stays
-        // alongside unchanged — the token is additive. Snapshot id is
-        // generated even when the walk returned no elements so consumers
-        // calling `get_window_state` and then immediately re-snapshotting
-        // get a clean LRU step every time.
-        //
-        // Skipped entirely for an unresolved window scope: an element_token is
-        // a promise that index N addresses a row of THIS window, and there is
-        // no such row to promise (issue #2237).
-        let elem_count_for_snapshot = tree_result
-            .as_ref()
-            .map(|r| r.nodes.iter().filter(|n| n.element_index.is_some()).count())
-            .unwrap_or(0);
-        let snapshot_id = if scope_matched && !observation_only && tree_result.is_some() {
-            Some(cua_driver_core::element_token::global().register_snapshot(
-                pid,
-                window_id,
-                elem_count_for_snapshot,
-            ))
-        } else {
-            None
+        let snapshot_payload = prepared_snapshot.or_else(|| {
+            screenshot_resize_scale
+                .is_some()
+                .then(|| crate::ax::snapshot::AxSnapshot::from_nodes(&[]))
+        });
+        let (snapshot_id, replaced) = snapshot_payload
+            .filter(|_| scope_matched && !observation_only)
+            .and_then(|payload| {
+                self.state.snapshots.publish_for_session(
+                    pid,
+                    u64::from(window_id),
+                    payload,
+                    session_id.as_deref(),
+                    screenshot_resize_scale,
+                )
+            })
+            .unzip();
+        let capture_id = match (snapshot_id, screenshot.as_ref()) {
+            (Some(_), Some((png, _, width, height, native_width, native_height, _, _))) => {
+                match self.state.capture_bindings.publish_window(
+                    &args,
+                    pid,
+                    window_id,
+                    png.clone(),
+                    (*width, *height),
+                    (*native_width, *native_height),
+                ) {
+                    Ok(capture_id) => Some(capture_id),
+                    Err(error) => return error,
+                }
+            }
+            _ => None,
         };
 
         // Build the structured `elements` array — one entry per actionable
@@ -564,16 +594,52 @@ impl Tool for GetWindowStateTool {
         // alongside for back-compat with existing text-parsing callers
         // (Hermes' regex parser, Codex, Claude Code) and is signalled as
         // preferred-for-back-compat-only via the `_note` field below.
-        let elements_json: Vec<serde_json::Value> = match (snapshot_id, tree_result.as_ref()) {
-            (Some(sid), Some(r)) => build_elements_array_with_token(&r.nodes, sid),
-            (None, Some(r)) if scope_matched => build_elements_array(&r.nodes),
+        let mut elements_json: Vec<serde_json::Value> = match (snapshot_id, tree_result.as_ref()) {
+            (Some(sid), Some(r)) => build_elements_array_with_token(&r.nodes, Some(sid)),
+            (None, Some(r)) if scope_matched && observation_only => {
+                build_observation_elements_array(&r.nodes)
+            }
+            (None, Some(r)) if scope_matched => build_elements_array_with_token(&r.nodes, None),
             _ => Vec::new(),
         };
+        let focused_index = if let Some(candidates) = focus_candidates {
+            tokio::time::timeout(
+                std::time::Duration::from_millis(750),
+                tokio::task::spawn_blocking(move || {
+                    crate::ax::focus_observation::observe(pid, window_id, candidates)
+                }),
+            )
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .flatten()
+        } else {
+            None
+        };
+        if let Some(index) = focused_index {
+            for element in &mut elements_json {
+                if element["element_index"].as_u64() == Some(index as u64) {
+                    element["focused"] = serde_json::Value::Bool(true);
+                }
+            }
+        }
         let elements_json = cua_driver_core::element_query::project_elements_for_query(
             elements_json,
             query.as_deref(),
             &tree_md,
         );
+        // Screenshot pixels of the delivered capture: window origin in screen
+        // points, delivered pixels per point (backing scale x downsizing).
+        let elements_json = match (screenshot_frame.as_ref(), screenshot_dims) {
+            (Some((bounds, _)), Some((width, _))) if bounds.width > 0.0 => {
+                cua_driver_core::element_frame::with_screenshot_frames(
+                    elements_json,
+                    (bounds.x, bounds.y),
+                    f64::from(width) / bounds.width,
+                )
+            }
+            _ => elements_json,
+        };
         let filtered_element_count = elements_json.len();
         // The structured array intentionally contains only actionable nodes,
         // and AX child reads can fail independently of the element/depth caps.
@@ -598,6 +664,23 @@ impl Tool for GetWindowStateTool {
         if query.is_some() {
             structured["filtered_element_count"] = serde_json::json!(filtered_element_count);
         }
+        if let Some(r) = tree_result.as_ref() {
+            r.walk.apply(&mut structured);
+        }
+        // Out-of-band observation: never mint indices or collect another
+        // window's focused selection. Capture-only/probe/degraded paths omit it.
+        if want_tree && scope_matched && element_count > 0 {
+            if let Ok(Ok(Some(selection))) = tokio::time::timeout(
+                std::time::Duration::from_millis(750),
+                tokio::task::spawn_blocking(move || {
+                    crate::ax::text_selection::observe(pid, window_id)
+                }),
+            )
+            .await
+            {
+                structured["text_selection"] = selection;
+            }
+        }
         // Surface 6: an opaque snapshot identifier consumers can log
         // alongside the per-element tokens for debug correlation. Same value
         // embedded in every `element_token` emitted in `elements[]` above.
@@ -605,9 +688,22 @@ impl Tool for GetWindowStateTool {
         // registered (unresolved window scope).
         if let Some(sid) = snapshot_id {
             structured["snapshot_id"] =
-                serde_json::json!(cua_driver_core::element_token::token_for(sid, 0)
-                    .trim_end_matches(":0")
-                    .to_string());
+                serde_json::json!(cua_driver_core::element_token::format_snapshot_id(sid));
+        }
+        let invalidated: Vec<String> = removed
+            .into_iter()
+            .chain(replaced.into_iter().flatten())
+            .map(cua_driver_core::element_token::format_snapshot_id)
+            .collect();
+        if !invalidated.is_empty() {
+            content.push(Content::text(format!(
+                "Invalidated snapshots {}: their element_tokens are stale.",
+                invalidated.join(", ")
+            )));
+            structured["invalidated_snapshot_ids"] = serde_json::json!(invalidated);
+        }
+        if let Some(capture_id) = capture_id {
+            structured["capture_id"] = serde_json::json!(capture_id);
         }
         // Best-effort-background ladder, rung (2). Both rungs point the agent at
         // the same next move: an empty AX tree means element_index has nothing
@@ -615,7 +711,15 @@ impl Tool for GetWindowStateTool {
         // the screenshot already in this response and click by pixel (x,y).
         // macOS can pixel-target in the background, so the recommendation is
         // `px`, not `foreground`.
-        match degradation_for(tree_result.is_some(), element_count, window_scope.as_ref()) {
+        let app_lookup_timed_out = tree_result
+            .as_ref()
+            .is_some_and(|r| r.walk.reason() == Some("app_lookup_timeout"));
+        match degradation_for(
+            tree_result.is_some(),
+            element_count,
+            window_scope.as_ref(),
+            app_lookup_timed_out,
+        ) {
             Degradation::None => {}
             Degradation::AxTreeEmpty => {
                 structured["degraded"] = serde_json::json!(true);
@@ -631,6 +735,24 @@ impl Tool for GetWindowStateTool {
                     "recommended": "px",
                     "reason": "non-AX surface — act by pixel (x,y) off the screenshot \
                                in this response (an element px action)."
+                });
+            }
+            Degradation::AxAppLaunching => {
+                structured["degraded"] = serde_json::json!(true);
+                structured["degraded_reason"] = serde_json::json!(format!(
+                    "ax_app_launching: window_id {window_id} exists and is owned by pid \
+                     {pid}, but that app has not finished launching and did not answer \
+                     accessibility within the {timeout_ms} ms timeout_ms budget. The tree is \
+                     returned EMPTY because the window's accessibility surface is not \
+                     available yet."
+                ));
+                structured["escalation"] = serde_json::json!({
+                    "recommended": "foreground",
+                    "reason": "observation-only until the app finishes launching: re-snapshot \
+                               in a moment or with a larger timeout_ms. Background input \
+                               (including px) is refused while the window's AX surface is \
+                               unresolved; act with delivery_mode:\"foreground\" only if \
+                               you cannot wait."
                 });
             }
             Degradation::AxWindowUnresolved { ax_window_count } => {
@@ -730,6 +852,43 @@ impl Tool for GetWindowStateTool {
     }
 }
 
+fn invalid_probe_options(args: &Value) -> bool {
+    args.get("query").is_some()
+        || args.get("screenshot_out_file").is_some()
+        || args.get("include_screenshot").and_then(Value::as_bool) == Some(true)
+        || args
+            .get("include_accessibility_tree")
+            .and_then(Value::as_bool)
+            == Some(false)
+}
+
+fn window_probe_result(
+    pid: i32,
+    window_id: u32,
+    scope: Option<&crate::ax::WindowScope>,
+) -> ToolResult {
+    use crate::ax::WindowScope;
+    let matched = scope.is_some_and(WindowScope::is_matched);
+    let mut metadata = serde_json::json!({
+        "pid": pid, "window_id": window_id,
+        "probe_only": true, "window_matched": matched,
+    });
+    if !matched {
+        metadata["degraded_reason"] = serde_json::json!(match scope {
+            Some(WindowScope::AxUnresolved { ax_window_count }) => format!(
+                "ax_window_unresolved: no matching AXWindow among {ax_window_count} for pid {pid}, window_id {window_id}"
+            ),
+            _ => "ax_window_unresolved: exact AX window matching was not established".into(),
+        });
+    }
+    ToolResult::text(if matched {
+        "Exact AX window matched."
+    } else {
+        "Exact AX window unresolved."
+    })
+    .with_structured(metadata)
+}
+
 /// Turn an unresolvable window scope into a structured refusal, or `None` when
 /// the scope is one the caller can still be served (issue #2237).
 ///
@@ -738,8 +897,8 @@ impl Tool for GetWindowStateTool {
 /// clicked by `element_index`. Both refusals name the exact retry, matching the
 /// remedy-in-the-refusal shape the rest of the driver uses.
 ///
-/// The owner pid is REPORTED, not followed: `element_cache`, the element-token
-/// registry and `ResizeRegistry` are all keyed on the caller-supplied pid, so
+/// The owner pid is REPORTED, not followed: `snapshots`, the element-token
+/// registry and snapshot-owned screenshot transform are keyed on the caller-supplied pid, so
 /// walking under `owner_pid` while echoing the requested pid would hand back
 /// indices the caller replays against the wrong key. One retry with the named
 /// pid is correct and cheap.
@@ -804,6 +963,9 @@ enum Degradation {
     /// The requested window is live and owned by this pid, but no AXWindow
     /// claims its CGWindowID, so the walk deliberately covered nothing.
     AxWindowUnresolved { ax_window_count: usize },
+    /// The window scope is unresolved because the app is still launching and
+    /// did not answer accessibility within the caller's budget.
+    AxAppLaunching,
 }
 
 /// Decide the degradation rung. Pure: `walk_attempted` is false in the
@@ -814,11 +976,15 @@ fn degradation_for(
     walk_attempted: bool,
     element_count: usize,
     scope: Option<&crate::ax::WindowScope>,
+    app_lookup_timed_out: bool,
 ) -> Degradation {
     if !walk_attempted {
         return Degradation::None;
     }
     if let Some(crate::ax::WindowScope::AxUnresolved { ax_window_count }) = scope {
+        if app_lookup_timed_out {
+            return Degradation::AxAppLaunching;
+        }
         return Degradation::AxWindowUnresolved {
             ax_window_count: *ax_window_count,
         };
@@ -841,121 +1007,168 @@ fn degradation_for(
 /// omitted to match the contract on the tool description.
 pub(crate) fn build_elements_array_with_token(
     nodes: &[crate::ax::tree::AXNode],
-    snapshot_id: u32,
+    snapshot_id: Option<u32>,
 ) -> Vec<serde_json::Value> {
     nodes
         .iter()
         .filter_map(|node| {
-            let idx = node.element_index?;
-            // `label` is a best-effort human-readable string: title first,
-            // then description, then value, then identifier. Mirrors what
-            // a human reading the markdown row would call this element.
-            let label = node
-                .title
-                .clone()
-                .or_else(|| node.description.clone())
-                .or_else(|| node.value.clone())
-                .or_else(|| node.identifier.clone());
-            let frame = node
-                .frame
-                .map(|[x, y, w, h]| serde_json::json!({ "x": x, "y": y, "w": w, "h": h }));
-            let mut entry = serde_json::json!({
-                "element_index": idx,
-                // Surface 6: opaque token paired to the integer index.
-                // Tools accept either; the token has explicit validity
-                // (invalidated when the next snapshot supersedes this
-                // one in the per-pid LRU). See cua-driver-core's
-                // `element_token` module.
-                "element_token": cua_driver_core::element_token::token_for(snapshot_id, idx),
-                "role": node.role,
-                "depth": node.depth,
-            });
-            if let Some(label) = label {
-                entry["label"] = serde_json::Value::String(label);
-            }
-            // Surface the element's AXValue separately from `label`. `label`
-            // collapses title→description→value→identifier into one display
-            // string, so on a control that has BOTH a title/description AND a
-            // value (e.g. a "Compose message" text field holding typed text),
-            // the value is shadowed and invisible to a caller reading the
-            // structured side — it only showed up in `tree_markdown`, forcing a
-            // markdown grep to verify what landed. Emit it explicitly so the
-            // verify-then-escalate loop can read the typed text structurally.
-            // `value_state` widens the string-only AXValue read to all CF
-            // types (CFNumber sliders → "8", CFBoolean checkboxes/radios →
-            // "1"/"0") — controls whose state was previously invisible here.
-            // Falls back to `value` so the field never regresses for
-            // string-valued elements.
-            if let Some(value) = node
-                .value_state
-                .clone()
-                .or_else(|| node.value.clone())
-                .filter(|v| !v.is_empty())
-            {
-                entry["value"] = serde_json::Value::String(value);
-            }
-            if let Some(desc) = node.value_description.clone() {
-                entry["value_description"] = serde_json::Value::String(desc);
-            }
-            // Only surface a real range: WebKit reports AXMinValue/AXMaxValue
-            // as 0.0/0.0 on non-range controls (checkboxes, radios), which
-            // would be pure noise on every two-state element.
-            if let (Some(min), Some(max)) = (node.min_value, node.max_value) {
-                if max > min {
-                    entry["min"] = serde_json::json!(min);
-                    entry["max"] = serde_json::json!(max);
-                }
-            }
-            if let Some(enabled) = node.enabled {
-                entry["enabled"] = serde_json::Value::Bool(enabled);
-            }
-            let selected = node.selected.or_else(|| {
-                let role = node.role.to_ascii_lowercase();
-                if role.contains("checkbox") || role.contains("radiobutton") {
-                    node.value_state.as_deref().and_then(|value| match value {
-                        "1" | "true" | "on" => Some(true),
-                        "0" | "false" | "off" => Some(false),
-                        _ => None,
-                    })
-                } else {
-                    None
-                }
-            });
-            if let Some(selected) = selected {
-                entry["selected"] = serde_json::Value::Bool(selected);
-            }
-            if node.in_web_content {
-                entry["in_web_content"] = serde_json::Value::Bool(true);
-            }
-            if let Some(frame) = frame {
-                entry["frame"] = frame;
-            }
-            if let Some(parent) = node.parent_element_index {
-                entry["parent_index"] = serde_json::json!(parent);
-            }
-            Some(entry)
+            node.element_index?;
+            Some(element_entry(node, snapshot_id))
         })
         .collect()
 }
 
-/// Back-compat wrapper for callers that don't yet have a snapshot id
-/// to pass through. Emits the same fields as the token-aware builder
-/// minus `element_token`. New call sites should prefer
-/// `build_elements_array_with_token`.
-#[allow(dead_code)]
-pub(crate) fn build_elements_array(nodes: &[crate::ax::tree::AXNode]) -> Vec<serde_json::Value> {
-    // Use a snapshot_id of 0 only to satisfy the signature; tokens
-    // built from id=0 are not registered and would fail the registry's
-    // stale check — but since this entry point is only kept for
-    // pre-existing callers (none in production after Surface 6), it
-    // strips the token field after rendering.
-    let mut out = build_elements_array_with_token(nodes, 0);
-    for entry in &mut out {
-        if let Some(obj) = entry.as_object_mut() {
-            obj.remove("element_token");
+/// Observation-only `elements` for `verify_state`: every actionable row as
+/// [`build_elements_array_with_token`] emits it, plus the display-only rows
+/// (static text, labels, read-only values) the public array omits, in DFS
+/// order. Display-only rows carry `"display_only": true` and no
+/// `element_index`/`element_token`, because they are not addressable. They let
+/// a postcondition read text that only a display node holds, such as a
+/// label-less AXStaticText whose content lives in AXValue (#4526).
+pub(crate) fn build_observation_elements_array(
+    nodes: &[crate::ax::tree::AXNode],
+) -> Vec<serde_json::Value> {
+    nodes.iter().map(|node| element_entry(node, None)).collect()
+}
+
+fn element_entry(node: &crate::ax::tree::AXNode, snapshot_id: Option<u32>) -> serde_json::Value {
+    // `label` is a best-effort human-readable string: title first,
+    // then description, then value, then identifier. Mirrors what
+    // a human reading the markdown row would call this element.
+    let label = node
+        .title
+        .clone()
+        .or_else(|| node.description.clone())
+        .or_else(|| node.value.clone())
+        .or_else(|| node.identifier.clone());
+    let frame = node
+        .frame
+        .map(|[x, y, w, h]| serde_json::json!({ "x": x, "y": y, "w": w, "h": h }));
+    let mut entry = serde_json::json!({
+        "role": node.role,
+        "depth": node.depth,
+    });
+    if let Some(idx) = node.element_index {
+        entry["element_index"] = serde_json::json!(idx);
+        // Surface 6: opaque token paired to the integer index.
+        // Tools accept either; the token has explicit validity
+        // (invalidated when the next snapshot supersedes this
+        // one in the per-pid LRU). See cua-driver-core's
+        // `element_token` module.
+        if let Some(sid) = snapshot_id {
+            entry["element_token"] =
+                serde_json::json!(cua_driver_core::element_token::token_for(sid, idx));
+        }
+    } else {
+        entry["display_only"] = serde_json::Value::Bool(true);
+    }
+    if let Some(label) = label {
+        entry["label"] = serde_json::Value::String(label);
+    }
+    // Preserve observed identity, placeholder, resource and styled display
+    // separately from the label fallback and editable raw value.
+    let label_source = if node.title.is_some() {
+        Some("title")
+    } else if node.description.is_some() {
+        Some("description")
+    } else if node.value.is_some() {
+        Some("value")
+    } else if node.identifier.is_some() {
+        Some("identifier")
+    } else {
+        None
+    };
+    if let Some(source) = label_source {
+        entry["label_source"] = serde_json::Value::String(source.into());
+    }
+    for (name, value) in [
+        ("placeholder", &node.placeholder),
+        ("description", &node.description),
+        ("document_url", &node.document_url),
+        ("formatted_value", &node.formatted_value),
+    ] {
+        if let Some(value) = value {
+            entry[name] = serde_json::Value::String(value.clone());
         }
     }
-    out
+
+    // Surface the element's AXValue separately from `label`. `label`
+    // collapses title→description→value→identifier into one display
+    // string, so on a control that has BOTH a title/description AND a
+    // value (e.g. a "Compose message" text field holding typed text),
+    // the value is shadowed and invisible to a caller reading the
+    // structured side — it only showed up in `tree_markdown`, forcing a
+    // markdown grep to verify what landed. Emit it explicitly so the
+    // verify-then-escalate loop can read the typed text structurally.
+    // `value_state` widens the string-only AXValue read to all CF
+    // types (CFNumber sliders → "8", CFBoolean checkboxes/radios →
+    // "1"/"0") — controls whose state was previously invisible here.
+    // Falls back to `value` so the field never regresses for
+    // string-valued elements.
+    if let Some(value) = node
+        .value_state
+        .clone()
+        .or_else(|| node.value.clone())
+        .filter(|v| !v.is_empty())
+    {
+        entry["value"] = serde_json::Value::String(value);
+    }
+    if let Some(desc) = node.value_description.clone() {
+        entry["value_description"] = serde_json::Value::String(desc);
+    }
+    // Only surface a real range: WebKit reports AXMinValue/AXMaxValue
+    // as 0.0/0.0 on non-range controls (checkboxes, radios), which
+    // would be pure noise on every two-state element.
+    if let (Some(min), Some(max)) = (node.min_value, node.max_value) {
+        if max > min {
+            entry["min"] = serde_json::json!(min);
+            entry["max"] = serde_json::json!(max);
+        }
+    }
+    if let Some(enabled) = node.enabled {
+        entry["enabled"] = serde_json::Value::Bool(enabled);
+    }
+    let selected = node.selected.or_else(|| {
+        let role = node.role.to_ascii_lowercase();
+        if role.contains("checkbox") || role.contains("radiobutton") {
+            node.value_state.as_deref().and_then(|value| match value {
+                "1" | "true" | "on" => Some(true),
+                "0" | "false" | "off" => Some(false),
+                _ => None,
+            })
+        } else {
+            None
+        }
+    });
+    if let Some(selected) = selected {
+        entry["selected"] = serde_json::Value::Bool(selected);
+    }
+    if let Some(value_settable) = node.value_settable {
+        entry["settable"] = serde_json::Value::Bool(value_settable);
+    }
+    if node.selection_via_parent {
+        entry["selection_via_parent"] = serde_json::Value::Bool(true);
+        entry["selection_source"] = serde_json::Value::String("parent.AXSelectedChildren".into());
+    }
+    if let Some(identifier) = node.identifier.clone() {
+        entry["identifier"] = serde_json::Value::String(identifier);
+    }
+    if let Some(help) = node.help.clone() {
+        entry["help"] = serde_json::Value::String(help);
+    }
+    if !node.actions.is_empty() {
+        entry["actions"] = serde_json::json!(node.actions);
+    }
+    if node.in_web_content {
+        entry["in_web_content"] = serde_json::Value::Bool(true);
+    }
+    if let Some(frame) = frame {
+        entry["frame"] = frame;
+    }
+    if let Some(parent) = node.parent_element_index {
+        entry["parent_index"] = serde_json::json!(parent);
+    }
+    entry
 }
 
 /// Keep the structured response aligned with a query-filtered markdown tree.
@@ -1029,6 +1242,51 @@ mod window_scope_contract_tests {
         );
     }
 
+    #[test]
+    fn public_probe_exposes_only_exact_match_metadata() {
+        let matched = window_probe_result(800, 11, Some(&WindowScope::Matched))
+            .structured_content
+            .unwrap();
+        assert_eq!(
+            matched,
+            serde_json::json!({
+                "pid": 800, "window_id": 11, "probe_only": true, "window_matched": true
+            })
+        );
+        for scope in [None, Some(WindowScope::AxUnresolved { ax_window_count: 2 })] {
+            let unresolved = window_probe_result(800, 11, scope.as_ref())
+                .structured_content
+                .unwrap();
+            assert_eq!(unresolved["window_matched"], false);
+            assert!(unresolved["degraded_reason"]
+                .as_str()
+                .unwrap()
+                .starts_with("ax_window_unresolved"));
+            assert!(unresolved.get("elements").is_none());
+            assert!(unresolved.get("snapshot_id").is_none());
+        }
+        assert_eq!(
+            def().input_schema["properties"]["probe_only"]["type"],
+            "boolean"
+        );
+    }
+
+    #[test]
+    fn public_probe_rejects_capture_and_query_options() {
+        for args in [
+            serde_json::json!({"query": ""}),
+            serde_json::json!({"screenshot_out_file": "/tmp/probe.png"}),
+            serde_json::json!({"include_screenshot": true}),
+            serde_json::json!({"include_accessibility_tree": false}),
+        ] {
+            assert!(invalid_probe_options(&args));
+        }
+        assert!(!invalid_probe_options(&serde_json::json!({})));
+        assert!(!invalid_probe_options(
+            &serde_json::json!({"include_screenshot": false})
+        ));
+    }
+
     /// The reported failure signature: a wrong-surface walk returns a healthy
     /// non-zero element count, so the pre-fix `element_count == 0` rung stayed
     /// silent. An unresolved scope now degrades on its own evidence.
@@ -1038,9 +1296,30 @@ mod window_scope_contract_tests {
             degradation_for(
                 true,
                 0,
-                Some(&WindowScope::AxUnresolved { ax_window_count: 3 })
+                Some(&WindowScope::AxUnresolved { ax_window_count: 3 }),
+                false
             ),
             Degradation::AxWindowUnresolved { ax_window_count: 3 }
+        );
+    }
+
+    /// A window that exists before its app answers accessibility is not an
+    /// unscoped window: the degradation names the launch instead.
+    #[test]
+    fn a_launch_that_outlasts_the_budget_degrades_as_app_launching() {
+        assert_eq!(
+            degradation_for(
+                true,
+                0,
+                Some(&WindowScope::AxUnresolved { ax_window_count: 0 }),
+                true
+            ),
+            Degradation::AxAppLaunching
+        );
+        // A walk cut short for another reason after resolving keeps its rung.
+        assert_eq!(
+            degradation_for(true, 0, Some(&WindowScope::Matched), true),
+            Degradation::AxTreeEmpty
         );
     }
 
@@ -1048,7 +1327,7 @@ mod window_scope_contract_tests {
     fn empty_tree_still_degrades_as_ax_tree_empty() {
         // Back-compat with the pre-existing rung.
         assert_eq!(
-            degradation_for(true, 0, Some(&WindowScope::Matched)),
+            degradation_for(true, 0, Some(&WindowScope::Matched), false),
             Degradation::AxTreeEmpty
         );
     }
@@ -1056,14 +1335,14 @@ mod window_scope_contract_tests {
     #[test]
     fn resolved_window_with_elements_is_not_degraded() {
         assert_eq!(
-            degradation_for(true, 42, Some(&WindowScope::Matched)),
+            degradation_for(true, 42, Some(&WindowScope::Matched), false),
             Degradation::None
         );
     }
 
     #[test]
     fn screenshot_only_path_does_not_degrade() {
-        assert_eq!(degradation_for(false, 0, None), Degradation::None);
+        assert_eq!(degradation_for(false, 0, None, false), Degradation::None);
     }
 
     #[test]
@@ -1073,6 +1352,8 @@ mod window_scope_contract_tests {
             "window_id_not_found",
             "window_owner_pid_mismatch",
             "ax_window_unresolved",
+            "ax_app_launching",
+            "app_lookup_timeout",
         ] {
             assert!(
                 description.contains(code),
@@ -1097,6 +1378,7 @@ mod window_scope_contract_tests {
             props.get("max_dimension").is_some(),
             "schema must advertise max_dimension"
         );
+        assert_eq!(props["max_image_dimension"]["minimum"], 0);
         let required: Vec<&str> = d.input_schema["required"]
             .as_array()
             .expect("required array")
@@ -1113,29 +1395,13 @@ mod window_scope_contract_tests {
             "description must document the both-false error"
         );
     }
-
-    /// The per-call `max_dimension` folds with the session/global ceiling: the
-    /// tighter non-zero cap wins, an unlimited (0) ceiling defers to the
-    /// per-call cap, and absent inputs pass the ceiling through unchanged.
-    #[test]
-    fn max_dimension_folds_tighter_cap() {
-        // Ceiling wins when it is tighter than the per-call cap.
-        assert_eq!(fold_max_dimension(1024, Some(2048)), 1024);
-        // Per-call wins when it is tighter than the ceiling.
-        assert_eq!(fold_max_dimension(4096, Some(512)), 512);
-        // Unlimited ceiling (0) defers entirely to the per-call cap.
-        assert_eq!(fold_max_dimension(0, Some(768)), 768);
-        // No per-call cap → the ceiling passes through (0 stays unlimited).
-        assert_eq!(fold_max_dimension(1600, None), 1600);
-        assert_eq!(fold_max_dimension(0, None), 0);
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ax::tree::AXNode;
-    use cua_driver_core::element_query::project_elements_for_query;
+    use serde_json::json;
 
     fn node(
         idx: Option<usize>,
@@ -1144,16 +1410,22 @@ mod tests {
         depth: usize,
         parent: Option<usize>,
         frame: Option<[f64; 4]>,
+        actions: Vec<String>,
     ) -> AXNode {
         AXNode {
             element_index: idx,
             role: role.into(),
             title: title.map(|s| s.to_string()),
             value: None,
+            formatted_value: None,
+            placeholder: None,
             description: None,
+            document_url: None,
             identifier: None,
             help: None,
-            actions: vec![],
+            actions,
+            value_settable: None,
+            selection_via_parent: false,
             element_ptr: 0,
             depth,
             parent_element_index: parent,
@@ -1169,6 +1441,87 @@ mod tests {
     }
 
     #[test]
+    fn structured_field_placeholder_never_becomes_value_or_label() {
+        let mut field = node(Some(0), "AXTextField", None, 0, None, None, vec![]);
+        field.identifier = Some("search".into());
+        field.description = Some("Search places".into());
+        field.placeholder = Some("Find a place".into());
+        field.value_state = Some(String::new());
+        let entries = build_elements_array_with_token(&[field.clone()], Some(1));
+        assert!(entries[0].get("value").is_none());
+        assert_eq!(entries[0]["placeholder"], "Find a place");
+        assert_eq!(entries[0]["description"], "Search places");
+        assert_eq!(entries[0]["label"], "Search places");
+        field.value_state = Some("  typed value  ".into());
+        let entries = build_elements_array_with_token(&[field.clone()], Some(2));
+        assert_eq!(entries[0]["value"], "  typed value  ");
+        field.value_state = None;
+        let entries = build_elements_array_with_token(&[field], Some(3));
+        assert!(entries[0].get("value").is_none());
+        assert_eq!(entries[0]["placeholder"], "Find a place");
+    }
+
+    #[test]
+    fn structured_writability_preserves_true_false_and_unknown_with_actions() {
+        let mut writable = node(Some(0), "AXTextField", None, 0, None, None, vec![]);
+        writable.actions = vec!["AXPress".into()];
+        writable.value_settable = Some(true);
+        let mut readonly = writable.clone();
+        readonly.element_index = Some(1);
+        readonly.value_settable = Some(false);
+        let mut unknown = writable.clone();
+        unknown.element_index = Some(2);
+        unknown.value_settable = None;
+        let entries = build_elements_array_with_token(&[writable, readonly, unknown], Some(7));
+        assert_eq!(entries[0]["settable"], true);
+        assert_eq!(entries[1]["settable"], false);
+        assert!(entries[2].get("settable").is_none());
+        assert_eq!(entries[2]["actions"], serde_json::json!(["AXPress"]));
+    }
+
+    #[test]
+    fn structured_actions_preserve_exact_custom_names_and_following_actions() {
+        let mut actionable = node(Some(0), "AXCell", None, 0, None, None, vec![]);
+        let custom = "Name:customize info and appearance\nTarget:0x0\nSelector:(null)";
+        actionable.actions = vec![custom.into(), "Pin List".into()];
+        let entries = build_elements_array_with_token(&[actionable], Some(7));
+        assert_eq!(
+            entries[0]["actions"],
+            serde_json::json!([custom, "Pin List"])
+        );
+        assert_eq!(entries[0]["element_token"], "s00000007:0");
+    }
+
+    #[test]
+    fn structured_loaded_document_url_is_independent_of_address_value() {
+        let mut root = node(
+            Some(0),
+            "AXWebArea",
+            Some("Example Domain"),
+            0,
+            None,
+            None,
+            vec![],
+        );
+        root.document_url = Some("https://example.org/".into());
+        let mut address = node(
+            Some(1),
+            "AXTextField",
+            Some("Address"),
+            0,
+            None,
+            None,
+            vec![],
+        );
+        address.value = Some("https://example.net".into());
+        let entries = build_elements_array_with_token(&[root, address], Some(7));
+        assert_eq!(entries[0]["document_url"], "https://example.org/");
+        assert_eq!(entries[1]["value"], "https://example.net");
+        assert!(entries[1].get("document_url").is_none());
+        assert_eq!(entries[0]["element_token"], "s00000007:0");
+    }
+
+    #[test]
     fn elements_match_indexed_node_count() {
         // Mix of indexed + non-indexed nodes; only indexed should surface.
         let nodes = vec![
@@ -1179,8 +1532,9 @@ mod tests {
                 0,
                 None,
                 Some([0.0, 0.0, 800.0, 600.0]),
+                vec![],
             ),
-            node(None, "AXStaticText", Some("hint"), 1, Some(0), None),
+            node(None, "AXStaticText", Some("hint"), 1, Some(0), None, vec![]),
             node(
                 Some(1),
                 "AXButton",
@@ -1188,6 +1542,7 @@ mod tests {
                 1,
                 Some(0),
                 Some([10.0, 20.0, 60.0, 24.0]),
+                vec![],
             ),
             node(
                 Some(2),
@@ -1196,9 +1551,10 @@ mod tests {
                 1,
                 Some(0),
                 Some([80.0, 20.0, 60.0, 24.0]),
+                vec![],
             ),
         ];
-        let elements = build_elements_array(&nodes);
+        let elements = build_elements_array_with_token(&nodes, None);
         assert_eq!(
             elements.len(),
             3,
@@ -1216,59 +1572,33 @@ mod tests {
     }
 
     #[test]
-    fn query_projection_keeps_only_rendered_actionable_rows() {
+    fn observation_elements_include_display_only_rows_in_dfs_order() {
+        // #4526: verify_state must be able to read a label-less static text
+        // whose content lives in AXValue. The public array omits it; the
+        // observation-only array keeps it, marked display-only and without
+        // an element_index.
+        let mut text = node(None, "AXStaticText", None, 1, Some(0), None, vec![]);
+        text.value = Some("Saved".into());
         let nodes = vec![
-            node(Some(0), "AXWindow", Some("Document"), 0, None, None),
-            node(Some(1), "AXMenuItem", Some("Window"), 1, Some(0), None),
-            node(
-                Some(2),
-                "AXMenuItem",
-                Some("Move & Resize"),
-                2,
-                Some(1),
-                None,
-            ),
-            node(Some(3), "AXMenuItem", Some("Left"), 3, Some(2), None),
-            node(Some(4), "AXButton", Some("Unrelated"), 1, Some(0), None),
+            node(Some(0), "AXGroup", Some("Form"), 0, None, None, vec![]),
+            text,
+            node(Some(1), "AXButton", Some("OK"), 1, Some(0), None, vec![]),
         ];
-        let elements = build_elements_array(&nodes);
-        let filtered_markdown = concat!(
-            "- [0] AXWindow \"Document\"\n",
-            "  - [1] AXMenuItem \"Window\"\n",
-            "    - [2] AXMenuItem \"Move & Resize\"\n",
-            "      - [3] AXMenuItem \"Left\"\n",
-        );
 
-        let projected = project_elements_for_query(elements, Some("Left"), filtered_markdown);
-        let indices: Vec<u64> = projected
-            .iter()
-            .map(|entry| entry["element_index"].as_u64().unwrap())
-            .collect();
-
-        assert_eq!(indices, vec![0, 1, 2, 3]);
-    }
-
-    #[test]
-    fn query_projection_returns_no_elements_when_markdown_has_no_match() {
-        let nodes = vec![node(Some(0), "AXButton", Some("Unrelated"), 0, None, None)];
-        let elements = build_elements_array(&nodes);
-
-        let projected = project_elements_for_query(elements, Some("zoomLeft"), "");
-
-        assert!(projected.is_empty());
-    }
-
-    #[test]
-    fn unfiltered_projection_preserves_every_element() {
-        let nodes = vec![
-            node(Some(0), "AXButton", Some("One"), 0, None, None),
-            node(Some(1), "AXButton", Some("Two"), 0, None, None),
-        ];
-        let elements = build_elements_array(&nodes);
-
-        let projected = project_elements_for_query(elements, None, "");
-
-        assert_eq!(projected.len(), 2);
+        assert_eq!(build_elements_array_with_token(&nodes, None).len(), 2);
+        let observed = build_observation_elements_array(&nodes);
+        assert_eq!(observed.len(), 3);
+        assert_eq!(observed[0]["element_index"], 0);
+        let display = &observed[1];
+        assert_eq!(display["role"], "AXStaticText");
+        assert_eq!(display["label"], "Saved");
+        assert_eq!(display["value"], "Saved");
+        assert_eq!(display["display_only"], true);
+        assert_eq!(display["parent_index"], 0);
+        assert!(display.get("element_index").is_none());
+        assert!(display.get("element_token").is_none());
+        assert_eq!(observed[2]["element_index"], 1);
+        assert!(observed[2].get("display_only").is_none());
     }
 
     #[test]
@@ -1280,8 +1610,9 @@ mod tests {
             3,
             Some(2),
             Some([1.5, 2.5, 33.0, 44.0]),
+            vec![],
         )];
-        let entry = &build_elements_array(&nodes)[0];
+        let entry = &build_elements_array_with_token(&nodes, None)[0];
         assert_eq!(entry["element_index"], 7);
         assert_eq!(entry["role"], "AXButton");
         assert_eq!(entry["label"], "Go");
@@ -1306,14 +1637,27 @@ mod tests {
             1,
             None,
             None,
+            vec![],
         )];
         nodes[0].value = Some("i love u".into());
-        let entry = &build_elements_array(&nodes)[0];
+        let entry = &build_elements_array_with_token(&nodes, None)[0];
         assert_eq!(entry["label"], "Compose message", "label stays the title");
         assert_eq!(
             entry["value"], "i love u",
             "value must be surfaced separately"
         );
+    }
+
+    #[test]
+    fn attributed_display_never_replaces_structured_text_or_label() {
+        let mut text = node(Some(0), "AXTextArea", None, 0, None, None, vec![]);
+        text.value = Some("Copper 😀 title".into());
+        text.value_state = text.value.clone();
+        text.formatted_value = Some("**Copper **😀** title**".into());
+        let elements = build_elements_array_with_token(&[text], None);
+        assert_eq!(elements[0]["value"], "Copper 😀 title");
+        assert_eq!(elements[0]["label"], "Copper 😀 title");
+        assert_eq!(elements[0]["formatted_value"], "**Copper **😀** title**");
     }
 
     #[test]
@@ -1328,6 +1672,7 @@ mod tests {
             1,
             None,
             None,
+            vec![],
         )];
         nodes[0].value_state = Some("8".into());
         nodes[0].value_description = Some("8 dB".into());
@@ -1335,7 +1680,7 @@ mod tests {
         nodes[0].max_value = Some(8.0);
         nodes[0].enabled = Some(true);
         nodes[0].selected = Some(false);
-        let entry = &build_elements_array(&nodes)[0];
+        let entry = &build_elements_array_with_token(&nodes, None)[0];
         assert_eq!(
             entry["value"], "8",
             "numeric AXValue surfaces via value_state"
@@ -1356,25 +1701,34 @@ mod tests {
             2,
             None,
             None,
+            vec![],
         )];
         nodes[0].in_web_content = true;
-        let entry = &build_elements_array(&nodes)[0];
+        let entry = &build_elements_array_with_token(&nodes, None)[0];
         assert_eq!(entry["in_web_content"], true);
     }
 
     #[test]
     fn checkbox_value_state_normalizes_to_selected() {
-        let mut nodes = vec![node(Some(0), "AXCheckBox", Some("I agree"), 0, None, None)];
+        let mut nodes = vec![node(
+            Some(0),
+            "AXCheckBox",
+            Some("I agree"),
+            0,
+            None,
+            None,
+            vec![],
+        )];
         nodes[0].value_state = Some("0".into());
-        let entry = &build_elements_array(&nodes)[0];
+        let entry = &build_elements_array_with_token(&nodes, None)[0];
         assert_eq!(entry["selected"], false);
     }
 
     #[test]
     fn elements_control_state_fields_omitted_when_absent() {
         // Stock behaviour is unchanged for elements without control state.
-        let nodes = vec![node(Some(0), "AXButton", Some("OK"), 0, None, None)];
-        let entry = &build_elements_array(&nodes)[0];
+        let nodes = vec![node(Some(0), "AXButton", Some("OK"), 0, None, None, vec![])];
+        let entry = &build_elements_array_with_token(&nodes, None)[0];
         for key in ["value_description", "min", "max", "enabled", "selected"] {
             assert!(entry.get(key).is_none(), "{key} must be omitted");
         }
@@ -1384,10 +1738,18 @@ mod tests {
     fn elements_omit_degenerate_min_max_range() {
         // WebKit reports AXMinValue/AXMaxValue as 0.0/0.0 on non-range
         // controls (checkboxes, radios) — a degenerate range is omitted.
-        let mut nodes = vec![node(Some(0), "AXCheckBox", Some("On"), 0, None, None)];
+        let mut nodes = vec![node(
+            Some(0),
+            "AXCheckBox",
+            Some("On"),
+            0,
+            None,
+            None,
+            vec![],
+        )];
         nodes[0].min_value = Some(0.0);
         nodes[0].max_value = Some(0.0);
-        let entry = &build_elements_array(&nodes)[0];
+        let entry = &build_elements_array_with_token(&nodes, None)[0];
         assert!(entry.get("min").is_none(), "degenerate min must be omitted");
         assert!(entry.get("max").is_none(), "degenerate max must be omitted");
     }
@@ -1395,9 +1757,9 @@ mod tests {
     #[test]
     fn elements_value_state_falls_back_to_string_value() {
         // String-valued elements keep their `value` even with no value_state.
-        let mut nodes = vec![node(Some(0), "AXComboBox", None, 0, None, None)];
+        let mut nodes = vec![node(Some(0), "AXComboBox", None, 0, None, None, vec![])];
         nodes[0].value = Some("Search".into());
-        let entry = &build_elements_array(&nodes)[0];
+        let entry = &build_elements_array_with_token(&nodes, None)[0];
         assert_eq!(entry["value"], "Search");
     }
 
@@ -1405,16 +1767,16 @@ mod tests {
     fn elements_omit_empty_value() {
         // An empty AXValue must not emit a `value` field (matches the other
         // optional fields' omit-when-absent contract).
-        let mut nodes = vec![node(Some(0), "AXButton", Some("OK"), 0, None, None)];
+        let mut nodes = vec![node(Some(0), "AXButton", Some("OK"), 0, None, None, vec![])];
         nodes[0].value = Some(String::new());
-        let entry = &build_elements_array(&nodes)[0];
+        let entry = &build_elements_array_with_token(&nodes, None)[0];
         assert!(entry.get("value").is_none(), "empty value must be omitted");
     }
 
     #[test]
     fn elements_omit_optional_fields_when_missing() {
-        let nodes = vec![node(Some(0), "AXUnknown", None, 0, None, None)];
-        let entry = &build_elements_array(&nodes)[0];
+        let nodes = vec![node(Some(0), "AXUnknown", None, 0, None, None, vec![])];
+        let entry = &build_elements_array_with_token(&nodes, None)[0];
         assert!(
             entry.get("label").is_none(),
             "label must be omitted when title/value/desc/id are all empty"
@@ -1435,33 +1797,82 @@ mod tests {
     fn elements_label_fallback_chain() {
         // title missing → description → value → identifier
         let nodes = vec![
-            node(Some(0), "AXButton", None, 0, None, None),
-            node(Some(1), "AXButton", None, 0, None, None),
-            node(Some(2), "AXButton", None, 0, None, None),
+            node(Some(0), "AXButton", None, 0, None, None, vec![]),
+            node(Some(1), "AXButton", None, 0, None, None, vec![]),
+            node(Some(2), "AXButton", None, 0, None, None, vec![]),
         ];
         let mut nodes = nodes;
         nodes[0].description = Some("from-desc".into());
         nodes[1].value = Some("from-val".into());
         nodes[2].identifier = Some("from-id".into());
-        let elements = build_elements_array(&nodes);
+        let elements = build_elements_array_with_token(&nodes, None);
         assert_eq!(elements[0]["label"], "from-desc");
         assert_eq!(elements[1]["label"], "from-val");
         assert_eq!(elements[2]["label"], "from-id");
+        assert_eq!(elements[0]["label_source"], "description");
+        assert_eq!(elements[1]["label_source"], "value");
+        assert_eq!(elements[2]["label_source"], "identifier");
+        assert_eq!(elements[2]["identifier"], "from-id");
+        assert!(elements[0].get("identifier").is_none());
     }
 
-    /// Every element entry carries a non-empty snapshot-bound
-    /// `element_token` alongside its numeric `element_index`.
+    #[test]
+    fn structured_identity_is_separate_from_display_and_raw_value() {
+        let mut window = node(
+            Some(0),
+            "AXWindow",
+            Some("Dictionary – 4 found"),
+            0,
+            None,
+            None,
+            vec![],
+        );
+        window.identifier = Some("_NS:127".into());
+        let mut search = node(Some(30), "AXTextField", None, 1, Some(0), None, vec![]);
+        search.value = Some("atlas".into());
+        let elements = build_elements_array_with_token(&[window, search], None);
+        assert_eq!(elements[0]["label"], "Dictionary – 4 found");
+        assert_eq!(elements[0]["label_source"], "title");
+        assert_eq!(elements[0]["identifier"], "_NS:127");
+        assert_eq!(elements[1]["label"], "atlas");
+        assert_eq!(elements[1]["value"], "atlas");
+        assert_eq!(elements[1]["label_source"], "value");
+        assert!(elements[1].get("identifier").is_none());
+    }
+
+    #[test]
+    fn build_elements_array_with_token_emits_actions_when_present() {
+        let nodes = vec![node(
+            Some(0),
+            "AXButton",
+            Some("OK"),
+            1,
+            None,
+            None,
+            vec!["AXPress".to_owned(), "AXShowMenu".to_owned()],
+        )];
+        let entries = build_elements_array_with_token(&nodes, None);
+        assert_eq!(entries[0]["actions"], json!(["AXPress", "AXShowMenu"]));
+    }
+
+    #[test]
+    fn build_elements_array_with_token_omits_actions_when_empty() {
+        let nodes = vec![node(Some(0), "AXButton", Some("OK"), 1, None, None, vec![])];
+        let entries = build_elements_array_with_token(&nodes, None);
+        assert!(entries[0].get("actions").is_none());
+    }
+
     #[test]
     fn build_elements_array_with_token_emits_element_token_per_row() {
-        let reg = cua_driver_core::element_token::global();
+        let cache = crate::ax::snapshot::Snapshots::new();
         let pid = 0x6abc_0001_i32;
-        let sid = reg.register_snapshot(pid, /* window_id = */ 9, 3);
         let nodes = vec![
-            node(Some(0), "AXButton", Some("A"), 1, None, None),
-            node(Some(1), "AXButton", Some("B"), 1, None, None),
-            node(Some(2), "AXButton", Some("C"), 1, None, None),
+            node(Some(0), "AXButton", Some("A"), 1, None, None, vec![]),
+            node(Some(1), "AXButton", Some("B"), 1, None, None, vec![]),
+            node(Some(2), "AXButton", Some("C"), 1, None, None, vec![]),
         ];
-        let entries = build_elements_array_with_token(&nodes, sid);
+        let sid = cache.publish(pid, 9, crate::ax::snapshot::AxSnapshot::from_nodes(&nodes));
+        let entries = build_elements_array_with_token(&nodes, Some(sid));
         assert_eq!(entries.len(), 3);
         // Every entry must have BOTH fields (additive contract).
         for e in &entries {
@@ -1476,58 +1887,36 @@ mod tests {
             assert!(tok.starts_with('s'), "token must use the 's' prefix: {tok}");
             assert!(tok.contains(':'), "token must be `s{{hex}}:{{idx}}`: {tok}");
         }
-        // Each token must resolve through the registry to the same
-        // (window_id, element_index) the integer field reports.
         for e in &entries {
             let idx = e["element_index"].as_u64().unwrap() as usize;
             let tok = e["element_token"].as_str().unwrap();
-            let (wid, resolved_idx) = reg.resolve(pid, tok).expect("token must resolve");
-            assert_eq!(wid, 9);
-            assert_eq!(resolved_idx, idx);
+            let (resolved_idx, wid, _) = cache
+                .resolve(pid, &serde_json::json!({ "element_token": tok }))
+                .expect("token must resolve")
+                .into_parts(None);
+            assert_eq!(wid, Some(9));
+            assert_eq!(resolved_idx, Some(idx));
         }
     }
 
-    /// Back-compat: `build_elements_array` (the old shim) must NOT emit
-    /// `element_token` — older callers that never plumb a snapshot id
-    /// through get a clean shape.
     #[test]
-    fn build_elements_array_shim_skips_element_token() {
-        let nodes = vec![node(Some(0), "AXButton", Some("A"), 1, None, None)];
-        let entries = build_elements_array(&nodes);
+    fn build_elements_array_with_token_observation_only_has_actions_no_token() {
+        let nodes = vec![node(
+            Some(0),
+            "AXButton",
+            Some("OK"),
+            1,
+            None,
+            None,
+            vec!["AXPress".to_owned(), "AXShowMenu".to_owned()],
+        )];
+        let entries = build_elements_array_with_token(&nodes, None);
         assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["actions"], json!(["AXPress", "AXShowMenu"]));
         assert!(
             entries[0].get("element_token").is_none(),
-            "back-compat shim must NOT emit element_token; got: {}",
+            "observation-only entries must not emit unregistered element_token: {}",
             entries[0]
-        );
-    }
-
-    #[test]
-    fn walk_tree_bounded_signature_accepts_caps_no_panic() {
-        // Regression guard for #22865: the bounded variant must accept
-        // arbitrary cap values without panicking, even against a pid that
-        // has no AX tree to walk. Returns a TreeWalkResult either way.
-        // Use pid that won't be a real process. Don't assume tree is empty
-        // (CI may have process re-use) — only assert that the call returns
-        // and the result struct shape is intact.
-        let r1 = crate::ax::tree::walk_tree_bounded(i32::MAX, None, None, 5, 2);
-        // Cap of 5 is the contract test from the task: when this many
-        // visible nodes existed, the walker must stop early. The dead pid
-        // exercises the early-return path; the assertion is that the call
-        // honors the cap without overflowing or panicking.
-        assert!(r1.nodes.len() <= 5, "max_elements=5 must cap nodes ≤ 5");
-        assert!(
-            r1.nodes.iter().all(|n| n.depth <= 2),
-            "max_depth=2 must cap depth ≤ 2"
-        );
-        // And the uncapped variant — same dead-pid path, just validating
-        // walk_tree(...) (which delegates to walk_tree_bounded with
-        // DEFAULT_MAX_*) returns the same empty/safe shape.
-        let r2 = crate::ax::tree::walk_tree(i32::MAX, None, None);
-        assert_eq!(
-            r1.nodes.len(),
-            r2.nodes.len(),
-            "no-pid case: both bounded and unbounded must agree on the empty result"
         );
     }
 }
