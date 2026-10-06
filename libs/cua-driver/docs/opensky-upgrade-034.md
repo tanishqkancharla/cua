@@ -82,3 +82,44 @@ Post-checkpoint Git diffs here are documentation only. Full catalog/native helpe
 final inventory and every owned cleanup receipt are clear. Focused Reminders,
 semantic menu/document-resource gates and fresh paired agent comparisons remain
 next steps. No fresh score or cross-platform matrix certification inferred.
+
+
+## Iteration102 actual Mac checkpoint
+
+Installed runtime remains97aa26e39360628aace9f6a86dd934a33f0aae65,
+Driver0.34.0, SHA25679de753294e7b3a7d8dfa243b282b8bec0c5f062e647ccbbb62e8af18c140f3b.
+Both Accessibility/Screen Recording grants persist with stable signing.
+Canonical Unix/Windows installers currently bake0.34.0; the matching component
+release and platform artifacts exist. No newer driver component release observed.
+
+Controlled actual native/OpenSky Find setValue comparison matches: field changes
+but match counter/Next stay unavailable; Cmd+A/typeText computes Result1of2.
+This shared Chromium behavior receives no OpenSky-specific fix. Previous paid
+Find1117/1118 are explicitly reused as1123/1124, preserving their worse1.54179
+index; no new performance sample or favorable-score retry.
+
+Existing FOCUS-N02 passes real two-window TextEdit focus isolation. MENU-N05
+fails filename setup before any semantic menu/Open assertion; one-second walks
+are partial after378–449nodes with ancestor columns. DOC-N01 cold open_target
+fails NSWorkspace callback timeout before process registration, also after an
+unchanged daemon restart and in a separate temporary-directory control. Cause
+is unproven; a Documents-only explanation is unsupported. Those failures do not
+establish current menu/resource acceptance. Original failed receipts remain;
+independent later cold absence plus exact outer baseline audits recover cleanup
+without pretending a launched identity was correlated.
+
+Four fresh serial independent Terra pairs complete with inspected actual input
+and state: TextEdit1125/1126 original file identity/bytes unchanged and
+MoveTo/Other/Cancel restored; Calculator1127/1128 expression68.5;
+Safari1129/1130 three task tabs plus preserved starter, third closed, first
+visible; Maps1131/1132 observed place cards and Satellite→Explore. Min-resource
+indices0.956705/0.407101/0.536800/0.682260 respectively. Strategy and persisted
+starting-state differences prevent causal upgrade claims. SDK TextEdit primary
+file-label click refuses editable-focus confirmation then advertised secondary
+Open succeeds; matched native primary-click diagnostic remains pending.
+Safari network reload count and Maps numeric zoom are not independently exposed.
+
+All owned run/app/helper/artifact cleanup and final catalog app/helper inventory
+are clear; all141 active latest task pairs scored, aggregate65.1172/native100,
+lower is better. These local results do not certify the full exact-candidate
+Mac/Linux/Windows desktop matrix. Related PRs remain drafts.
