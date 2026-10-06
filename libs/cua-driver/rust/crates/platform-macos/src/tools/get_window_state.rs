@@ -337,6 +337,16 @@ impl Tool for GetWindowStateTool {
         // this tool never does — so treat that as resolved.
         let scope_matched = window_scope.as_ref().is_none_or(|s| s.is_matched());
 
+        // Retain the exact walk's objects before the cache takes ownership.
+        // The optional focus read runs near publication, after capture work.
+        let focus_candidates = if scope_matched && !observation_only {
+            tree_result
+                .as_ref()
+                .map(|walk| crate::ax::focus_observation::Candidates::retain(&walk.nodes))
+        } else {
+            None
+        };
+
         // Update element cache — ONLY for a resolved window scope. Caching an
         // unresolved scope's nodes under (pid, window_id) is what turned a
         // wrong-surface snapshot into a wrong-surface *action*: a follow-up
@@ -564,11 +574,32 @@ impl Tool for GetWindowStateTool {
         // alongside for back-compat with existing text-parsing callers
         // (Hermes' regex parser, Codex, Claude Code) and is signalled as
         // preferred-for-back-compat-only via the `_note` field below.
-        let elements_json: Vec<serde_json::Value> = match (snapshot_id, tree_result.as_ref()) {
+        let mut elements_json: Vec<serde_json::Value> = match (snapshot_id, tree_result.as_ref()) {
             (Some(sid), Some(r)) => build_elements_array_with_token(&r.nodes, sid),
             (None, Some(r)) if scope_matched => build_elements_array(&r.nodes),
             _ => Vec::new(),
         };
+        let focused_index = if let Some(candidates) = focus_candidates {
+            tokio::time::timeout(
+                std::time::Duration::from_millis(750),
+                tokio::task::spawn_blocking(move || {
+                    crate::ax::focus_observation::observe(pid, window_id, candidates)
+                }),
+            )
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .flatten()
+        } else {
+            None
+        };
+        if let Some(index) = focused_index {
+            for element in &mut elements_json {
+                if element["element_index"].as_u64() == Some(index as u64) {
+                    element["focused"] = serde_json::Value::Bool(true);
+                }
+            }
+        }
         let elements_json = cua_driver_core::element_query::project_elements_for_query(
             elements_json,
             query.as_deref(),

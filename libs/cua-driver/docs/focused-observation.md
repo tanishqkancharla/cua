@@ -15,7 +15,9 @@ never be replaced by an associated-window fallback. Unknown or ambiguous focus
 is omitted. Capture-only, unresolved and passive/probe paths omit this metadata;
 query projection must not reveal or mint a hidden index.
 
-Implementation and acceptance are pending. Relevant existing Mac GUI tests must
+The isolated implementation is present; real GUI acceptance is pending. The
+reader retains walk objects before cache ownership and reads focus after capture
+work, near publication. Relevant existing Mac GUI tests must
 precede a real new Reminders continuation: create a disposable list, commit the
 first item once, observe the focused blank next field, write the second item to
 that observed index, and verify actual two-item content and exact reversible
