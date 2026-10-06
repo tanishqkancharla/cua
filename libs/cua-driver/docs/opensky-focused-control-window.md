@@ -1,30 +1,37 @@
 Refs https://github.com/tanishqkancharla/opensky/issues/17
 
-## Problem and observed evidence
+## Change
 
-Maintainer-selected OpenSky parity loop (SET217). Native Terra1113 uses Chrome
-Find Next/Previous successfully; fresh SDK1114 refuses Next before input and
-recovers with shortcuts. Real Driver0.34 cold parent repro keeps domain / Result1of2
-and repeats the same refusal. WindowServer main51917 versus Find auxiliary51930.
-AXFocusedWindow maps to51917, while AXFocusedUIElement and all three Find buttons
-map to51930. Same PID64024; AXParent chain ends at auxiliary AXWindow51930, not
-main51917. Exact guard is correct; app-scope observations chose the wrong surface.
-A first diagnostic fixture set AXValue without triggering actual Find matches;
-that failed setup is kept separately from the successful repro.
+Add Mac list_windows.focused_element_window_id, separately from AXFocusedWindow.
+Read the actual focused element, verify its PID, resolve its own AX window, then
+require that exact visible/current WindowServer record under the requested PID.
+Missing/foreign/hidden identities remain null. No driver input guard changes.
 
-## Selected scope
+Chrome Find actually owns a child window: raw PID64024 main51917, focused
+control/buttons51930, while AXFocusedWindow still names51917. Native1113 Next /
+Previous succeeds; pre-fix SDK1114 refuses Next before input and uses shortcuts.
+Current cold controlled parent repeats the refusal with domain/Result1of2 and
+captures the complete AX ownership chain. A prior fixture setup that set only
+AXValue without triggering matches is retained as failed diagnostic setup.
 
-Expose additive read-only focused_element_window_id from the Mac list_windows
-metadata, only when the actual focused element PID and exact visible/current
-WindowServer owner agree. Keep focused_window_id unchanged. Native app-scope
-SDK observations prefer that verified focused control surface and probe its exact
-AXWindow before binding. Opaque document handles, browser bindings, tokens and
-window/element ownership refusals remain exact. No same-PID ownership fallback.
+## Validation
 
-## Acceptance plan
+Installed runtime dfbf383002e9f2d07a263e1fe0f4919f3869ec5e, Driver0.34, same signing
+and TCC identity. Whole Mac crate511 pass +2 integration units;6 desktop ignored.
+Existing actual ACT-N01/GROUP-N01/KEY-N04/SHEET-N01, PASTE-B01/TEXT-B01 and
+KEY-S01/02/03 pass. Original no-test-file invocation is retained separately.
+New FIND-N01 passes in campaign and clean SDK checkout: app observation binds
+panel; Next2of2, Previous1of2, Close restores document; exact main-document click
+still refuses before input and leaves counter unchanged. Exact app/session/
+helper cleanup clear. Canonical platform matrix remains pending.
 
-Whole affected unit crates and SDK focus/ownership tests; existing actual native
-and browser regressions first. New real Find Next2of2 / Previous1of2 / Close
-oracle on a cold controlled window, plus negative sibling-window binding test.
-Fresh affected serial Terra comparisons after local gates. Preserve exact app,
-helper and owned-session cleanup. No VM, canonical matrix remains draft-only.
+Companion SDK prefers/probes the control's exact surface for observations and
+indexed actions. Named-app ambient keyboard context follows AXFocusedWindow;
+opaque CUA/document handles remain exact. Clean SDK focus5/CUA23 contracts,
+build and E2E typecheck pass. The local fixture can initially publish0of2;
+it now explicitly activates first match once before button assertions. Earlier
+attribution of0of2 to panel keyboard routing was not established; both original
+failed fixtures remain retained, and no input is blindly replayed.
+
+Draft stacked on DriverPR27 (including PR25/26); companion SDK PR pending.
+Fresh affected serial Terra comparison next; no new causal resource claim.
