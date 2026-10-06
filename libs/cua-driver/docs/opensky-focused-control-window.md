@@ -33,7 +33,9 @@ it now explicitly activates first match once before button assertions. Earlier
 attribution of0of2 to panel keyboard routing was not established; both original
 failed fixtures remain retained, and no input is blindly replayed.
 
-Draft stacked on DriverPR27 (including PR25/26); companion SDK PR pending.
+Draft stacked on DriverPR27 (including PR25/26); companion SDK https://github.com/tanishqkancharla/opensky/pull/18.
 Fresh affected serial Terra comparison next; no new causal resource claim.
 
 Fresh serial Terra1115/1116 exposed a second panel issue: indexed clicks now pass, but select_text requests an impossible child AXFocusedWindow transition. The extended FIND-N01 reproduces this exact refusal on unchanged dfbf383 runtime with cleanup clear. Selection now preserves the exact existing first responder only in the frontmost app after the existing ownership gate. Background/non-focused editors still use exact-window activation. Exact focus and foreground are rechecked before the existing UTF-16 range write/read-back. Companion SDK draft18; local acceptance and fresh resource comparison pending.
+
+Selection follow-up runtime97aa26e39360628aace9f6a86dd934a33f0aae65 installedSHA25679de753294e7b3a7d8dfa243b282b8bec0c5f062e647ccbbb62e8af18c140f3b. Same stable designated requirement; both permissions remained true. Mac511+2 units pass; six existing actual selection/format/two-window E2Es pass. Extended FIND-N01 fails on unchanged previous binary and passes on this binary in campaign and clean SDK, including exact token/window UTF-16 selection receipt, actual replacement/clear, and retained main-window ownership refusal. Fresh paid comparison and canonical platform matrix pending. Final diff after installed runtime is this non-executable evidence document only.
