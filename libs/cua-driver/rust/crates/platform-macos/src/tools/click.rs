@@ -633,6 +633,22 @@ impl Tool for ClickTool {
                         if foreground {
                             let mut outcome = None;
                             let has_modifiers = !selection_modifiers.is_empty();
+                            // The live attached sheet owns this exact semantic
+                            // menu item. Do not re-key the parent document: that
+                            // can dismiss the popup, and it is not a HID target.
+                            if !has_modifiers && unsafe {
+                                crate::input::semantic_menu::is_exact_attached_sheet_menu(
+                                    element_ptr as AXUIElementRef, pid, wid, &action_clone,
+                                )?
+                            } {
+                                let result = perform_ax_click(
+                                    element_ptr, idx, pid, wid, &action_clone, &ck,
+                                    None, &[], true,
+                                )?;
+                                std::thread::sleep(std::time::Duration::from_millis(150));
+                                return Ok((result, false));
+                            }
+
                             let action = || {
                                 outcome = Some(perform_ax_click(
                                     element_ptr,
@@ -1349,7 +1365,7 @@ fn perform_ax_click(
         // Some collection rows claim a click-like action but Finder returns
         // kAXErrorCannotComplete. Use the same verified selection fallback
         // before surfacing the dispatch error.
-        if ax_action == "AXPress" && modifiers.is_empty() {
+        if role != "AXMenuItem" && ax_action == "AXPress" && modifiers.is_empty() {
             if let Some(selected_role) =
                 crate::input::ax_actions::select_nearest_container(element_ptr)
             {
