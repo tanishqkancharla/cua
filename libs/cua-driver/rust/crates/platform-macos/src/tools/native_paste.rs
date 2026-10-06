@@ -57,7 +57,7 @@ fn def() -> &'static ToolDef {
             "type": "object",
             "required": ["pid", "window_id", "text", "clipboard_policy"],
             "properties": {
-                "session": { "type": "string", "description": "Public session label for window-scope authorization." },
+                "session": cua_driver_core::tool_schema::session_schema(),
                 "pid": { "type": "integer", "description": "Exact target process ID." },
                 "window_id": { "type": "integer", "description": "Exact target CGWindowID." },
                 "text": { "type": "string", "description": "Source to paste (at most 16 KiB UTF-8)." },
