@@ -31,12 +31,12 @@ fn def() -> &'static ToolDef {
         input_schema: serde_json::json!({
             "type": "object", "required": ["pid", "text"],
             "properties": {
-                "session": {"type":"string"}, "pid": {"type":"integer"},
-                "window_id": {"type":"integer"},
+                "session": {"type":"string", "description":"Repeat a public lifecycle session label, or omit for the transport session."}, "pid": {"type":"integer", "description":"Process ID owning the editor."},
+                "window_id": {"type":"integer", "description":"Exact native window ID containing the observed editor."},
                 "element_token": cua_driver_core::tool_schema::element_token_schema(),
-                "text": {"type":"string"}, "prefix": {"type":"string"},
-                "suffix": {"type":"string"},
-                "selection_type": {"type":"string", "enum":["text","cursor_before","cursor_after"]}
+                "text": {"type":"string", "description":"Non-empty literal text to select in the editor value."}, "prefix": {"type":"string", "description":"Literal adjacent prefix to disambiguate repeated text."},
+                "suffix": {"type":"string", "description":"Literal adjacent suffix to disambiguate repeated text."},
+                "selection_type": {"type":"string", "enum":["text","cursor_before","cursor_after"], "description":"Select the occurrence (text, default), or place the caret before/after it."}
             }, "additionalProperties": false
         }),
         read_only: false, destructive: false, idempotent: true, open_world: true,
