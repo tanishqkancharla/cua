@@ -11,3 +11,10 @@ same base event; preserve exact tab/ref ownership and no-replay failure behavior
 Draft before runtime edits. Acceptance requires actual Unicode selection and
 replacement, relevant existing browser E2Es and serialized-CDP contract tests.
 Mac-specific mapping; no Linux/Windows acceptance claimed. No VM.
+
+Implementation: on macOS only, exact Meta+A with no other modifier attaches
+Chromium selectAll to the existing base key-down. Other chords/platforms stay
+unchanged; delivery uncertainty and releases retain their existing behavior.
+Core905 whole-crate tests pass, including serialized event assertions for Meta+A,
+Ctrl+A, Meta+Shift+A and Meta+B. Removing the editing command fails the keeper.
+Actual post-fix owned browser gate pending.

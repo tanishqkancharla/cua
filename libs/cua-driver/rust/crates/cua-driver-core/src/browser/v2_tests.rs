@@ -2469,6 +2469,58 @@ async fn browser_key_focuses_an_exact_ref_and_releases_the_complete_chord() {
 }
 
 #[tokio::test]
+async fn browser_select_all_command_is_bound_to_the_exact_mac_meta_chord() {
+    for (key, command) in [
+        ("cmd+a", cfg!(target_os = "macos")),
+        ("ctrl+a", false),
+        ("cmd+shift+a", false),
+        ("cmd+b", false),
+    ] {
+        let f = fixture().await;
+        let (target, tab) = bind(&f).await;
+        let result = BrowserKeyTool::new(f.engine.clone())
+            .invoke(json!({"target_id":target,"tab_id":tab,"key":key,"session":SESSION}))
+            .await;
+        assert_eq!(structured(&result)["status"], "ok", "key={key}: {result:?}");
+        let events = recorded_calls(&f, "Input.dispatchKeyEvent");
+        let base = events
+            .iter()
+            .find(|(_, e)| {
+                e["code"] == if key.ends_with('b') { "KeyB" } else { "KeyA" }
+                    && e["type"] == "rawKeyDown"
+            })
+            .expect("single base key-down");
+        assert_eq!(
+            base.1.get("commands"),
+            command.then(|| json!(["selectAll"])).as_ref(),
+            "key={key}: {events:?}"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|(_, e)| e.get("commands").is_some())
+                .count(),
+            usize::from(command)
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|(_, e)| e["code"] == base.1["code"] && e["type"] == "rawKeyDown")
+                .count(),
+            1
+        );
+        assert_eq!(events.last().unwrap().1["modifiers"], 0);
+        assert_eq!(
+            recorded_calls(&f, "Emulation.setFocusEmulationEnabled")
+                .last()
+                .unwrap()
+                .1["enabled"],
+            false
+        );
+    }
+}
+
+#[tokio::test]
 async fn browser_key_disables_focus_emulation_after_delivery_failure() {
     let f = fixture_with(|state| state.fail_key_down_after = Some(0)).await;
     let (target, tab) = bind(&f).await;

@@ -2735,6 +2735,15 @@ async fn dispatch_browser_key(
         down["windowsVirtualKeyCode"] = json!(virtual_key_code);
         down["nativeVirtualKeyCode"] = json!(virtual_key_code);
     }
+    // macOS CDP raw Meta+A delivers trusted keyboard events but does not
+    // invoke AppKit's shortcut mapping. Execute Chromium's editing command on
+    // this same base event: no second input, DOM mutation or automatic replay.
+    if cfg!(target_os = "macos")
+        && request.code == "KeyA"
+        && request.modifiers.as_slice() == [CdpModifier::Meta]
+    {
+        down["commands"] = json!(["selectAll"]);
+    }
     if !request.text.is_empty() {
         down["text"] = json!(request.text);
         down["unmodifiedText"] = json!(request.text);
