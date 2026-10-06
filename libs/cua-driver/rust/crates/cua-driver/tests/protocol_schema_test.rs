@@ -210,9 +210,10 @@ fn tools_list_schema_shape() {
         // Chromium); foreground accepts that.
         "browser_click",
         "browser_pointer",
-        // macOS set_value has no delivery ladder.
-        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        // OpenSky retains the verified Mac set_value delivery ladder.
         "set_value",
+        #[cfg(target_os = "macos")]
+        "native_paste",
     ];
     for tool in DELIVERY_MODE_TOOLS {
         let delivery = &properties(tool)["delivery_mode"];
