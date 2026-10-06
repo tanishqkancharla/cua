@@ -103,7 +103,7 @@ impl ClipboardBackend for MacosClipboard {
         if let Some(html) = html {
             formats.push(ClipboardContent::Html(html));
         }
-        self.context()?.set(formats).map_err(|e| e.to_string())
+        self.with_context(|context| context.set(formats).map_err(|e| e.to_string()))
     }
 
     fn write_image(&self, absolute_path: &str) -> Result<(), String> {
@@ -163,6 +163,15 @@ mod tests {
         assert_eq!(
             UNAVAILABLE_INITIALIZATION_ATTEMPTS.load(Ordering::SeqCst),
             2
+        );
+    }
+
+    #[test]
+    fn rich_paste_reports_lazy_initialization_failure() {
+        let backend = MacosClipboard::with_initializer(unavailable_context);
+        assert_eq!(
+            backend.write_paste("plain".into(), Some("<b>rich</b>".into())).unwrap_err(),
+            "general pasteboard is unavailable"
         );
     }
 
