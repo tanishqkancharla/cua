@@ -498,6 +498,7 @@
         "description": "Exact top-level window to close cooperatively through the operating\nsystem's accessibility/window-management API.",
         "properties": {
           "pid": {
+            "description": "Process ID of the application that owns the exact window.",
             "minimum": 1,
             "type": "integer"
           },
@@ -506,6 +507,7 @@
             "type": "string"
           },
           "window_id": {
+            "description": "Exact native window ID from list_windows; no app-wide close fallback.",
             "minimum": 1,
             "type": "integer"
           }

@@ -82,8 +82,8 @@ fn def() -> &'static ToolDef {
             "type": "object",
             "required": ["pid"],
             "properties": {
-                "pid": { "type": "integer" },
-                "window_id": { "type": "integer" },
+                "pid": { "type": "integer", "description": "Process ID of the application to activate." },
+                "window_id": { "type": "integer", "description": "Exact native window ID from list_windows; verifies this window is focused." },
                 "activation_scope": { "type": "string", "enum": ["exact_window", "app_menu"],
                     "description": "Default exact_window. app_menu requires window_id and verifies only the persistent app-global menu context." }
             },

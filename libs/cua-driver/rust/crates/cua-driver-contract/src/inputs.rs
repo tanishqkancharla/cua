@@ -686,8 +686,10 @@ impl ToolInput for SetWindowFrameInput {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, uniffi::Record)]
 #[serde(deny_unknown_fields)]
 pub struct CloseWindowInput {
+    /// Process ID of the application that owns the exact window.
     #[schemars(schema_with = "positive_integer_schema")]
     pub pid: u32,
+    /// Exact native window ID from list_windows; no app-wide close fallback.
     #[schemars(schema_with = "positive_integer_schema")]
     pub window_id: u64,
     /// For multi-call work, prefer a short public session label and repeat it on every call that
