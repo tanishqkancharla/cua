@@ -13,6 +13,7 @@ pub mod interactive;
 pub mod keyboard;
 pub mod mouse;
 pub mod skylight;
+pub mod semantic_menu;
 
 pub use ax_actions::perform_ax_action;
 pub use interactive::{
