@@ -2,10 +2,11 @@
 // Contributor: Tanishq Kancharla <tanishqkancharla3@gmail.com>.
 //! Exact-target native paste for generic macOS accessibility controls.
 //!
-//! This intentionally has one clipboard policy: `leave`.  NSPasteboard has no
-//! atomic compare-and-restore operation, so restoration could overwrite a copy
-//! made by the user after this tool writes its payload.  The payload therefore
-//! remains on the clipboard after every outcome.
+//! Explicit `restore` preserves supported prior items/formats after a verified
+//! paste (or a proved no-input refusal). `leave` retains the payload. Unknown
+//! input is never replayed or followed by restoration that could change what a
+//! late consumer reads. NSPasteboard has no atomic compare-and-restore: an
+//! observed newer writer is preserved, but the final check/write can still race.
 //!
 //! `changeCount` is an observation, not a compare-and-swap primitive. An
 //! external clipboard writer can still race after the final pre-dispatch check;
@@ -18,7 +19,7 @@ use core_foundation::base::{CFEqual, CFRelease, CFTypeRef};
 use cua_driver_core::{
     background_input::BackgroundAction,
     clipboard::CLIPBOARD_WRITE_LOCK,
-    protocol::ToolResult,
+    protocol::{Content, ToolResult},
     tool::{Tool, ToolDef},
     tool_args::ArgsExt,
 };
@@ -29,6 +30,7 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{NSArray, NSData, NSString};
 use serde_json::Value;
+use zeroize::Zeroize;
 
 use crate::ax::{
     bindings::{copy_string_attr, copy_text_range_attr, AXTextRange as CFRange, AXUIElementRef},
@@ -52,7 +54,7 @@ static DEF: std::sync::OnceLock<ToolDef> = std::sync::OnceLock::new();
 fn def() -> &'static ToolDef {
     DEF.get_or_init(|| ToolDef {
         name: "native_paste".into(),
-        description: "Paste text, HTML or CommonMark into one exact macOS native accessibility control with Cmd+V. Requires an exact pid and window_id, verifies the same focused AX element before the clipboard write and key dispatch, and succeeds only when AXValue read-back equals the expected UTF-16-range insertion. Rich payloads are imported by AppKit and written as RTF plus their exact plain string; this receipt proves text insertion, not every visual style. Observe resulting formatting. Only clipboard_policy:\"leave\" is supported: the prepared plaintext/rich payload remains on the system clipboard and is never restored. delivery_mode:\"background\" (default) never fronts the target. delivery_mode:\"foreground\" briefly fronts the exact target for one physical HID Cmd+V chord, revalidates the AX target and clipboard immediately before that chord, then restores the prior frontmost app. After dispatch, any unverified result is reported as effect:\"unknown\" and must not be replayed automatically.".into(),
+        description: "Paste text, HTML or CommonMark into one exact macOS native accessibility control with Cmd+V. Requires an exact pid and window_id, verifies the same focused AX element before the clipboard write and key dispatch, and succeeds only when AXValue read-back equals the expected UTF-16-range insertion. Rich payloads are imported by AppKit and written as RTF plus their exact plain string; this receipt proves text insertion, not every visual style. Observe resulting formatting. clipboard_policy:\"leave\" retains the payload. clipboard_policy:\"restore\" snapshots supported prior item representations privately (up to 64 items,128 types per item,32 MiB total), refuses unreadable/unstable snapshots before mutation, and restores after verified insertion or proved no-input refusal only while its own clipboard token/payload remains. Restoration is separately reported; an observed newer writer or unknown input skips restoration. NSPasteboard has no atomic compare-and-restore, so the last ownership-check/write can still race. delivery_mode:\"background\" (default) never fronts the target. delivery_mode:\"foreground\" briefly fronts the exact target for one physical HID Cmd+V chord, revalidates the AX target and clipboard immediately before that chord, then restores the prior frontmost app. After dispatch, any unverified result is reported as effect:\"unknown\" and must not be replayed automatically.".into(),
         input_schema: serde_json::json!({
             "type": "object",
             "required": ["pid", "window_id", "text", "clipboard_policy"],
@@ -62,7 +64,7 @@ fn def() -> &'static ToolDef {
                 "window_id": { "type": "integer", "description": "Exact target CGWindowID." },
                 "text": { "type": "string", "description": "Source to paste (at most 16 KiB UTF-8)." },
                 "format": { "type": "string", "enum": ["text", "md", "html"], "default": "text", "description": "text is plain; html is imported by AppKit; md is CommonMark rendered to HTML then imported. Rich clipboard data is RTF plus its exact plain string." },
-                "clipboard_policy": { "type": "string", "enum": ["leave"], "description": "Required. leave writes the prepared payload to NSPasteboard and never restores prior clipboard content." },
+                "clipboard_policy": { "type": "string", "enum": ["leave", "restore"], "description": "Required. leave retains the payload; restore privately snapshots supported prior item representations and restores after proved insertion/no-input while the own token/payload remains. Newer observed writers and unknown input skip restoration; final check/write is not atomic." },
                 "delivery_mode": cua_driver_core::tool_schema::delivery_mode_schema_with("Best-effort-background ladder rung (default \"background\"). \"background\": posts one PID-routed Cmd+V without fronting the target. \"foreground\": briefly front the exact target, revalidate the retained AX target and clipboard immediately before one physical HID Cmd+V chord, then restore the prior frontmost app. Choose the delivery mode before dispatch; never replay an uncertain paste.")
             },
             "additionalProperties": false
@@ -92,6 +94,172 @@ struct PreparedPaste {
 #[derive(Clone, Copy)]
 struct PasteboardToken {
     change_count: isize,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ClipboardPolicy {
+    Leave,
+    Restore,
+}
+impl ClipboardPolicy {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Leave => "leave",
+            Self::Restore => "restore",
+        }
+    }
+}
+const MAX_SNAPSHOT_BYTES: usize = 32 * 1024 * 1024;
+const MAX_SNAPSHOT_ITEMS: usize = 64;
+const MAX_SNAPSHOT_TYPES: usize = 128;
+#[derive(PartialEq, Eq)]
+struct ClipboardItem {
+    representations: Vec<(String, Vec<u8>)>,
+}
+impl Drop for ClipboardItem {
+    fn drop(&mut self) {
+        for (_, bytes) in &mut self.representations {
+            bytes.zeroize();
+        }
+    }
+}
+struct PasteboardSnapshot {
+    change_count: isize,
+    items: Vec<ClipboardItem>,
+}
+fn snapshot_byte_count(used: usize, extra: usize) -> Result<usize, String> {
+    used.checked_add(extra)
+        .filter(|n| *n <= MAX_SNAPSHOT_BYTES)
+        .ok_or_else(|| {
+            "Clipboard snapshot exceeds its supported byte limit; no mutation occurred.".into()
+        })
+}
+fn capture_pasteboard() -> Result<PasteboardSnapshot, String> {
+    unsafe {
+        let board = NSPasteboard::generalPasteboard();
+        let mut saved = PasteboardSnapshot {
+            change_count: board.changeCount(),
+            items: Vec::new(),
+        };
+        let mut bytes = 0;
+        if let Some(items) = board.pasteboardItems() {
+            if items.len() > MAX_SNAPSHOT_ITEMS {
+                return Err(
+                    "Clipboard snapshot exceeds its supported item limit; no mutation occurred."
+                        .into(),
+                );
+            }
+            for item in items.to_vec() {
+                let types = item.types();
+                if types.len() > MAX_SNAPSHOT_TYPES {
+                    return Err("Clipboard snapshot exceeds its supported type limit; no mutation occurred.".into());
+                }
+                let mut copied = ClipboardItem {
+                    representations: Vec::new(),
+                };
+                for ty in types.to_vec() {
+                    let name = ty.to_string();
+                    bytes = snapshot_byte_count(bytes, name.len())?;
+                    let data = item.dataForType(ty).ok_or_else(|| {
+                        "A prior clipboard representation is unreadable; no mutation occurred."
+                            .to_owned()
+                    })?;
+                    bytes = snapshot_byte_count(bytes, data.length())?;
+                    copied.representations.push((name, data.bytes().to_vec()));
+                }
+                // Item order is semantic; representation enumeration order is not.
+                copied.representations.sort_by(|a, b| a.0.cmp(&b.0));
+                saved.items.push(copied);
+            }
+        }
+        if board.changeCount() != saved.change_count {
+            return Err("Clipboard changed during snapshot; no mutation occurred.".into());
+        }
+        Ok(saved)
+    }
+}
+fn restore_pasteboard(
+    saved: PasteboardSnapshot,
+    token: PasteboardToken,
+    payload: &PastePayload,
+) -> &'static str {
+    unsafe {
+        // Build all replacement items before the final board ownership check.
+        let mut items = Vec::new();
+        for source in &saved.items {
+            let item = NSPasteboardItem::new();
+            for (name, data) in &source.representations {
+                if !item.setData_forType(&NSData::with_bytes(data), &NSString::from_str(name)) {
+                    return "failed";
+                }
+            }
+            items.push(item);
+        }
+        let objects = NSArray::from_id_slice(&items);
+        let objects: Retained<NSArray<ProtocolObject<dyn NSPasteboardWriting>>> =
+            Retained::cast(objects);
+        if !pasteboard_still_has(token, payload) {
+            return "newer_writer_preserved";
+        }
+        let board = NSPasteboard::generalPasteboard();
+        // OS limitation: changeCount is not an atomic compare-and-swap.
+        board.clearContents();
+        if !items.is_empty() && !board.writeObjects(&objects) {
+            return "failed";
+        }
+        match capture_pasteboard() {
+            Ok(current) if current.items == saved.items => "restored",
+            _ => "failed",
+        }
+    }
+}
+fn annotate_clipboard(result: &mut ToolResult, policy: ClipboardPolicy, status: &str) {
+    let value = result
+        .structured_content
+        .get_or_insert_with(|| serde_json::json!({}));
+    if let Some(object) = value.as_object_mut() {
+        object.insert("clipboard_policy".into(), policy.name().into());
+        object.insert("clipboard_restore_status".into(), status.into());
+        object.insert("clipboard_restored".into(), (status == "restored").into());
+    }
+}
+async fn finish_clipboard(
+    mut result: ToolResult,
+    saved: Option<PasteboardSnapshot>,
+    token: PasteboardToken,
+    payload: PastePayload,
+) -> ToolResult {
+    let Some(saved) = saved else {
+        annotate_clipboard(&mut result, ClipboardPolicy::Leave, "not_requested");
+        return result;
+    };
+    let unknown_input = result
+        .structured_content
+        .as_ref()
+        .and_then(|v| v["effect"].as_str())
+        == Some("unknown");
+    let status = if unknown_input {
+        "unverified_input"
+    } else {
+        tokio::task::spawn_blocking(move || restore_pasteboard(saved, token, &payload))
+            .await
+            .unwrap_or("failed")
+    };
+    annotate_clipboard(&mut result, ClipboardPolicy::Restore, status);
+    if status == "failed" {
+        // Keep primary input facts/code even when preservation also fails.
+        if result.is_error != Some(true) {
+            result.is_error = Some(true);
+            result.content.push(Content::text("Paste insertion was verified, but clipboard restoration could not be verified. Observe; do not replay paste."));
+            if let Some(value) = result.structured_content.as_mut() {
+                value["code"] = "clipboard_restore_unverified".into();
+            }
+        }
+        if let Some(value) = result.structured_content.as_mut() {
+            value["do_not_replay"] = true.into();
+        }
+    }
+    result
 }
 
 enum ClipboardWriteFailure {
@@ -259,7 +427,10 @@ fn target_still_matches_prepared(
     }
 }
 
-fn write_payload(payload: &PastePayload) -> Result<PasteboardToken, ClipboardWriteFailure> {
+fn write_payload(
+    payload: &PastePayload,
+    previous_count: Option<isize>,
+) -> Result<PasteboardToken, ClipboardWriteFailure> {
     unsafe {
         let text = NSString::from_str(&payload.text);
         let board = NSPasteboard::generalPasteboard();
@@ -280,6 +451,11 @@ fn write_payload(payload: &PastePayload) -> Result<PasteboardToken, ClipboardWri
             // explicitly implements NSPasteboardWriting.
             let objects: Retained<NSArray<ProtocolObject<dyn NSPasteboardWriting>>> =
                 Retained::cast(objects);
+            if previous_count.is_some_and(|count| board.changeCount() != count) {
+                return Err(ClipboardWriteFailure::BeforeMutation(
+                    "Clipboard changed after snapshot; no mutation occurred.".into(),
+                ));
+            }
             board.clearContents();
             if !board.writeObjects(&objects) {
                 return Err(ClipboardWriteFailure::MayHaveMutated(
@@ -289,6 +465,11 @@ fn write_payload(payload: &PastePayload) -> Result<PasteboardToken, ClipboardWri
             }
         } else {
             // Preserve the accepted plaintext path.
+            if previous_count.is_some_and(|count| board.changeCount() != count) {
+                return Err(ClipboardWriteFailure::BeforeMutation(
+                    "Clipboard changed after snapshot; no mutation occurred.".into(),
+                ));
+            }
             board.clearContents();
             if !board.setString_forType(&text, NSPasteboardTypeString) {
                 return Err(ClipboardWriteFailure::MayHaveMutated(
@@ -367,149 +548,191 @@ impl Tool for NativePasteTool {
     }
 
     async fn invoke(&self, args: Value) -> ToolResult {
-        let pid = match args.require_i32("pid") {
-            Ok(pid) if pid > 0 => pid,
-            Ok(_) => return ToolResult::error("pid must be positive"),
-            Err(error) => return error,
-        };
-        let window_id = match args.require_u64("window_id").and_then(|id| {
-            u32::try_from(id).map_err(|_| ToolResult::error("window_id is out of range"))
-        }) {
-            Ok(window_id) if window_id > 0 => window_id,
-            Ok(_) => return ToolResult::error("window_id must be positive"),
-            Err(error) => return error,
-        };
-        let text = match args.require_str("text") {
-            Ok(text) => text,
-            Err(error) => return error,
-        };
-        let format = args.opt_str("format").unwrap_or_else(|| "text".into());
-        if !matches!(format.as_str(), "text" | "md" | "html") {
-            return refusal("unsupported_format", "Supported Mac paste formats are text, html and md (CommonMark); no mutation occurred.", pid, window_id);
-        }
-        if args.opt_str("clipboard_policy").as_deref() != Some("leave") {
-            return refusal(
-                "clipboard_policy_required",
-                "native_paste requires clipboard_policy:\"leave\"; no other policy is implemented.",
-                pid,
-                window_id,
-            );
-        }
-        if text.len() > MAX_PLAINTEXT_BYTES {
-            return refusal(
-                "payload_too_large",
-                format!("native_paste accepts at most {MAX_PLAINTEXT_BYTES} UTF-8 bytes."),
-                pid,
-                window_id,
-            );
-        }
-        // Capture the exact responder/value/selection before potentially slow
-        // rich conversion. A user focus change during conversion must refuse,
-        // rather than adopting whichever editor happens to be focused later.
-        let text_for_prepare = if format == "text" {
-            text.clone()
-        } else {
-            String::new()
-        };
-        let mut prepared = match tokio::task::spawn_blocking(move || {
-            prepare_target(pid, window_id, &text_for_prepare)
-        })
-        .await
-        {
-            Ok(Ok(prepared)) => prepared,
-            Ok(Err(reason)) => return refusal("target_unverifiable", reason, pid, window_id),
-            Err(error) => return refusal("target_unverifiable", error.to_string(), pid, window_id),
-        };
-        let source = text.clone();
-        let conversion_format = format.clone();
-        let payload = match tokio::task::spawn_blocking(move || {
-            native_rich_paste::prepare(&source, &conversion_format)
-        })
-        .await
-        {
-            Ok(Ok(payload)) => payload,
-            Ok(Err(reason)) => return refusal("rich_conversion_refused", reason, pid, window_id),
-            Err(error) => {
-                return refusal("rich_conversion_refused", error.to_string(), pid, window_id)
+        let policy = match args.opt_str("clipboard_policy").as_deref() {
+            Some("leave") => ClipboardPolicy::Leave,
+            Some("restore") => ClipboardPolicy::Restore,
+            _ => {
+                return refusal(
+                    "clipboard_policy_required",
+                    "native_paste requires clipboard_policy:\"leave\" or \"restore\".",
+                    args.require_i32("pid").unwrap_or(0),
+                    args.require_u64("window_id")
+                        .ok()
+                        .and_then(|v| u32::try_from(v).ok())
+                        .unwrap_or(0),
+                )
             }
         };
-        let text = payload.text.clone();
-        let Some(expected) = expected_insertion(&prepared.before, prepared.selection, &text) else {
-            return refusal(
-                "target_unverifiable",
-                "Captured selection cannot represent the rich insertion; no mutation occurred.",
-                pid,
-                window_id,
-            );
-        };
-        prepared.expected = expected;
-        let delivery_mode = super::DeliveryMode::parse(args.opt_str("delivery_mode").as_deref());
+        let mut result = invoke_paste(args, policy).await;
+        let status = result
+            .structured_content
+            .as_ref()
+            .and_then(|v| v["clipboard_restore_status"].as_str())
+            .map(str::to_owned)
+            .unwrap_or_else(|| {
+                if result
+                    .structured_content
+                    .as_ref()
+                    .is_some_and(|v| v["clipboard_may_have_changed"] == true)
+                {
+                    "unverified_write".into()
+                } else {
+                    "not_mutated".into()
+                }
+            });
+        annotate_clipboard(&mut result, policy, &status);
+        result
+    }
+}
+async fn invoke_paste(args: Value, policy: ClipboardPolicy) -> ToolResult {
+    let pid = match args.require_i32("pid") {
+        Ok(pid) if pid > 0 => pid,
+        Ok(_) => return ToolResult::error("pid must be positive"),
+        Err(error) => return error,
+    };
+    let window_id = match args.require_u64("window_id").and_then(|id| {
+        u32::try_from(id).map_err(|_| ToolResult::error("window_id is out of range"))
+    }) {
+        Ok(window_id) if window_id > 0 => window_id,
+        Ok(_) => return ToolResult::error("window_id must be positive"),
+        Err(error) => return error,
+    };
+    let text = match args.require_str("text") {
+        Ok(text) => text,
+        Err(error) => return error,
+    };
+    let format = args.opt_str("format").unwrap_or_else(|| "text".into());
+    if !matches!(format.as_str(), "text" | "md" | "html") {
+        return refusal(
+            "unsupported_format",
+            "Supported Mac paste formats are text, html and md (CommonMark); no mutation occurred.",
+            pid,
+            window_id,
+        );
+    }
+    if text.len() > MAX_PLAINTEXT_BYTES {
+        return refusal(
+            "payload_too_large",
+            format!("native_paste accepts at most {MAX_PLAINTEXT_BYTES} UTF-8 bytes."),
+            pid,
+            window_id,
+        );
+    }
+    // Capture the exact responder/value/selection before potentially slow
+    // rich conversion. A user focus change during conversion must refuse,
+    // rather than adopting whichever editor happens to be focused later.
+    let text_for_prepare = if format == "text" {
+        text.clone()
+    } else {
+        String::new()
+    };
+    let mut prepared = match tokio::task::spawn_blocking(move || {
+        prepare_target(pid, window_id, &text_for_prepare)
+    })
+    .await
+    {
+        Ok(Ok(prepared)) => prepared,
+        Ok(Err(reason)) => return refusal("target_unverifiable", reason, pid, window_id),
+        Err(error) => return refusal("target_unverifiable", error.to_string(), pid, window_id),
+    };
+    let source = text.clone();
+    let conversion_format = format.clone();
+    let payload = match tokio::task::spawn_blocking(move || {
+        native_rich_paste::prepare(&source, &conversion_format)
+    })
+    .await
+    {
+        Ok(Ok(payload)) => payload,
+        Ok(Err(reason)) => return refusal("rich_conversion_refused", reason, pid, window_id),
+        Err(error) => return refusal("rich_conversion_refused", error.to_string(), pid, window_id),
+    };
+    let text = payload.text.clone();
+    let Some(expected) = expected_insertion(&prepared.before, prepared.selection, &text) else {
+        return refusal(
+            "target_unverifiable",
+            "Captured selection cannot represent the rich insertion; no mutation occurred.",
+            pid,
+            window_id,
+        );
+    };
+    prepared.expected = expected;
+    let delivery_mode = super::DeliveryMode::parse(args.opt_str("delivery_mode").as_deref());
 
-        if is_unverifiable_noop(&prepared.before, prepared.selection, &text) {
-            return refusal(
+    if is_unverifiable_noop(&prepared.before, prepared.selection, &text) {
+        return refusal(
                 "unverifiable_noop",
                 "native_paste refuses an empty insertion at a collapsed selection because AX read-back cannot prove Cmd+V was consumed; no clipboard or input mutation occurred.",
                 pid,
                 window_id,
             );
-        }
+    }
 
-        let _mutation_lease = if delivery_mode.is_foreground() {
-            // Foreground intentionally bypasses the background eligibility
-            // decision, but still serializes mutations to this process while
-            // activation, revalidation, and the single chord are in flight.
-            Some(super::acquire_background_mutation(pid).await)
-        } else {
-            match gate_background_window_action(
-                pid,
-                window_id,
-                Some(prepared.element.0),
-                BackgroundAction::GenericKey,
-            )
-            .await
-            {
-                Ok(lease) => Some(lease),
-                Err(result) => return result,
-            }
-        };
-        let _clipboard_guard = CLIPBOARD_WRITE_LOCK.lock().await;
-
-        let element = prepared.element.0;
-        let before = prepared.before.clone();
-        let selection = prepared.selection;
-        let ready_before_write = tokio::task::spawn_blocking(move || {
-            target_still_matches_prepared(element, pid, window_id, &before, selection)
-        })
+    let _mutation_lease = if delivery_mode.is_foreground() {
+        // Foreground intentionally bypasses the background eligibility
+        // decision, but still serializes mutations to this process while
+        // activation, revalidation, and the single chord are in flight.
+        Some(super::acquire_background_mutation(pid).await)
+    } else {
+        match gate_background_window_action(
+            pid,
+            window_id,
+            Some(prepared.element.0),
+            BackgroundAction::GenericKey,
+        )
         .await
-        .unwrap_or(false);
-        if !ready_before_write {
-            return refusal(
+        {
+            Ok(lease) => Some(lease),
+            Err(result) => return result,
+        }
+    };
+    let _clipboard_guard = CLIPBOARD_WRITE_LOCK.lock().await;
+
+    let element = prepared.element.0;
+    let before = prepared.before.clone();
+    let selection = prepared.selection;
+    let ready_before_write = tokio::task::spawn_blocking(move || {
+        target_still_matches_prepared(element, pid, window_id, &before, selection)
+    })
+    .await
+    .unwrap_or(false);
+    if !ready_before_write {
+        return refusal(
                 "target_changed_before_clipboard_write",
                 "Focused AX target, value, or selection changed before clipboard mutation; no paste was dispatched.",
                 pid,
                 window_id,
             );
+    }
+
+    let clipboard_payload = payload.clone();
+    let (saved, token) = match tokio::task::spawn_blocking(move || {
+        let saved = if policy == ClipboardPolicy::Restore {
+            Some(capture_pasteboard().map_err(ClipboardWriteFailure::BeforeMutation)?)
+        } else {
+            None
+        };
+        let token = write_payload(&clipboard_payload, saved.as_ref().map(|s| s.change_count))?;
+        Ok::<_, ClipboardWriteFailure>((saved, token))
+    })
+    .await
+    {
+        Ok(Ok(value)) => value,
+        Ok(Err(ClipboardWriteFailure::BeforeMutation(reason))) => {
+            return refusal("clipboard_item_refused", reason, pid, window_id)
         }
+        Ok(Err(ClipboardWriteFailure::MayHaveMutated(reason))) => {
+            return clipboard_mutation_unknown(reason, pid, window_id)
+        }
+        Err(error) => {
+            return clipboard_mutation_unknown(
+                format!("Clipboard worker ended after clipboard mutation began: {error}"),
+                pid,
+                window_id,
+            )
+        }
+    };
 
-        let clipboard_payload = payload.clone();
-        let token =
-            match tokio::task::spawn_blocking(move || write_payload(&clipboard_payload)).await {
-                Ok(Ok(token)) => token,
-                Ok(Err(ClipboardWriteFailure::BeforeMutation(reason))) => {
-                    return refusal("clipboard_item_refused", reason, pid, window_id)
-                }
-                Ok(Err(ClipboardWriteFailure::MayHaveMutated(reason))) => {
-                    return clipboard_mutation_unknown(reason, pid, window_id)
-                }
-                Err(error) => {
-                    return clipboard_mutation_unknown(
-                        format!("Clipboard worker ended after clipboard mutation began: {error}"),
-                        pid,
-                        window_id,
-                    )
-                }
-            };
-
+    let result = async {
         let clipboard_payload = payload.clone();
         let element = prepared.element.0;
         let before = prepared.before.clone();
@@ -663,7 +886,8 @@ impl Tool for NativePasteTool {
                 "transfer_verified": false,
             }),
         )
-    }
+        }.await;
+    finish_clipboard(result, saved, token, payload).await
 }
 
 #[cfg(test)]
@@ -727,10 +951,23 @@ mod tests {
 
     #[test]
     fn schema_exposes_background_and_foreground_delivery_modes() {
+        assert_eq!(
+            def().input_schema["properties"]["clipboard_policy"]["enum"],
+            serde_json::json!(["leave", "restore"])
+        );
         let mode = &def().input_schema["properties"]["delivery_mode"];
         assert_eq!(
             mode["enum"],
             serde_json::json!(["background", "foreground"])
         );
+    }
+    #[test]
+    fn clipboard_snapshot_byte_limit_refuses_overflow_and_excess_without_host_access() {
+        assert_eq!(
+            snapshot_byte_count(0, MAX_SNAPSHOT_BYTES).unwrap(),
+            MAX_SNAPSHOT_BYTES
+        );
+        assert!(snapshot_byte_count(MAX_SNAPSHOT_BYTES, 1).is_err());
+        assert!(snapshot_byte_count(usize::MAX, 1).is_err());
     }
 }
