@@ -75,6 +75,16 @@ mod pacman {
     use cua_driver_testkit::Driver;
     use std::os::unix::fs::PermissionsExt;
 
+    fn source_home(root: &std::path::Path) -> std::path::PathBuf {
+        let metadata: serde_json::Value =
+            serde_json::from_str(include_str!("../../../../installer-distribution.json"))
+                .expect("independent source distribution metadata");
+        assert_eq!(metadata["schemaVersion"], 1);
+        assert_eq!(metadata["distribution"], "source-build");
+        assert_eq!(metadata["product"], "opensky-driver");
+        root.join(format!(".{}", metadata["product"].as_str().unwrap()))
+    }
+
     fn fixture() -> tempfile::TempDir {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("pacman");
@@ -86,6 +96,8 @@ mod pacman {
         .unwrap();
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
         std::fs::write(root.path().join("release-channel"), "nightly\n").unwrap();
+        std::fs::create_dir(source_home(root.path())).unwrap();
+        // A source build must not consume or migrate an upstream cache either.
         std::fs::create_dir(root.path().join(".cua-driver")).unwrap();
         root
     }
@@ -120,7 +132,7 @@ mod pacman {
         executable
     }
 
-    fn assert_unavailable(state: &serde_json::Value) {
+    fn assert_source_unavailable(state: &serde_json::Value) {
         assert_eq!(state["update_available"], false);
         assert_eq!(state["cache_hit"], false);
         for field in [
@@ -131,20 +143,23 @@ mod pacman {
         ] {
             assert!(state[field].is_null(), "{state}");
         }
-        assert!(state["error"]
-            .as_str()
-            .unwrap()
-            .contains("sudo pacman -Syu"));
+        assert!(state["current_version"].as_str().unwrap().len() > 0);
+        assert!(state["current_channel"].is_null(), "{state}");
+        assert_eq!(state["source"], "opensky_source");
+        assert_eq!(
+            state["error"],
+            "OpenSky Driver is source-managed. Rebuild from https://github.com/tanishqkancharla/cua; upstream Cua releases are not compatible update sources."
+        );
     }
 
     #[test]
     #[ignore = "requires a real pacman-owned PACMAN_TEST_MANAGED_EXECUTABLE in a disposable Linux guest"]
-    fn managed_cli_checks_and_apply_return_package_guidance() {
+    fn managed_cli_keeps_source_updates_disabled_and_returns_package_channel_guidance() {
         let executable = managed_executable();
         let root = fixture();
         // A tempting cached upstream nightly must never be advertised.
         let cache = r#"{"latest_version":"999.0.0-nightly.20260907.1","channel":"nightly","last_checked_unix":9999999999}"#;
-        let cache_path = root.path().join(".cua-driver/version_check.json");
+        let cache_path = source_home(root.path()).join("version_check.json");
         std::fs::write(&cache_path, cache).unwrap();
         for args in [
             vec!["check-update", "--json"],
@@ -155,11 +170,11 @@ mod pacman {
             let output = command(&executable, root.path(), &args);
             assert!(!output.status.success());
             let state = serde_json::from_slice(&output.stdout).unwrap();
-            assert_unavailable(&state);
+            assert_source_unavailable(&state);
         }
         let text = command(&executable, root.path(), &["update", "--apply"]);
         assert!(!text.status.success());
-        assert!(String::from_utf8_lossy(&text.stdout).contains("sudo pacman -Syu"));
+        assert!(String::from_utf8_lossy(&text.stdout).contains("OpenSky Driver is source-managed"));
         assert_eq!(std::fs::read_to_string(&cache_path).unwrap(), cache);
         let preference = root.path().join("release-channel");
         for saved in [None, Some("nightly\n"), Some("broken\n")] {
@@ -188,10 +203,12 @@ mod pacman {
                 for field in ["current_version", "current_channel"] {
                     assert!(!state[field].as_str().unwrap().is_empty(), "{state}");
                 }
-                assert!(state["error"]
-                    .as_str()
-                    .unwrap()
-                    .contains("sudo pacman -Syu"));
+                assert!(
+                    state["error"]
+                        .as_str()
+                        .unwrap()
+                        .contains("sudo pacman -Syu")
+                );
                 assert_eq!(std::fs::read_to_string(&preference).ok().as_deref(), saved);
                 assert_eq!(std::fs::read_to_string(&cache_path).unwrap(), cache);
             }
@@ -199,7 +216,7 @@ mod pacman {
         std::fs::remove_file(&cache_path).unwrap();
         let uncached = command(&executable, root.path(), &["check-update", "--json"]);
         assert!(!uncached.status.success());
-        assert_unavailable(&serde_json::from_slice(&uncached.stdout).unwrap());
+        assert_source_unavailable(&serde_json::from_slice(&uncached.stdout).unwrap());
         assert!(
             !cache_path.exists(),
             "managed checks must not create an upstream cache"
@@ -225,24 +242,37 @@ mod pacman {
         );
         let state: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(state["selected_channel"], "stable");
-        std::fs::write(
+        let cache =
+            r#"{"latest_version":"999.0.0","channel":"stable","last_checked_unix":9999999999}"#;
+        let caches = [
+            source_home(root.path()).join("version_check.json"),
             root.path().join(".cua-driver/version_check.json"),
-            r#"{"latest_version":"999.0.0","channel":"stable","last_checked_unix":9999999999}"#,
-        )
-        .unwrap();
-        let output = command(&executable, root.path(), &["check-update", "--json"]);
-        assert!(output.status.success());
-        let state: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(state["update_available"], true);
-        assert_eq!(state["cache_hit"], true);
-        assert_eq!(state["latest_version"], "999.0.0");
-        assert!(state["error"].is_null());
+        ];
+        for path in &caches {
+            std::fs::write(path, cache).unwrap();
+        }
+        for args in [
+            vec!["check-update", "--json"],
+            vec!["check-update", "--no-cache", "--json"],
+        ] {
+            let output = command(&executable, root.path(), &args);
+            assert!(!output.status.success());
+            let state: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_source_unavailable(&state);
+            for path in &caches {
+                assert_eq!(std::fs::read_to_string(path).unwrap(), cache);
+            }
+        }
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("release-channel")).unwrap(),
+            "stable\n"
+        );
         assert!(!root.path().join("fake-pacman-called").exists());
     }
 
     #[test]
     #[ignore = "requires a real pacman-owned candidate and CUA_TEST_DRIVER_BIN in a disposable Linux guest"]
-    fn managed_mcp_check_returns_same_unavailable_state() {
+    fn managed_mcp_keeps_source_updates_disabled() {
         let executable = managed_executable();
         assert_eq!(
             std::path::PathBuf::from(
@@ -261,11 +291,12 @@ mod pacman {
         let result = driver.call("check_for_update", serde_json::json!({}));
         assert!(result.text().starts_with("Update check unavailable:"));
         assert!(
-            result.text().contains("sudo pacman -Syu"),
+            result.text().contains("OpenSky Driver is source-managed"),
             "{:?}",
             result.raw
         );
-        assert_unavailable(&result.raw["result"]["structuredContent"]);
+        assert_source_unavailable(&result.raw["result"]["structuredContent"]);
+        assert!(!source_home(root.path()).join("version_check.json").exists());
         assert!(!root.path().join(".cua-driver/version_check.json").exists());
         assert!(!root.path().join("fake-pacman-called").exists());
     }

@@ -85,9 +85,12 @@ and native harnesses, see
 The `Arch native pacman updates` job in `ci-rust-linux.yml` checks package
 ownership with real pacman in a disposable Arch container. It packages the
 candidate under `/usr/lib/cua-driver-pacman-test`, verifies CLI and MCP update
-guidance through the installed binary and a symlink, and checks that an
-unmanaged copy retains vendor updates and channel selection. A fake `pacman`
-on `PATH` must not change either result. The job removes only its fixture
+guidance through the installed binary and a symlink. The declared OpenSky
+source product keeps upstream updates disabled for managed and unmanaged
+copies, ignores tempting source and legacy update caches, and preserves
+unmanaged channel selection. Real package ownership still refuses channel
+changes with pacman guidance. A fake `pacman` on `PATH` must not change any
+result. The job removes only its fixture
 package and retains source, binary, toolchain, and test evidence.
 
 To reproduce it, build `cua-driver` and `release_channel_cli_test` with

@@ -42,7 +42,7 @@ echo "Evidence: $evidence"
 } | tee "$evidence/provenance.txt"
 "$candidate" --version
 "$test_binary" --list > "$evidence/tests.txt"
-for test in managed_cli_checks_and_apply_return_package_guidance managed_mcp_check_returns_same_unavailable_state fake_path_pacman_cannot_disable_unmanaged_channel_switching; do
+for test in managed_cli_keeps_source_updates_disabled_and_returns_package_channel_guidance managed_mcp_keeps_source_updates_disabled fake_path_pacman_cannot_disable_unmanaged_channel_switching; do
   if ! grep -Fx "pacman::$test: test" "$evidence/tests.txt"; then
     echo "Integration-test binary is missing required test: $test" >&2
     exit 2
@@ -103,7 +103,7 @@ ln -s /usr/lib/cua-driver-pacman-test/cua-driver "$evidence/managed-symlink"
 
 for executable in /usr/lib/cua-driver-pacman-test/cua-driver "$evidence/managed-symlink"; do
   echo "Testing managed executable: $executable"
-  for test in managed_cli_checks_and_apply_return_package_guidance managed_mcp_check_returns_same_unavailable_state; do
+  for test in managed_cli_keeps_source_updates_disabled_and_returns_package_channel_guidance managed_mcp_keeps_source_updates_disabled; do
     PACMAN_TEST_MANAGED_EXECUTABLE="$executable" CUA_TEST_DRIVER_BIN="$executable" \
       CUA_TEST_DRIVER_STDERR=1 timeout 180 "$test_binary" \
       --ignored --exact "pacman::$test" --nocapture --test-threads=1
