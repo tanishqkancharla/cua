@@ -60,3 +60,7 @@ python -m pytest -q -p no:cacheprovider \
 ```
 
 The broader whole installer directory and existing encoding owner pass313cases/26platform skips and3subtests in about34seconds locally. CI runs the entire installer directory before the longer root Python suite, retaining every later check. This detects installer failures sooner without waiting for the unrelated suite. Skipped PowerShell cases and mocked/sourced Mac tests are not native Windows or canonical desktop acceptance. Mutable exact-head hosted outcomes remain in the linked draft PR.
+
+## Windows purge-order feedback
+
+Both ordinary Windows Rust CI and the five-minute Windows script lane pass the guarded release-uninstaller selector to the existing Computer History ordering owner. The Rust job runs this parse/order/refusal check directly after checkout, before toolchain setup and compilation. Selector failure stops the job; the PowerShell owner and its assertions stay unchanged. The script lane runs it before the existing reporting fixture. This validates the release fixture, not the public source uninstaller or an actual installation. Mutable hosted results remain in the linked draft PR.
