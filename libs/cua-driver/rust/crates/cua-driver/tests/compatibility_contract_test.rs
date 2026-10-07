@@ -8,6 +8,21 @@ use serde_json::{json, Value};
 
 const CLI_FIXTURE: &str = include_str!("../../../../compat-fixtures/cli.json");
 const MCP_FIXTURE: &str = include_str!("../../../../compat-fixtures/mcp.json");
+const SOURCE_DISTRIBUTION: &str = include_str!("../../../../installer-distribution.json");
+
+// The released Cua snapshots stay frozen. This source-built fork declares a
+// different product identity; every other compatibility field remains locked.
+fn declared_source_product() -> String {
+    let source: Value =
+        serde_json::from_str(SOURCE_DISTRIBUTION).expect("valid source distribution");
+    assert_eq!(source["schemaVersion"], 1);
+    assert_eq!(source["distribution"], "source-build");
+    assert_eq!(source["product"], "opensky-driver");
+    source["product"]
+        .as_str()
+        .expect("source product string")
+        .to_owned()
+}
 
 #[test]
 fn released_cli_help_and_manifest_fields_remain_compatible() {
@@ -22,7 +37,14 @@ fn released_cli_help_and_manifest_fields_remain_compatible() {
     let help = String::from_utf8(help.stdout).expect("UTF-8 help");
     for line in fixture["help_lines"].as_array().expect("help lines") {
         let line = line.as_str().expect("help line string");
-        assert!(help.contains(line), "CLI help no longer contains {line:?}");
+        let source_line = match line.strip_prefix("Usage: cua-driver ") {
+            Some(suffix) => format!("Usage: {} {suffix}", declared_source_product()),
+            None => line.to_owned(),
+        };
+        assert!(
+            help.contains(&source_line),
+            "CLI help no longer contains {source_line:?}"
+        );
     }
 
     let manifest = Command::new(executable)
@@ -193,9 +215,10 @@ fn assert_mcp_contract(driver: &mut RawDriver, fixture: &Value) {
         initialize["result"]["protocolVersion"],
         expected_initialize["protocol_version"]
     );
+    assert_eq!(expected_initialize["server_name"], "cua-driver");
     assert_eq!(
         initialize["result"]["serverInfo"]["name"],
-        expected_initialize["server_name"]
+        declared_source_product()
     );
     semver::Version::parse(
         initialize["result"]["serverInfo"]["version"]

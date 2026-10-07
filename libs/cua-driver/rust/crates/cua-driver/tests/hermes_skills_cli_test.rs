@@ -12,8 +12,15 @@ mod unix {
         let driver_home = root.path().join("driver");
         let hermes_home = root.path().join("hermes-profile");
         let hermes_skills = hermes_home.join("skills");
-        let local_skill = driver_home.join("skills").join("cua-driver");
-        let hermes_link = hermes_skills.join("cua-driver");
+        let distribution: serde_json::Value =
+            serde_json::from_str(include_str!("../../../../installer-distribution.json"))
+                .expect("independent source distribution metadata");
+        assert_eq!(distribution["schemaVersion"], 1);
+        assert_eq!(distribution["distribution"], "source-build");
+        assert_eq!(distribution["product"], "opensky-driver");
+        let source_product = distribution["product"].as_str().expect("source product");
+        let local_skill = driver_home.join("skills").join(source_product);
+        let hermes_link = hermes_skills.join(source_product);
 
         fs::create_dir_all(&hermes_skills).expect("create Hermes skills directory");
         fs::create_dir_all(&local_skill).expect("create local skill directory");
@@ -33,8 +40,10 @@ mod unix {
             stdout.contains(&hermes_link.display().to_string()),
             "{stdout}"
         );
-        assert!(stdout.contains("Hermes"), "{stdout}");
-        assert!(stdout.contains("linked"), "{stdout}");
+        assert!(
+            stdout.contains(&format!("Hermes — ✅ linked: {}", hermes_link.display())),
+            "{stdout}"
+        );
 
         let uninstall = Command::new(env!("CARGO_BIN_EXE_cua-driver"))
             .args(["skills", "uninstall"])

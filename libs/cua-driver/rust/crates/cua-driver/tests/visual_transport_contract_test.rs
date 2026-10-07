@@ -74,6 +74,15 @@ fn cli_and_mcp_preserve_the_same_visual_error_dto() {
 
     assert!(cli_response.is_error());
     assert!(mcp_response.is_error());
+    // CLI must retain the full tool-error envelope, not flatten away delivery
+    // diagnostics to satisfy a transport adapter. Both adapters expose the DTO.
+    assert_eq!(cli_response.raw["isError"], true);
+    assert_eq!(cli_response.raw["content"][0]["type"], "text");
+    assert_eq!(
+        cli_response.raw["structuredContent"],
+        *cli_response.structured()
+    );
+    assert_eq!(mcp_response.raw["result"]["isError"], true);
     assert_eq!(cli_response.structured(), mcp_response.structured());
     assert_eq!(cli_response.structured()["code"], "capture_not_found");
     assert_eq!(cli_response.structured()["retryable"], false);
