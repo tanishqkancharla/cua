@@ -4,9 +4,14 @@ on:
   workflow_dispatch:
     inputs:
       ref:
-        description: Exact full driver commit SHA to certify
+        description: Exact full driver commit SHA to test
         required: true
         type: string
+      lane:
+        description: 'Complete certification or focused installer diagnosis'
+        type: choice
+        options: [all, installer]
+        default: all
 
 permissions:
   contents: read
@@ -17,5 +22,5 @@ jobs:
     uses: ./.github/workflows/e2e-rust-linux.yml
     with:
       ref: ${{ inputs.ref }}
-      lane: all
+      lane: ${{ inputs.lane || 'all' }}
       cell_filter: ''

@@ -261,9 +261,16 @@ jobs:
           CUA_DRIVER_LOCAL_INSTALL_DIR: ${{ runner.temp }}/cua-driver-local-bin
         run: |
           set -euo pipefail
-          bash libs/cua-driver/scripts/install-local.sh --release
-          installed="$CUA_DRIVER_LOCAL_INSTALL_DIR/cua-driver-local"
+          bash libs/cua-driver/scripts/install-local.sh --release 2>&1 | tee "$RUNNER_TEMP/cua-driver-local-install.log"
+          installed="$CUA_DRIVER_LOCAL_INSTALL_DIR/opensky-driver"
           test -x "$installed"
+          python3 - "$installed" <<'PY_IDENTITY'
+          import json, os, subprocess, sys
+          identity = json.loads(subprocess.check_output([sys.argv[1], "--opensky-driver-identity"]))
+          assert identity["product"] == "opensky-driver", identity
+          assert identity["protocolVersion"] == 1, identity
+          assert identity["source"] == os.environ["CUA_DRIVER_SOURCE_SHA"], identity
+          PY_IDENTITY
           "$installed" --version | tee "$RUNNER_TEMP/cua-driver-local-version.txt"
 
           socket="$RUNNER_TEMP/cua-driver-local.sock"
@@ -286,6 +293,7 @@ jobs:
         with:
           name: rust-linux-install-local
           path: |
+            ${{ runner.temp }}/cua-driver-local-install.log
             ${{ runner.temp }}/cua-driver-local-version.txt
             ${{ runner.temp }}/cua-driver-local-config.json
             ${{ runner.temp }}/cua-driver-local-daemon.log

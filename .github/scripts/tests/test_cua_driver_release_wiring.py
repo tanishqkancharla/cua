@@ -961,6 +961,68 @@ fi
         self.assertIn("install-local.ps1 -NoAutoStart -NoPathUpdate", windows)
         self.assertIn('CUA_DRIVER_LOCAL_HOME = Join-Path $env:RUNNER_TEMP', windows)
 
+    def test_linux_local_smoke_executes_exact_source_product_and_retains_failure(self) -> None:
+        workflow = self.read(".github/workflows/e2e-rust-linux.yml")
+        step = workflow.split("      - name: Install into an isolated local namespace\n", 1)[1]
+        script = textwrap.dedent(step.split("        run: |\n", 1)[1].split(
+            "      - name: Upload installer evidence", 1
+        )[0])
+        self.assertNotIn("${{", script)
+        # Execute the actual consumer step in a private tree. The stub installs
+        # only the current product, and the daemon owns only a temporary socket.
+        driver = r"""#!/usr/bin/env python3
+import json, os, socket, sys, time
+args = sys.argv[1:]
+if args == ["--opensky-driver-identity"]:
+    print(json.dumps({"product": os.environ["TEST_PRODUCT"], "protocolVersion": 1,
+        "source": os.environ["TEST_SOURCE"]}))
+elif args == ["--version"]:
+    print("opensky-driver fixture")
+elif args[0] == "serve":
+    s = socket.socket(socket.AF_UNIX)
+    s.bind(args[args.index("--socket") + 1])
+    while True: time.sleep(1)
+elif "get_config" in args:
+    print(json.dumps({"source": os.environ["CUA_DRIVER_SOURCE_SHA"]}))
+else:
+    raise SystemExit("unexpected driver arguments: " + repr(args))
+"""
+        for case in ("current", "legacy-path", "wrong-product", "wrong-source", "installer-failed"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory(prefix="installer-smoke-") as temporary:
+                root = Path(temporary)
+                installer = root / "libs/cua-driver/scripts/install-local.sh"
+                installer.parent.mkdir(parents=True)
+                installer.write_text(textwrap.dedent(r"""\
+                    #!/usr/bin/env bash
+                    set -euo pipefail
+                    echo 'source-install-output'
+                    [[ "$TEST_CASE" != installer-failed ]] || exit 23
+                    mkdir -p "$CUA_DRIVER_LOCAL_INSTALL_DIR"
+                    name=opensky-driver
+                    [[ "$TEST_CASE" != legacy-path ]] || name=cua-driver-local
+                    cp "$TEST_DRIVER" "$CUA_DRIVER_LOCAL_INSTALL_DIR/$name"
+                    chmod +x "$CUA_DRIVER_LOCAL_INSTALL_DIR/$name"
+                    """))
+                stub = root / "driver.py"
+                stub.write_text(driver)
+                source = "a" * 40
+                env = dict(os.environ, RUNNER_TEMP=str(root), CUA_DRIVER_SOURCE_SHA=source,
+                    CUA_DRIVER_LOCAL_HOME=str(root / "home"), CUA_DRIVER_LOCAL_INSTALL_DIR=str(root / "bin"),
+                    TEST_DRIVER=str(stub), TEST_CASE=case,
+                    TEST_PRODUCT="cua-driver-local" if case == "wrong-product" else "opensky-driver",
+                    TEST_SOURCE="b" * 40 if case == "wrong-source" else source)
+                result = subprocess.run(["bash", "-c", script], cwd=root, env=env,
+                    capture_output=True, text=True, timeout=15)
+                self.assertEqual(result.returncode == 0, case == "current", result.stdout + result.stderr)
+                self.assertIn("source-install-output", (root / "cua-driver-local-install.log").read_text())
+                self.assertEqual((root / "cua-driver-local-config.json").exists(), case == "current")
+                if case == "current":
+                    self.assertEqual(json.loads((root / "cua-driver-local-config.json").read_text())["source"], source)
+                elif case in ("wrong-product", "wrong-source"):
+                    self.assertIn("AssertionError", result.stderr)
+                elif case == "installer-failed":
+                    self.assertEqual(result.returncode, 23)
+
     def test_driver_release_publishes_checksums_for_python_wheels(self) -> None:
         workflow = self.read(".github/workflows/cd-rust-cua-driver.yml")
 
