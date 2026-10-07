@@ -111,9 +111,7 @@ fn click_at_xy_desktop_inner(
 ) -> anyhow::Result<()> {
     use core_graphics::display::CGDisplay;
     use core_graphics::event::CGEventTapLocation;
-    // Foreground clicks originate in this login session. Keep background
-    // PID-routed transports independent of the session event state.
-    let source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState)
+    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
         .map_err(|_| anyhow::anyhow!("CGEventSource::new failed"))?;
     let prior = if preserve_cursor {
         Some(
