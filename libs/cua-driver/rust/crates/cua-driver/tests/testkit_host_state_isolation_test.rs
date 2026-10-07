@@ -27,7 +27,16 @@ fn history_roots(home: &Path) -> Vec<PathBuf> {
     } else {
         home.join(".local").join("state")
     };
-    ["cua-driver", "cua-driver-local"]
+    let metadata: serde_json::Value =
+        serde_json::from_str(include_str!("../../../../installer-distribution.json"))
+            .expect("independent source distribution metadata");
+    assert_eq!(metadata["schemaVersion"], 1);
+    assert_eq!(metadata["distribution"], "source-build");
+    let namespace = metadata["product"].as_str().expect("source product namespace");
+    assert_eq!(namespace, "opensky-driver");
+    // Seed both the actual source product and inherited namespaces. Keep the
+    // shared-host refusal control: a misplaced seed must still fail this owner.
+    [namespace, "cua-driver", "cua-driver-local"]
         .into_iter()
         .map(|namespace| base.join(namespace).join("computer-history"))
         .collect()
