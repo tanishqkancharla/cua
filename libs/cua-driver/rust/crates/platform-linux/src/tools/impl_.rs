@@ -2,7 +2,9 @@
 
 use async_trait::async_trait;
 use cua_driver_contract::{
-    ClickButton, DragInput, GetCursorPositionInput, GetDesktopStateInput, GetScreenSizeInput, HotkeyInput, InvokeMenuInput, MoveCursorInput, PressKeyInput, ScrollInput, TypeTextInput, ClickInput, CloseWindowInput,
+    ClickButton, ClickInput, CloseWindowInput, DragInput, GetCursorPositionInput,
+    GetDesktopStateInput, GetScreenSizeInput, HotkeyInput, InvokeMenuInput, MoveCursorInput,
+    PressKeyInput, ScrollInput, TypeTextInput,
 };
 use cua_driver_core::{
     protocol::ToolResult,
@@ -7035,18 +7037,18 @@ impl Tool for ClickTool {
                 if !fg && button == 1 && count == 1 && modifiers_for_task.is_empty() {
                     // The accessible action under the point may open a menu or
                     // a dialog that takes the focus: guard and restore. With a
-                    // real pointer available, an entry / spin button / cell
-                    // under the point is left to the MPX click below (its
-                    // `doAction` would not focus it for a following type_text).
-                    let real_click_for_focus_roles =
-                        crate::input::real_pointer_input_available();
+                    // pixel click, an entry / spin button / cell must take
+                    // focus, not activate. This is true even without an MPX
+                    // device: leave it to the existing pointer route or its
+                    // explicit pre-input background refusal below. Never fire
+                    // `activate` merely because /dev/uinput is unavailable.
                     let (hit, guard) = crate::input::focus_guard::guarded(Some(pid), || {
                         Ok(crate::atspi::perform_action_at_point_in(
                             pid,
                             xid,
                             xi,
                             yi,
-                            real_click_for_focus_roles,
+                            true,
                         )
                         .ok()
                         .flatten())
