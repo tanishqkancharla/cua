@@ -39,3 +39,24 @@ The private Unix and PowerShell uninstallers are byte-identical to already merge
 CI passes the selected reference explicitly to existing Unix history and Windows PowerShell5.1 fixtures. Their guarded process/discovery/removal seams remain. The Unix history fixture refuses an unavailable source or a product without the source-only release seam before sourcing, and uses an explicit temporary template under its private root with EXIT cleanup. This avoids system Bash falsely returning success for missing `source` and system `mktemp` ignoring the intended temporary-root oracle. Success, missing-source and wrong-product runs prove actual teardown; deleting the trap is detected and only that owned mutation residue is removed by the parent.
 
 Local affected owners182pass/12Windows skips; complete Python scripts664pass/32platform skips. The final history fixture and its refusal/cleanup paths pass after the additional fixture corrections. These are disposable mocked installs, not user uninstall/desktop acceptance. Windows execution, remaining source installer/Lume/attribution failures and the canonical matrix remain hosted-validation questions. Current mutable outcomes belong in the linked draft PR rather than status-only source commits.
+
+
+## Source identity feedback
+
+Source installer owners check the actual OpenSky app, CLI, state, autostart and permission namespace. Release autostart owners read the validated preserved Cua downloader. Existing custom-target fixture still checks actual staged driver, cursor compiler, GNOME helper upgrade and absence of a Cua release alias; its output now checks OpenSky SDK/doctor/identity/skill guidance. The obsolete Windows migration duplicate is removed because it required release download advice forbidden by the existing fork migration owner. Four keeper mutations reject that advice or loss of public source delegation.
+
+Windows failed-registration recovery now names opensky-driver-serve and opensky-driver retry commands, matching its successful branch. Its existing owner checks exact task naming and executes only the real extracted closing output branch when PowerShell is available. Mac runner initializes the original ScreenCaptureApprovals file and com.opensky.driver client. Existing sourced identity owner compares that client to independent runtime bundle identity and detects removing the initialization. There is no new client environment override or shipped test hook. No VM, actual host installation/signing or TCC action occurs in these fixtures.
+
+Run complete source owners locally before pushing:
+
+```sh
+python -m pytest -q -p no:cacheprovider \
+  libs/cua-driver/scripts/tests/test_install_autostart_summary.py \
+  libs/cua-driver/scripts/tests/test_install_isolated_autostart.py \
+  libs/cua-driver/scripts/tests/test_install_local.py \
+  libs/cua-driver/scripts/tests/test_install_local_signing.py \
+  libs/cua-driver/scripts/tests/test_install_local_migration.py \
+  libs/cua-driver/scripts/tests/test_macos_lume_runner.py
+```
+
+The broader whole installer directory and existing encoding owner pass313cases/26platform skips and3subtests in about34seconds locally. CI runs the entire installer directory before the longer root Python suite, retaining every later check. This detects installer failures sooner without waiting for the unrelated suite. Skipped PowerShell cases and mocked/sourced Mac tests are not native Windows or canonical desktop acceptance. Mutable exact-head hosted outcomes remain in the linked draft PR.

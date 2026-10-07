@@ -161,13 +161,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install cryptography jsonschema pyyaml pytest toml
 
+      - name: Test Cua Driver install and uninstall scripts
+        run: python -m pytest libs/cua-driver/scripts/tests/ -v
+
       - name: Run tests
         run: |
           cd .github/scripts
           pytest tests/ -v
-
-      - name: Test Cua Driver install and uninstall scripts
-        run: python -m pytest libs/cua-driver/scripts/tests/ -v
 
       - name: Test Computer History purge during uninstall
         run: |

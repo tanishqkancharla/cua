@@ -416,9 +416,9 @@ if ($AutoStartRegistered) {
     # (declined UAC prompt, or the registration itself errored). Never claim
     # the task exists here (trycua/cua#3179).
     Write-Host ""
-    Write-Host "Auto-start: 'cua-driver-local-serve' is NOT registered - registration failed above." -ForegroundColor Yellow
-    Write-Host "  cua-driver-local autostart enable    (retry; accept the UAC prompt)" -ForegroundColor Yellow
-    Write-Host "  cua-driver-local autostart status    (inspect)" -ForegroundColor Yellow
+    Write-Host "Auto-start: 'opensky-driver-serve' is NOT registered - registration failed above." -ForegroundColor Yellow
+    Write-Host "  opensky-driver autostart enable    (retry; accept the UAC prompt)" -ForegroundColor Yellow
+    Write-Host "  opensky-driver autostart status    (inspect)" -ForegroundColor Yellow
     Write-Host ""
 } else {
     # Opt-out branch (-NoAutoStart or -AutoStart:`$false`).

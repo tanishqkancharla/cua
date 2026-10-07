@@ -111,9 +111,9 @@ def test_runner_defaults_match_installer_and_runtime_identity() -> None:
 
     completed = _run(
         RUN_ALL,
-        'printf "app=%s\\nbin=%s\\nplist=%s\\nsocket=%s\\ncn=%s\\n" '
+        'printf "app=%s\\nbin=%s\\nplist=%s\\nsocket=%s\\ncn=%s\\nclient=%s\\napprovals=%s\\n" '
         '"$LOCAL_APP" "$INSTALLED_BIN" "$LOCAL_PLIST" '
-        '"$CUA_E2E_MACOS_DAEMON_SOCKET" "$SIGNING_CN"',
+        '"$CUA_E2E_MACOS_DAEMON_SOCKET" "$SIGNING_CN" "$SCREEN_CAPTURE_CLIENT" "$SCREEN_CAPTURE_APPROVALS"',
         env={"CUA_E2E_MACOS_DAEMON_SOCKET": "", "CUA_E2E_SIGNING_CN": ""},
     )
     assert completed.returncode == 0, completed.stderr
@@ -123,6 +123,8 @@ def test_runner_defaults_match_installer_and_runtime_identity() -> None:
     assert fields["plist"] == str(Path.home() / "Library/LaunchAgents" / f"{client}.plist")
     assert fields["socket"] == str(Path.home() / "Library/Caches" / namespace / f"{namespace}.sock")
     assert fields["cn"] == signing_cn.group(1)
+    assert fields["client"] == client
+    assert fields["approvals"] == str(Path.home() / "Library/Group Containers/group.com.apple.replayd/ScreenCaptureApprovals.plist")
 
     host_seed = SEED_TCC.read_text()
     guest_seed = SEED_TCC_GUEST.read_text()
@@ -864,11 +866,11 @@ fi
     assert approvals.parent.is_dir()
     recorded = calls.read_text(encoding="utf-8").splitlines()
     assert recorded == [
-        f"defaults write {approvals} com.trycua.driver.local -dict "
+        f"defaults write {approvals} com.opensky.driver -dict "
         "kScreenCaptureApprovalLastAlerted -date 3024-01-01 00:00:00 +0000 "
         "kScreenCaptureApprovalLastUsed -date 3024-01-01 00:00:00 +0000",
         "killall -HUP replayd",
-        f"defaults read {approvals} com.trycua.driver.local",
+        f"defaults read {approvals} com.opensky.driver",
     ]
     evidence = (artifact_dir / "screen-capture-approval.txt").read_text(encoding="utf-8")
     assert "kScreenCaptureApprovalLastAlerted" in evidence
@@ -1239,8 +1241,8 @@ fi
     codesign_calls = codesign_log.read_text(encoding="utf-8").splitlines()
     assert len(codesign_calls) == 2
     assert codesign_calls[0].startswith(
-        "--force --timestamp=none --sign CuaDriver Local Signing "
-        f"(cua-driver-rs) --keychain {signing_keychain} "
+        "--force --timestamp=none --sign OpenSky Driver Signing "
+        f"--keychain {signing_keychain} "
     )
     probe_binary = codesign_calls[0].rsplit(" ", 1)[1]
     assert codesign_calls[1] == f"--verify --strict {probe_binary}"

@@ -9,21 +9,29 @@ that confirmed a task which was never created (trycua/cua#3179).
 from __future__ import annotations
 
 from pathlib import Path
+import shutil
+import subprocess
+import sys
 
 import pytest
 
 SCRIPTS = Path(__file__).resolve().parents[1]
+REPO_ROOT = SCRIPTS.parents[2]
+sys.path.insert(0, str(REPO_ROOT / ".github/scripts"))
+from validate_release_versions import driver_release_powershell_path
+
+POWERSHELL = shutil.which("pwsh") or shutil.which("powershell")
 
 # (installer, closing summary line, task name)
 INSTALLERS = [
     pytest.param(
-        SCRIPTS / "install.ps1",
+        driver_release_powershell_path(REPO_ROOT),
         "Auto-start: 'cua-driver-serve' is registered at RunLevel=Highest.",
         id="install.ps1",
     ),
     pytest.param(
         SCRIPTS / "install-local.ps1",
-        "Auto-start: 'cua-driver-local-serve' is registered at RunLevel=Highest.",
+        "Auto-start: 'opensky-driver-serve' is registered at RunLevel=Highest.",
         id="install-local.ps1",
     ),
 ]
@@ -86,7 +94,38 @@ def test_registration_outcome_is_only_recorded_after_a_successful_call(
 def test_failed_registration_is_reported_in_the_summary(installer: Path, summary: str) -> None:
     text = installer.read_text(encoding="utf-8")
 
-    assert "is NOT registered - registration failed above." in text, (
+    task = "opensky-driver-serve" if installer.name == "install-local.ps1" else "cua-driver-serve"
+    assert f"Auto-start: '{task}' is NOT registered - registration failed above." in text, (
         f"{installer.name} must tell the user autostart is missing when -AutoStart was "
         "requested but registration failed"
     )
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="requires PowerShell")
+@pytest.mark.parametrize(("installer", "summary"), INSTALLERS)
+def test_failed_registration_output_names_the_actual_task_and_retry(
+    tmp_path: Path, installer: Path, summary: str
+) -> None:
+    """Execute only the real closing output branch, with no installation or task creation."""
+    source = installer.read_text(encoding="utf-8-sig")
+    tail = source[source.index("# Windows-specific autostart hint"):]
+    if installer.name == "install-local.ps1":
+        tail = tail[:tail.index("# Native tools such as")]
+        cli = "opensky-driver"
+    else:
+        tail = tail[:tail.index("\n}\nfinally {")]
+        cli = "cua-driver"
+    probe = tmp_path / "summary.ps1"
+    probe.write_text(
+        "$SkipIsolatedAutostart = $false\n$AutoStartRegistered = $false\n"
+        "$AutoStart = $true\n" + tail, encoding="utf-8"
+    )
+    result = subprocess.run(
+        [POWERSHELL, "-NoProfile", "-NonInteractive", "-File", str(probe)],
+        capture_output=True, text=True, timeout=60, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert f"Auto-start: '{cli}-serve' is NOT registered - registration failed above." in result.stdout
+    assert f"{cli} autostart enable    (retry; accept the UAC prompt)" in result.stdout
+    assert f"{cli} autostart status    (inspect)" in result.stdout
+    assert "is registered at RunLevel=Highest" not in result.stdout

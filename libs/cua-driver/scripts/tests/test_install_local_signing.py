@@ -1,9 +1,14 @@
 from pathlib import Path
 import os
 import subprocess
+import sys
 
 
 SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+REPO_ROOT = SCRIPTS_DIR.parents[2]
+sys.path.insert(0, str(REPO_ROOT / ".github/scripts"))
+from validate_release_versions import driver_release_powershell_path
+
 SIGNING_HELPER = SCRIPTS_DIR / "_local-signing.sh"
 
 
@@ -67,7 +72,7 @@ def test_ad_hoc_fallback_is_prominent_and_reports_cdhash() -> None:
     )
 
     assert result.returncode == 0, result.stderr
-    assert "WARNING: CuaDriverLocal.app was signed ad-hoc" in result.stderr
+    assert "WARNING: OpenSkyDriver.app was signed ad-hoc" in result.stderr
     assert "WILL become invalid on the next rebuild" in result.stderr
     assert "designated requirement uses cdhash" in result.stderr
 
@@ -108,11 +113,11 @@ def test_changed_ad_hoc_requirement_resets_only_local_driver_services() -> None:
 
     assert result.returncode == 0, result.stderr
     assert result.stdout == (
-        "reset:Accessibility:com.trycua.driver.local\n"
-        "reset:ScreenCapture:com.trycua.driver.local\n"
+        "reset:Accessibility:com.opensky.driver\n"
+        "reset:ScreenCapture:com.opensky.driver\n"
     )
     assert "cleared stale Accessibility and Screen Recording rows" in result.stderr
-    assert "cua-driver-local permissions grant" in result.stderr
+    assert "opensky-driver permissions grant" in result.stderr
 
 
 def test_unchanged_or_certificate_requirements_preserve_tcc_rows() -> None:
@@ -146,8 +151,8 @@ def test_ad_hoc_tcc_reset_failure_is_actionable_and_fails_closed() -> None:
 
     assert result.returncode == 0, result.stderr
     assert "could not reset these TCC services" in result.stderr
-    assert "tccutil reset Accessibility com.trycua.driver.local" in result.stderr
-    assert "tccutil reset ScreenCapture com.trycua.driver.local" in result.stderr
+    assert "tccutil reset Accessibility com.opensky.driver" in result.stderr
+    assert "tccutil reset ScreenCapture com.opensky.driver" in result.stderr
 
 
 def test_installer_verifies_the_copied_designated_requirement() -> None:
@@ -165,9 +170,9 @@ def test_local_installer_uses_a_separate_macos_identity() -> None:
     """Local rebuilds never replace or reset the release app identity (#2230)."""
     script = (SCRIPTS_DIR / "_install-local-rust.sh").read_text()
 
-    assert 'APP_DEST="/Applications/CuaDriverLocal.app"' in script
-    assert 'CFBundleIdentifier -string "com.trycua.driver.local"' in script
-    assert 'CFBundleExecutable -string "cua-driver-local"' in script
+    assert 'APP_DEST="/Applications/OpenSkyDriver.app"' in script
+    assert 'CFBundleIdentifier -string "com.opensky.driver"' in script
+    assert 'CFBundleExecutable -string "opensky-driver"' in script
     assert "tccutil reset" not in script
 
 
@@ -175,10 +180,10 @@ def test_unix_local_installer_uses_separate_paths_and_autostart() -> None:
     """Local install state, command, and service names coexist with release."""
     script = (SCRIPTS_DIR / "_install-local-rust.sh").read_text()
 
-    assert 'HOME_DIR="${CUA_DRIVER_LOCAL_HOME:-$HOME/.cua-driver-local}"' in script
-    assert "BIN_DIR/cua-driver-local" in script
-    assert "com.trycua.cua-driver-local.plist" in script
-    assert "cua-driver-local.service" in script
+    assert 'HOME_DIR="${CUA_DRIVER_LOCAL_HOME:-$HOME/.opensky-driver}"' in script
+    assert "BIN_DIR/opensky-driver" in script
+    assert "com.opensky.driver.plist" in script
+    assert "opensky-driver.service" in script
     assert "stop_cua_driver_daemons" not in script
 
 
@@ -206,16 +211,16 @@ def test_windows_local_installer_always_embeds_source_provenance() -> None:
 def test_windows_local_installer_uses_separate_paths_and_autostart() -> None:
     script = (SCRIPTS_DIR / "install-local.ps1").read_text()
 
-    assert '$BinaryName  = "cua-driver-local.exe"' in script
-    assert '"Programs\\Cua\\cua-driver-local\\bin"' in script
-    assert '".cua-driver-local"' in script
-    assert '"cua-driver-local-serve"' in script
+    assert '$BinaryName  = "opensky-driver.exe"' in script
+    assert '"Programs\\Cua\\opensky-driver\\bin"' in script
+    assert '".opensky-driver"' in script
+    assert '"opensky-driver-serve"' in script
     assert "Repair-CuaDriverStaleDaemon" not in script
 
 
 def test_release_installers_do_not_target_local_product_artifacts() -> None:
-    for name in ("_install-rust.sh", "install.ps1"):
-        script = (SCRIPTS_DIR / name).read_text()
+    for installer in (SCRIPTS_DIR / "_install-rust.sh", driver_release_powershell_path(REPO_ROOT)):
+        script = installer.read_text()
         assert "CuaDriverLocal" not in script
         assert ".cua-driver-local" not in script
         assert "cua-driver-local-serve" not in script
