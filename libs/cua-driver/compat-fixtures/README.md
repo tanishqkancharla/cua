@@ -46,3 +46,13 @@ RFC 2549 independently accepts one additive CLI change: `cua-driver mcp
 Linux, signed app service on macOS), while `--socket` continues to select an
 explicit service. The semantic compatibility test permits that additive flag
 without rewriting the frozen `cli.json` baseline.
+
+## OpenSky source product identity
+
+The OpenSky source distribution independently declares its product in
+`installer-distribution.json`. The driver integration owner verifies its strict
+source-build schema and product identity, then checks that identity in the CLI
+usage header and MCP server name. The released Cua JSON snapshots remain
+byte-for-byte unchanged. Every other CLI catalog/argument, manifest, protocol,
+capability, tool-field and refusal assertion continues to use that frozen
+baseline; the source identity exception does not relax those contracts.
