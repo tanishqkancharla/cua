@@ -124,15 +124,25 @@ impl Driver for CliDriver {
 
         let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
         let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        // The CLI prints structuredContent (pretty JSON) or plain text — parse
-        // when it's JSON, else keep it as text.
-        let structured = serde_json::from_str::<Value>(&stdout).unwrap_or(Value::Null);
+        // Success prints the DTO directly; tool errors deliberately retain the
+        // full CallTool.Result envelope so diagnostics and isError are not lost.
+        // Normalize only that explicit error shape, preserving the raw JSON for
+        // transport owners that assert the CLI's public envelope.
+        let raw = serde_json::from_str::<Value>(&stdout).unwrap_or(Value::Null);
         let is_error = !out.status.success();
+        let structured = if is_error
+            && raw.get("isError").and_then(Value::as_bool) == Some(true)
+            && raw.get("content").is_some_and(Value::is_array)
+        {
+            raw.get("structuredContent").cloned().unwrap_or(Value::Null)
+        } else {
+            raw.clone()
+        };
         let text = if stdout.is_empty() && is_error {
             stderr
         } else {
             stdout
         };
-        ToolResponse::new(text, structured, is_error, Value::Null)
+        ToolResponse::new(text, structured, is_error, raw)
     }
 }
