@@ -120,7 +120,9 @@ jobs:
             libs/cua-driver/scripts/tests/test_installer_bash32_syntax.py \
             .github/scripts/tests/test_driver_script_encoding.py
       - name: Test Computer History purge during uninstall
-        run: /bin/bash libs/cua-driver/scripts/tests/uninstall-history-purge-test.sh
+        run: |
+          UNINSTALLER="$(python .github/scripts/validate_release_versions.py --print-driver-release-uninstaller unix)"
+          /bin/bash libs/cua-driver/scripts/tests/uninstall-history-purge-test.sh "$UNINSTALLER"
 
   windows-uninstall:
     runs-on: windows-latest
@@ -133,7 +135,10 @@ jobs:
           persist-credentials: false
       - name: Test Windows release uninstall reporting
         shell: powershell
-        run: '& ./libs/cua-driver/scripts/tests/uninstall-windows-regression.ps1'
+        run: |
+          $Uninstaller = python .github/scripts/validate_release_versions.py --print-driver-release-uninstaller windows
+          if ($LASTEXITCODE -ne 0) { throw "Could not select the release uninstaller fixture" }
+          & ./libs/cua-driver/scripts/tests/uninstall-windows-regression.ps1 -UninstallerPath $Uninstaller
       - name: Test Windows installer daemon cleanup spares its launcher
         shell: powershell
         run: '& ./libs/cua-driver/scripts/tests/install-common-windows-regression.ps1'
@@ -165,7 +170,9 @@ jobs:
         run: python -m pytest libs/cua-driver/scripts/tests/ -v
 
       - name: Test Computer History purge during uninstall
-        run: bash libs/cua-driver/scripts/tests/uninstall-history-purge-test.sh
+        run: |
+          UNINSTALLER="$(python .github/scripts/validate_release_versions.py --print-driver-release-uninstaller unix)"
+          bash libs/cua-driver/scripts/tests/uninstall-history-purge-test.sh "$UNINSTALLER"
 
       - name: Test private evidence cache, envelope, and sanitizer contracts
         run: python -m pytest libs/cua-driver/tests/perception-demo/ -v

@@ -9,6 +9,7 @@ from validate_release_versions import (
     VersionError,
     driver_installer_withdrawn_versions,
     driver_release_powershell_path,
+    driver_release_uninstaller_path,
     driver_withdrawn_versions,
     main,
     validate,
@@ -74,6 +75,8 @@ def copy_release_sources(destination: Path, *, source_build: bool = True) -> Non
         base = destination / "libs/cua-driver"
         (base / "installer-distribution.json").unlink()
         shutil.copy(base / "scripts/_upstream-install.ps1", base / "scripts/install.ps1")
+        for suffix in ("sh", "ps1"):
+            shutil.copy(base / f"scripts/_upstream-uninstall.{suffix}", base / f"scripts/uninstall.{suffix}")
 
 
 def test_current_release_versions_agree():
@@ -457,6 +460,11 @@ def test_missing_source_declaration_cannot_bypass_release_metadata(tmp_path: Pat
     ("scripts/install.ps1", "install-local.ps1", "_upstream-install.ps1"),
     ("scripts/install.ps1", " @PSBoundParameters", ""),
     ("scripts/install.ps1", "exit $LASTEXITCODE", "exit 0"),
+    ("scripts/uninstall.sh", "uninstall-local.sh", "_upstream-uninstall.sh"),
+    ("scripts/uninstall.sh", ' "$@"', ""),
+    ("scripts/uninstall.ps1", "uninstall-local.ps1", "_upstream-uninstall.ps1"),
+    ("scripts/uninstall.ps1", " @PSBoundParameters", ""),
+    ("scripts/uninstall.ps1", "exit $LASTEXITCODE", "exit 0"),
 ])
 def test_source_build_route_drift_refused_before_release_validation(tmp_path: Path, relative: str, old: str | None, new: str):
     copy_release_sources(tmp_path)
@@ -481,9 +489,27 @@ def test_unknown_source_distribution_refused(tmp_path: Path, field: str, value):
         validate(tmp_path,"driver")
 
 
-@pytest.mark.parametrize("delegate", ["install-local.sh","install-local.ps1"])
+@pytest.mark.parametrize("delegate", ["install-local.sh","install-local.ps1","uninstall-local.sh","uninstall-local.ps1"])
 def test_source_build_requires_both_real_delegates(tmp_path: Path, delegate: str):
     copy_release_sources(tmp_path)
     (tmp_path / "libs/cua-driver/scripts" / delegate).unlink()
     with pytest.raises(VersionError, match=f"missing source-build installer delegate: {re.escape(delegate)}"):
         validate(tmp_path,"driver")
+
+
+@pytest.mark.parametrize("source_build", [True, False])
+@pytest.mark.parametrize("platform,suffix", [("unix", "sh"), ("windows", "ps1")])
+def test_uninstaller_cli_selects_the_validated_product_reference(tmp_path, capsys, source_build, platform, suffix):
+    copy_release_sources(tmp_path, source_build=source_build)
+    prefix = "_upstream-" if source_build else ""
+    expected = tmp_path / "libs/cua-driver/scripts" / f"{prefix}uninstall.{suffix}"
+    assert main(["--repo-root", str(tmp_path), "--print-driver-release-uninstaller", platform]) == 0
+    assert capsys.readouterr().out == str(expected) + "\n"
+
+
+@pytest.mark.parametrize("platform,suffix", [("unix", "sh"), ("windows", "ps1")])
+def test_missing_preserved_uninstaller_refused(tmp_path, platform, suffix):
+    copy_release_sources(tmp_path)
+    (tmp_path / "libs/cua-driver/scripts" / f"_upstream-uninstall.{suffix}").unlink()
+    with pytest.raises(VersionError, match=f"missing driver release uninstaller reference: _upstream-uninstall.{suffix}"):
+        driver_release_uninstaller_path(tmp_path, platform)

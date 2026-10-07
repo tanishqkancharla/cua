@@ -79,16 +79,42 @@ def driver_release_powershell_path(root: Path) -> Path:
             "exit $LASTEXITCODE",
         ],
     }
+    routes.update({
+        "scripts/uninstall.sh": [
+            "set -euo pipefail",
+            'SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"',
+            'exec /bin/bash "$SCRIPT_DIR/uninstall-local.sh" "$@"',
+        ],
+        "scripts/uninstall.ps1": [
+            "[CmdletBinding()]",
+            "param([switch]$Force, [switch]$ValidateOnly)",
+            '& (Join-Path $PSScriptRoot "uninstall-local.ps1") @PSBoundParameters',
+            "exit $LASTEXITCODE",
+        ],
+    })
     for relative, approved in routes.items():
         lines = (base / relative).read_text(encoding="utf-8-sig").splitlines()
         code = [line.strip() for line in lines
                 if line.strip() and not line.lstrip().startswith("#")]
         if code != approved:
             raise VersionError(f"source-build installer route drift: {relative}")
-    for delegate in ("install-local.sh", "install-local.ps1"):
+    for delegate in ("install-local.sh", "install-local.ps1", "uninstall-local.sh", "uninstall-local.ps1"):
         if not (base / "scripts" / delegate).is_file():
             raise VersionError(f"missing source-build installer delegate: {delegate}")
     return base / expected["preservedReleasePowerShell"]
+
+
+def driver_release_uninstaller_path(root: Path, platform: str) -> Path:
+    """Select guarded release fixtures without executing an uninstaller."""
+    if platform not in {"unix", "windows"}:
+        raise VersionError(f"unsupported driver uninstaller platform: {platform}")
+    reference = driver_release_powershell_path(root)
+    prefix = "_upstream-" if reference.name == "_upstream-install.ps1" else ""
+    suffix = "sh" if platform == "unix" else "ps1"
+    path = root / "libs/cua-driver/scripts" / f"{prefix}uninstall.{suffix}"
+    if not path.is_file():
+        raise VersionError(f"missing driver release uninstaller reference: {path.name}")
+    return path
 
 
 def driver_installer_versions(root: Path) -> dict[str, str]:
@@ -399,8 +425,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         choices=("all", "driver", "perception", "lume", "sandbox", "spacesd", "sdk", "spaces"),
         default="all",
     )
+    parser.add_argument(
+        "--print-driver-release-uninstaller", choices=("unix", "windows"),
+        help="Print a validated release fixture reference; never run or install it.",
+    )
     args = parser.parse_args(argv)
     try:
+        if args.print_driver_release_uninstaller:
+            print(driver_release_uninstaller_path(
+                args.repo_root.resolve(), args.print_driver_release_uninstaller,
+            ))
+            return 0
         validate(args.repo_root.resolve(), args.product)
     except (KeyError, OSError, VersionError, ValueError) as error:
         print(f"release version error: {error}", file=sys.stderr)
