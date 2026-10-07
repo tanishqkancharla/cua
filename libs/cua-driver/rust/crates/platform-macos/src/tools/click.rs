@@ -231,7 +231,7 @@ fn nearest_selectable_container_center(element_ptr: usize) -> Option<(f64, f64)>
 
     for _ in 0..8 {
         let role = unsafe { copy_string_attr(current, "AXRole") }.unwrap_or_default();
-        if matches!(role.as_str(), "AXRow" | "AXCell" | "AXListItem" | "AXImage")
+        if crate::input::ax_actions::is_collection_selection_element(current, &role)
             && unsafe { copy_bool_attr(current, "AXSelected") }.is_some()
         {
             let center = unsafe { element_screen_rect(current) }
