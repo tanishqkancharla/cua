@@ -25,6 +25,30 @@ pub fn is_collection_selection_element(element: AXUIElementRef, role: &str) -> b
     if role != "AXTextField" {
         return false;
     }
+    // Existing collection rows keep priority over their rename-capable label.
+    // Clicking the label itself can start Finder's inline name editor.
+    let mut parent = unsafe { copy_element_attr(element, "AXParent") };
+    for _ in 0..MAX_SELECTION_ANCESTORS {
+        let Some(current) = parent else {
+            break;
+        };
+        let parent_role = unsafe { copy_string_attr(current, "AXRole") }.unwrap_or_default();
+        let selectable = is_selectable_container_role(&parent_role)
+            && unsafe { copy_bool_attr(current, "AXSelected") }.is_some();
+        let next = if selectable || matches!(parent_role.as_str(), "AXWindow" | "AXApplication") {
+            None
+        } else {
+            unsafe { copy_element_attr(current, "AXParent") }
+        };
+        unsafe { CFRelease(current as CFTypeRef) };
+        if selectable {
+            return false;
+        }
+        parent = next;
+    }
+    if let Some(remaining) = parent {
+        unsafe { CFRelease(remaining as CFTypeRef) };
+    }
     let has_open = unsafe { copy_action_names(element) }
         .iter()
         .any(|action| action == "AXOpen");
