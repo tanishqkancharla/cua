@@ -12,7 +12,10 @@
 //! `perform_action`, `set_value`, and `get_element_bounds` index into that same
 //! ordered set.
 
-use std::sync::OnceLock;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, OnceLock,
+};
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
@@ -45,6 +48,8 @@ tokio::task_local! {
     /// otherwise be allowed the full [`CALL_TIMEOUT`]. Set via [`bounded_for`]
     /// / [`walk_tree_bounded_with_timeout`]; absent for legacy callers.
     static OP_DEADLINE: tokio::time::Instant;
+    /// Sticky after a text mutation is dispatched; an unknown result must not replay.
+    static EDIT_DISPATCHED: Arc<AtomicBool>;
 }
 
 /// Time left on the current operation's deadline, or [`CALL_TIMEOUT`] when no
@@ -133,6 +138,50 @@ fn bounded<T>(
     bounded_for(OP_TIMEOUT, work, on_timeout)
 }
 
+/// An edit was dispatched before an error or timeout. Keep this identity through
+/// lookup and input fallbacks; a second delivery can duplicate a partial write.
+#[derive(Debug)]
+pub(crate) struct EditDispatched;
+impl std::fmt::Display for EditDispatched {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AT-SPI text edit may have changed the target; observe before retrying")
+    }
+}
+impl std::error::Error for EditDispatched {}
+pub(crate) fn edit_was_dispatched(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<EditDispatched>().is_some()
+}
+
+fn mark_edit_dispatched() {
+    let _ = EDIT_DISPATCHED.try_with(|phase| phase.store(true, Ordering::Relaxed));
+}
+
+// An explicit false acknowledgement can permit a retry only if an earlier
+// mutation (such as deleting a selected range) has not already succeeded.
+async fn editable_mutation(
+    work: impl std::future::Future<Output = atspi::zbus::Result<bool>>,
+) -> Result<bool> {
+    if remaining_budget().is_zero() {
+        return Err(anyhow!("AT-SPI text edit budget exhausted"));
+    }
+    let prior = EDIT_DISPATCHED
+        .try_with(|phase| phase.load(Ordering::Relaxed))
+        .unwrap_or(false);
+    mark_edit_dispatched();
+    let result = work
+        .await
+        .map_err(|error| anyhow!("AT-SPI text edit failed: {error}"))?;
+    if !result {
+        let _ = EDIT_DISPATCHED.try_with(|phase| phase.store(prior, Ordering::Relaxed));
+        if prior {
+            return Err(anyhow!(
+                "AT-SPI insertion rejected after selection deletion"
+            ));
+        }
+    }
+    Ok(result)
+}
+
 /// [`bounded`] with an explicit budget. The budget is also installed as the
 /// operation deadline, so every inner [`call`] shortens itself to what is
 /// left and the walk returns *partial* results before the outer timeout fires
@@ -145,9 +194,26 @@ fn bounded_for<T>(
     runtime().block_on(async move {
         let deadline = tokio::time::Instant::now() + budget;
         let backstop = deadline + Duration::from_millis(500);
-        match tokio::time::timeout_at(backstop, OP_DEADLINE.scope(deadline, work)).await {
+        let phase = Arc::new(AtomicBool::new(false));
+        let result = match tokio::time::timeout_at(
+            backstop,
+            EDIT_DISPATCHED.scope(phase.clone(), OP_DEADLINE.scope(deadline, work)),
+        )
+        .await
+        {
             Ok(r) => r,
+            Err(_) if phase.load(Ordering::Relaxed) => Err(anyhow!(EditDispatched)),
             Err(_) => on_timeout(),
+        };
+        if phase.load(Ordering::Relaxed) {
+            // Some legacy timeout callbacks return Ok(false). Once a mutation
+            // started that is an uncertain edit, not permission to fall back.
+            match result {
+                Ok(value) => Ok(value),
+                Err(error) => Err(error.context(EditDispatched)),
+            }
+        } else {
+            result
         }
     })
 }
@@ -2790,19 +2856,33 @@ async fn write_through_editable_proxies(
         .await
         .map_err(|e| anyhow!("EditableText unavailable: {e}"))?;
 
-    let off = match proxies.text().await {
-        Ok(tp) => tp.caret_offset().await.unwrap_or(0),
-        Err(_) => 0,
+    // InsertText itself does not replace selected text. Read the selection
+    // before dispatch, and never guess an offset or overwrite the whole field.
+    let tp = proxies
+        .text()
+        .await
+        .map_err(|e| anyhow!("Text unavailable: {e}"))?;
+    let selections = tp.get_n_selections().await?;
+    let off = match selections {
+        0 => tp.caret_offset().await?,
+        1 => {
+            let (start, end) = tp.get_selection(0).await?;
+            if start < 0 || end < start {
+                anyhow::bail!("invalid AT-SPI text selection");
+            }
+            dlog!("editable selection: {start}..{end}");
+            if end > start && !editable_mutation(et.delete_text(start, end)).await? {
+                return Ok(false);
+            }
+            start
+        }
+        _ => anyhow::bail!("cannot type into {selections} AT-SPI selections"),
     };
-    let len = text.chars().count() as i32;
-
-    if et.insert_text(off, text, len).await.unwrap_or(false) {
-        return Ok(true);
+    if off < 0 {
+        anyhow::bail!("invalid AT-SPI caret offset");
     }
-    if et.set_text_contents(text).await.unwrap_or(false) {
-        return Ok(true);
-    }
-    Ok(false)
+    let len = i32::try_from(text.chars().count())?;
+    editable_mutation(et.insert_text(off, text, len)).await
 }
 
 /// Write into the best editable exposed by the current AT-SPI tree without
@@ -2813,7 +2893,7 @@ pub fn type_into_editable(pid: u32, text: &str) -> Result<()> {
         async {
             let conn = shared_connection().await?;
             // Focused editable known from the event log: write there directly.
-            if let Some(true) = write_into_focused_editable(conn, pid, text).await {
+            if let Some(true) = write_into_focused_editable(conn, pid, text).await? {
                 return Ok(());
             }
             let Collected {
@@ -2885,7 +2965,7 @@ pub fn insert_text(pid: u32, text: &str) -> Result<bool> {
         INPUT_QUERY_BUDGET,
         async {
             let conn = shared_connection().await?;
-            if let Some(true) = write_into_focused_editable(conn, pid, text).await {
+            if let Some(true) = write_into_focused_editable(conn, pid, text).await? {
                 return Ok(true);
             }
             let Collected {
@@ -2976,10 +3056,8 @@ pub fn insert_text(pid: u32, text: &str) -> Result<bool> {
 
                             // Now type via X11 XSendEvent — the entry widget has internal focus
                             // so it should accept the keystrokes even though the window is unfocused.
-                            if let Err(e) = crate::input::send_type_text(xid, text) {
-                                dlog!("GTK3 fallback: send_type_text failed: {e}");
-                                return Ok(false);
-                            }
+                            mark_edit_dispatched();
+                            crate::input::send_type_text(xid, text)?;
 
                             dlog!("GTK3 fallback: X11 click+type succeeded");
                             return Ok(true);
@@ -3810,18 +3888,29 @@ async fn write_into_focused_editable(
     conn: &AccessibilityConnection,
     pid: u32,
     text: &str,
-) -> Option<bool> {
-    let (acc, oref) = focused_accessible_via_events(conn, pid).await?;
-    let ifaces = call(acc.get_interfaces()).await?.ok()?;
+) -> Result<Option<bool>> {
+    let Some((acc, oref)) = focused_accessible_via_events(conn, pid).await else {
+        return Ok(None);
+    };
+    let Some(Ok(ifaces)) = call(acc.get_interfaces()).await else {
+        return Ok(None);
+    };
     if !ifaces.contains(Interface::EditableText) {
         dlog!("focused object {} is not editable", oref.path);
-        return Some(false);
+        return Ok(Some(false));
     }
     match write_into_editable_acc(&acc, ifaces.contains(Interface::Component), text).await {
-        Ok(written) => Some(written),
+        Ok(written) => Ok(Some(written)),
         Err(error) => {
-            dlog!("focused editable write failed: {error:#}");
-            Some(false)
+            // Only pre-dispatch lookup failures can move to another target.
+            if EDIT_DISPATCHED
+                .try_with(|phase| phase.load(Ordering::Relaxed))
+                .unwrap_or(false)
+            {
+                return Err(error);
+            }
+            dlog!("focused editable lookup failed: {error:#}");
+            Ok(Some(false))
         }
     }
 }
@@ -7131,6 +7220,62 @@ mod coord_tests {
 #[cfg(test)]
 mod budget_tests {
     use super::*;
+
+    #[test]
+    fn rejected_first_edit_can_fall_back_but_rejection_after_delete_cannot() {
+        let rejected = bounded_for(
+            INPUT_QUERY_BUDGET,
+            async { editable_mutation(async { Ok(false) }).await },
+            || Ok(false),
+        );
+        assert!(!rejected.unwrap());
+        let partial = bounded_for(
+            INPUT_QUERY_BUDGET,
+            async {
+                assert!(editable_mutation(async { Ok(true) }).await?);
+                editable_mutation(async { Ok(false) }).await
+            },
+            || Ok(false),
+        );
+        let error = partial.unwrap_err();
+        assert!(edit_was_dispatched(&error));
+        assert!(format!("{error:#}").contains("insertion rejected after selection deletion"));
+        // The next operation does not inherit the previous operation's phase.
+        assert!(!bounded_for(INPUT_QUERY_BUDGET, async { Ok(false) }, || Ok(false)).unwrap());
+    }
+
+    #[test]
+    fn lost_edit_reply_retains_dispatch_identity_through_error_context() {
+        let error = bounded_for(
+            INPUT_QUERY_BUDGET,
+            async {
+                editable_mutation(async { Err(atspi::zbus::Error::Failure("lost reply".into())) })
+                    .await
+            },
+            || Ok(false),
+        )
+        .unwrap_err()
+        .context("cached target resolution");
+        assert!(edit_was_dispatched(&error));
+        assert!(format!("{error:#}").contains("lost reply"));
+    }
+
+    #[test]
+    fn timed_out_edit_cannot_be_reported_as_a_safe_lookup_miss() {
+        let error = bounded_for(
+            Duration::from_millis(10),
+            async {
+                editable_mutation(async {
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                    Ok(true)
+                })
+                .await
+            },
+            || Ok(false),
+        )
+        .unwrap_err();
+        assert!(edit_was_dispatched(&error));
+    }
 
     #[test]
     fn focus_log_tracks_latest_focused_object_per_bus_and_clears_on_blur() {
