@@ -8,6 +8,7 @@ import pytest
 from validate_release_versions import (
     VersionError,
     driver_installer_withdrawn_versions,
+    driver_release_powershell_path,
     driver_withdrawn_versions,
     main,
     validate,
@@ -17,7 +18,7 @@ from validate_release_versions import (
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
-def copy_release_sources(destination: Path) -> None:
+def copy_release_sources(destination: Path, *, source_build: bool = True) -> None:
     config = "scripts/docs-generators/config.json"
     (destination / config).parent.mkdir(parents=True, exist_ok=True)
     shutil.copy(REPO_ROOT / config, destination / config)
@@ -66,6 +67,13 @@ def copy_release_sources(destination: Path) -> None:
     for product in ("cua-driver", "lume"):
         docs = f"docs/content/docs/{product}/reference"
         shutil.copytree(REPO_ROOT / docs, destination / docs)
+
+    if not source_build:
+        # The actual retained upstream script is the metadata authority in a
+        # default Cua release fixture. Never add fake sentinels to source routes.
+        base = destination / "libs/cua-driver"
+        (base / "installer-distribution.json").unlink()
+        shutil.copy(base / "scripts/_upstream-install.ps1", base / "scripts/install.ps1")
 
 
 def test_current_release_versions_agree():
@@ -216,7 +224,7 @@ def set_driver_installer_versions(
             flags=re.MULTILINE,
         )
     )
-    powershell = root / "libs/cua-driver/scripts/install.ps1"
+    powershell = driver_release_powershell_path(root)
     powershell_source = powershell.read_text()
     powershell.write_text(
         re.sub(
@@ -229,8 +237,9 @@ def set_driver_installer_versions(
     )
 
 
-def test_driver_validation_allows_installer_to_lag_until_publication(tmp_path: Path):
-    copy_release_sources(tmp_path)
+@pytest.mark.parametrize("source_build", [True, False])
+def test_driver_validation_allows_installer_to_lag_until_publication(tmp_path: Path, source_build: bool):
+    copy_release_sources(tmp_path, source_build=source_build)
     set_driver_installer_versions(
         tmp_path, shell_version="0.0.0", powershell_version="0.0.0"
     )
@@ -238,8 +247,9 @@ def test_driver_validation_allows_installer_to_lag_until_publication(tmp_path: P
     validate(tmp_path, "driver")
 
 
-def test_driver_validation_rejects_disagreeing_installer_versions(tmp_path: Path):
-    copy_release_sources(tmp_path)
+@pytest.mark.parametrize("source_build", [True, False])
+def test_driver_validation_rejects_disagreeing_installer_versions(tmp_path: Path, source_build: bool):
+    copy_release_sources(tmp_path, source_build=source_build)
     set_driver_installer_versions(
         tmp_path, shell_version="0.0.0", powershell_version="0.0.1"
     )
@@ -248,8 +258,9 @@ def test_driver_validation_rejects_disagreeing_installer_versions(tmp_path: Path
         validate(tmp_path, "driver")
 
 
-def test_driver_validation_rejects_installer_version_ahead_of_source(tmp_path: Path):
-    copy_release_sources(tmp_path)
+@pytest.mark.parametrize("source_build", [True, False])
+def test_driver_validation_rejects_installer_version_ahead_of_source(tmp_path: Path, source_build: bool):
+    copy_release_sources(tmp_path, source_build=source_build)
     set_driver_installer_versions(
         tmp_path, shell_version="9.9.9", powershell_version="9.9.9"
     )
@@ -258,8 +269,9 @@ def test_driver_validation_rejects_installer_version_ahead_of_source(tmp_path: P
         validate(tmp_path, "driver")
 
 
-def test_withdrawn_release_can_never_be_baked(tmp_path: Path):
-    copy_release_sources(tmp_path)
+@pytest.mark.parametrize("source_build", [True, False])
+def test_withdrawn_release_can_never_be_baked(tmp_path: Path, source_build: bool):
+    copy_release_sources(tmp_path, source_build=source_build)
     published = (
         tmp_path / ".github/release-state/cua-driver-rs-published-version"
     ).read_text().strip()
@@ -289,7 +301,7 @@ def test_installer_withdrawn_lists_mirror_release_state():
     assert "0.28.3" in listed
     assert baked == {
         "scripts/_install-rust.sh": listed,
-        "scripts/install.ps1": listed,
+        "scripts/_upstream-install.ps1": listed,
     }
 
 
@@ -302,7 +314,7 @@ def test_installer_withdrawn_lists_mirror_release_state():
             'CUA_DRIVER_RS_WITHDRAWN_VERSIONS=""',
         ),
         (
-            "libs/cua-driver/scripts/install.ps1",
+            "libs/cua-driver/scripts/_upstream-install.ps1",
             "$Script:CuaDriverRsWithdrawnVersions = @('0.28.3')",
             "$Script:CuaDriverRsWithdrawnVersions = @('0.28.3', '0.28.1')",
         ),
@@ -415,3 +427,63 @@ def test_sdk_version_drift_fails(tmp_path: Path, source: str, expected: str):
         path.write_text(path.read_text().replace(f'version = "{current}"', 'version = "9.9.9"', 1))
     with pytest.raises(VersionError, match=re.escape(expected)):
         validate(tmp_path, "sdk")
+
+
+def test_default_cua_release_installer_remains_strict(tmp_path: Path):
+    copy_release_sources(tmp_path)
+    base = tmp_path / "libs/cua-driver"
+    (base / "installer-distribution.json").unlink()
+    public = base / "scripts/install.ps1"
+    shutil.copy(base / "scripts/_upstream-install.ps1", public)
+    assert driver_release_powershell_path(tmp_path) == public
+    validate(tmp_path, "all")
+    set_driver_installer_versions(tmp_path, shell_version="0.0.0", powershell_version="0.0.1")
+    with pytest.raises(VersionError, match="baked installers"):
+        validate(tmp_path, "driver")
+
+
+def test_missing_source_declaration_cannot_bypass_release_metadata(tmp_path: Path):
+    copy_release_sources(tmp_path)
+    (tmp_path / "libs/cua-driver/installer-distribution.json").unlink()
+    with pytest.raises(VersionError, match="could not read a release version.*install.ps1"):
+        validate(tmp_path, "driver")
+
+
+@pytest.mark.parametrize("relative,old,new", [
+    ("scripts/install.sh", None, "exit 0"),
+    ("scripts/install.ps1", None, "exit 0"),
+    ("scripts/install.sh", "install-local.sh", "_install-rust.sh"),
+    ("scripts/install.sh", ' "$@"', ""),
+    ("scripts/install.ps1", "install-local.ps1", "_upstream-install.ps1"),
+    ("scripts/install.ps1", " @PSBoundParameters", ""),
+    ("scripts/install.ps1", "exit $LASTEXITCODE", "exit 0"),
+])
+def test_source_build_route_drift_refused_before_release_validation(tmp_path: Path, relative: str, old: str | None, new: str):
+    copy_release_sources(tmp_path)
+    path = tmp_path / "libs/cua-driver" / relative
+    original = path.read_text()
+    if old is not None:
+        assert old in original
+        changed = original.replace(old, new)
+    else:
+        changed = original + "\n" + new + " # undeclared route\n"
+    path.write_text(changed)
+    with pytest.raises(VersionError, match=f"source-build installer route drift: {re.escape(relative)}"):
+        validate(tmp_path, "driver")
+
+
+@pytest.mark.parametrize("field,value", [("schemaVersion",2),("schemaVersion",True),("product","cua-driver"),("distribution","release"),("preservedReleasePowerShell","scripts/install.ps1"),("undeclared",True)])
+def test_unknown_source_distribution_refused(tmp_path: Path, field: str, value):
+    copy_release_sources(tmp_path)
+    path=tmp_path / "libs/cua-driver/installer-distribution.json"
+    data=json.loads(path.read_text());data[field]=value;path.write_text(json.dumps(data))
+    with pytest.raises(VersionError, match="unsupported driver installer distribution declaration"):
+        validate(tmp_path,"driver")
+
+
+@pytest.mark.parametrize("delegate", ["install-local.sh","install-local.ps1"])
+def test_source_build_requires_both_real_delegates(tmp_path: Path, delegate: str):
+    copy_release_sources(tmp_path)
+    (tmp_path / "libs/cua-driver/scripts" / delegate).unlink()
+    with pytest.raises(VersionError, match=f"missing source-build installer delegate: {re.escape(delegate)}"):
+        validate(tmp_path,"driver")

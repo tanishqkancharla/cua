@@ -41,7 +41,7 @@ Fork release artifacts are not assumed. OpenSky CI must set `OPENSKY_DRIVER_REF`
 
 See [driver follow-ups](libs/cua-driver/docs/opensky-followups.md) and [validation](libs/cua-driver/docs/opensky-validation.md). Renaming and isolating the backend does not resolve the deferred desktop parity gaps.
 
-Private `_upstream-*` scripts and `_install-rust.sh` retain upstream release tooling for merges and regression tests. OpenSky’s public entry points and runtime updater never call them.
+Private `_upstream-*` scripts and `_install-rust.sh` retain upstream release tooling for merges and regression tests. OpenSky’s public entry points and runtime updater never call them. Internal `libs/cua-driver/installer-distribution.json` declares this source-build distribution: CI verifies the public delegation routes, then checks preserved Cua published-version and withdrawal metadata independently. Those Cua versions do not describe an OpenSky binary release.
 
 ## Remote validation
 

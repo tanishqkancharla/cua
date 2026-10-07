@@ -1,15 +1,16 @@
-# cua-driver scripts
+# OpenSky Driver scripts
 
-Install, uninstall, local-build, and VM sync helpers for cua-driver.
+Source install/uninstall helpers for OpenSky Driver, plus preserved upstream release tooling.
 
 | Script | Purpose |
 | --- | --- |
-| `install.sh` / `install.ps1` | Install released cua-driver binaries |
-| `install-local.sh` / `install-local.ps1` | Build this checkout as the separate `cua-driver-local` product |
-| `uninstall-local.sh` / `uninstall-local.ps1` | Remove only the source-built `cua-driver-local` product |
+| `install.sh` / `install.ps1` | Build this OpenSky checkout through the source installer |
+| `install-local.sh` / `install-local.ps1` | Build this checkout as the separate `opensky-driver` product |
+| `uninstall-local.sh` / `uninstall-local.ps1` | Remove only the source-built `opensky-driver` product |
 | `uninstall.sh` / `uninstall.ps1` | Remove installed driver artifacts |
 | `_install-common.sh` / `_install-common.psm1` | Shared install helper logic |
-| `_install-rust.sh` / `_install-local-rust.sh` | Rust build/install internals |
+| `_install-rust.sh` / `_upstream-install.ps1` | Preserved upstream release reference; never public OpenSky routes |
+| `_install-local-rust.sh` | OpenSky source build/install internals |
 | `sync-vm-worktree.sh` | Sync this checkout to verification VMs and pull artifacts back |
 | `post-install-hints.txt` | User-facing hints printed by install scripts |
 

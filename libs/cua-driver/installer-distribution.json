@@ -1,0 +1,6 @@
+{
+  "schemaVersion": 1,
+  "product": "opensky-driver",
+  "distribution": "source-build",
+  "preservedReleasePowerShell": "scripts/_upstream-install.ps1"
+}
