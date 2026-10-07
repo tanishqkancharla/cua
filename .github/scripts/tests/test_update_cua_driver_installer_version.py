@@ -1,5 +1,7 @@
 from pathlib import Path
 
+from validate_release_versions import driver_release_powershell_path
+
 import pytest
 
 from update_cua_driver_installer_version import (
@@ -20,7 +22,7 @@ def copy_installers(tmp_path: Path) -> tuple[Path, Path, Path]:
     shell = tmp_path / "_install-rust.sh"
     powershell = tmp_path / "install.ps1"
     shell.write_bytes((source / shell.name).read_bytes())
-    powershell.write_bytes((source / powershell.name).read_bytes())
+    powershell.write_bytes(driver_release_powershell_path(REPO_ROOT).read_bytes())
     state = tmp_path / "published-version"
     state.write_bytes(
         (

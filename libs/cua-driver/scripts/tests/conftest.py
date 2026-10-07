@@ -11,7 +11,10 @@ import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
-UNINSTALL = REPO_ROOT / "libs/cua-driver/scripts/uninstall.sh"
+sys.path.insert(0, str(REPO_ROOT / ".github/scripts"))
+from validate_release_versions import driver_release_uninstaller_path
+
+UNINSTALL = driver_release_uninstaller_path(REPO_ROOT, "unix")
 
 
 class ReleaseInstall:

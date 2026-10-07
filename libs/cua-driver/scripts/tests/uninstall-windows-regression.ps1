@@ -1,4 +1,7 @@
-param([string]$CaseName)
+param(
+    [string]$CaseName,
+    [string]$UninstallerPath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'uninstall.ps1')
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -35,6 +38,7 @@ if (-not $FixtureRoot) {
             $Root = Join-Path $RunRoot $Name
             [void][IO.Directory]::CreateDirectory($Root)
             $Arguments = "-NoLogo -NoProfile -NonInteractive -File `"$PSCommandPath`" -CaseName $Name"
+            $Arguments += " -UninstallerPath `"$UninstallerPath`""
             $Start = [Diagnostics.ProcessStartInfo]::new("$PSHOME\powershell.exe", $Arguments)
             $Start.UseShellExecute = $false
             $Start.WorkingDirectory = $Root
@@ -121,7 +125,7 @@ if ($FixtureCase['Command']) {
         [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($Path))
         [IO.File]::WriteAllText($Path, 'fixture payload')
     }
-    $Uninstaller = Join-Path (Split-Path -Parent $PSScriptRoot) 'uninstall.ps1'
+    $Uninstaller = $UninstallerPath
     if ($CaseName -eq 'file-entrypoint') {
         $FixtureOutput = & $Uninstaller 6>&1
         $FixtureSucceeded = $?

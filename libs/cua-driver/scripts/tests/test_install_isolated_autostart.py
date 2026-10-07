@@ -11,13 +11,17 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
-INSTALL = REPO_ROOT / "libs/cua-driver/scripts/install.ps1"
+sys.path.insert(0, str(REPO_ROOT / ".github/scripts"))
+from validate_release_versions import driver_release_powershell_path
+
+INSTALL = driver_release_powershell_path(REPO_ROOT)
 AUTOSTART = REPO_ROOT / "libs/cua-driver/rust/crates/cua-driver/src/autostart.rs"
 
 POWERSHELL = shutil.which("pwsh") or shutil.which("powershell")

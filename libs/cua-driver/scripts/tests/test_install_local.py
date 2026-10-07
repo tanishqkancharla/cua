@@ -13,7 +13,6 @@ LOCAL_SIGNING = INSTALL_LOCAL.with_name("_local-signing.sh")
 DISPATCHER = INSTALL_LOCAL.with_name("install-local.sh")
 WINDOWS_INSTALL_LOCAL = INSTALL_LOCAL.with_name("install-local.ps1")
 POST_INSTALL_HINTS = INSTALL_LOCAL.with_name("post-install-hints.txt")
-MIGRATION_WARNING = "Existing MCP clients configured for 'cua-driver' will not use this local build."
 SKILL_PACK = INSTALL_LOCAL.parents[1] / "rust/Skills/cua-driver"
 
 
@@ -31,19 +30,6 @@ def test_local_installers_stage_the_canonical_skill_pack() -> None:
         "WINDOWS.md",
         "LINUX.md",
     }
-
-
-def test_windows_local_install_reports_missing_release_cli_without_aliasing_it() -> None:
-    """Windows twin of the Unix migration note asserted by the real install run below."""
-    installer = WINDOWS_INSTALL_LOCAL.read_text(encoding="utf-8-sig")
-
-    hints = installer.index("$hintsRaw -replace")
-    warning = installer.index("if (-not (Test-Path -LiteralPath $releaseBinary -PathType Leaf))")
-    assert hints < warning
-    assert MIGRATION_WARNING in installer[warning:]
-    assert "$installedBinary mcp-config --client codex" in installer[warning:]
-    assert "irm https://cua.ai/driver/install.ps1 | iex" in installer[warning:]
-    assert "New-Item -ItemType SymbolicLink" not in installer[warning:]
 
 
 def _write_executable(path: Path, body: str) -> None:
@@ -220,17 +206,20 @@ esac
     assert (installed_helper / "metadata.json").read_text() == '{"version":5}\n'
     assert (installed_helper / "extension.js").read_text() == "// semantic cursor v5\n"
 
-    # No published CLI exists here, so the installer explains the migration
-    # after the shared hints instead of aliasing the local build to it.
+    # The public source product stages its own CLI and gives actionable SDK hints.
     release_bin = install_bin / "cua-driver"
     assert not release_bin.exists() and not release_bin.is_symlink()
-    hints = output.index(f"{install_bin}/cua-driver-local list-tools")
-    note = output.index(f"the published cua-driver CLI is not installed at {release_bin}")
-    assert hints < note
-    migration = output[note:]
-    assert MIGRATION_WARNING in migration
-    assert f"{install_bin}/cua-driver-local mcp-config --client codex" in migration
-    assert "https://cua.ai/driver/install.sh" in migration
+    for hint in (
+        f"{install_bin}/opensky-driver --version",
+        f"{install_bin}/opensky-driver --opensky-driver-identity",
+        f"{install_bin}/opensky-driver permissions grant",
+        "opensky doctor",
+        "https://github.com/tanishqkancharla/opensky",
+        f"{install_bin}/opensky-driver skills install",
+    ):
+        assert hint in output
+    assert "https://cua.ai/driver/install" not in output
+
 
 
 def _linux_fixture(tmp_path: Path) -> tuple[Path, Path, dict[str, str]]:

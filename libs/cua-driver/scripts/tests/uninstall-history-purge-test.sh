@@ -2,8 +2,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-UNINSTALL="$SCRIPT_DIR/../uninstall.sh"
-FIXTURE="$(mktemp -d)"
+UNINSTALL="${1:-$SCRIPT_DIR/../uninstall.sh}"
+FIXTURE="$(mktemp -d "${TMPDIR:-/tmp}/cua-uninstall.XXXXXX")"
+trap 'rm -rf -- "$FIXTURE"' EXIT
 APP="$FIXTURE/CuaDriver.app"
 HELPER="$APP/Contents/MacOS/cua-driver"
 STATE="$FIXTURE/computer-history"
@@ -25,6 +26,16 @@ exit 0
 SH
 chmod +x "$FIXTURE/codesign"
 
+# System Bash can exit successfully when `source` cannot find its file.
+# Refuse before sourcing, and never execute a public source-product wrapper.
+if [[ ! -f "$UNINSTALL" || ! -r "$UNINSTALL" ]]; then
+    printf 'uninstall fixture source unavailable: %s\n' "$UNINSTALL" >&2
+    exit 1
+fi
+if ! grep -Fq 'CUA_DRIVER_UNINSTALL_TEST_SOURCE_ONLY' "$UNINSTALL"; then
+    printf 'uninstall fixture requires the source-only release seam: %s\n' "$UNINSTALL" >&2
+    exit 2
+fi
 CUA_DRIVER_UNINSTALL_TEST_SOURCE_ONLY=1 source "$UNINSTALL"
 export UNINSTALL_FIXTURE_LOG="$LOG"
 if reject_root_invocation 0 2> "$FIXTURE/root-error.log"; then
