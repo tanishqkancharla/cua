@@ -84,9 +84,10 @@ impl ClickTool {
 
 static DEF: std::sync::OnceLock<ToolDef> = std::sync::OnceLock::new();
 
-/// A visual primary click is not authority to invent an unadvertised AXPress.
-/// Select the physical route before dispatch, never as a post-AX-error retry.
-fn primary_button_needs_pointer(
+/// AXPress expresses one primary button click. Safari toolbar buttons can
+/// enumerate only custom actions while still implementing this standard action.
+/// Select one semantic attempt before dispatch; never replay it physically.
+fn unadvertised_primary_button(
     role: &str,
     advertised: &[String],
     action: &str,
@@ -104,20 +105,20 @@ fn primary_button_needs_pointer(
 
 #[cfg(test)]
 mod primary_button_tests {
-    use super::primary_button_needs_pointer;
+    use super::unadvertised_primary_button;
 
     #[test]
-    fn unadvertised_primary_button_uses_physical_intent() {
+    fn unadvertised_primary_button_keeps_standard_primary_intent() {
         for actions in [
             vec![],
             vec!["AXShowMenu".into()],
             vec!["Name:Move next\nTarget:0x0".into()],
         ] {
-            assert!(primary_button_needs_pointer(
+            assert!(unadvertised_primary_button(
                 "AXButton", &actions, "press", "left", 1, false
             ));
         }
-        assert!(!primary_button_needs_pointer(
+        assert!(!unadvertised_primary_button(
             "AXButton",
             &["AXPress".into()],
             "press",
@@ -136,7 +137,7 @@ mod primary_button_tests {
             "AXTextField",
             "AXGroup",
         ] {
-            assert!(!primary_button_needs_pointer(
+            assert!(!unadvertised_primary_button(
                 role,
                 &[],
                 "press",
@@ -146,7 +147,7 @@ mod primary_button_tests {
             ));
         }
         for action in ["show_menu", "increment", "close tab"] {
-            assert!(!primary_button_needs_pointer(
+            assert!(!unadvertised_primary_button(
                 "AXButton",
                 &[],
                 action,
@@ -159,7 +160,7 @@ mod primary_button_tests {
 
     #[test]
     fn modified_and_non_single_left_gestures_are_not_plain_primary_clicks() {
-        assert!(!primary_button_needs_pointer(
+        assert!(!unadvertised_primary_button(
             "AXButton",
             &[],
             "press",
@@ -168,7 +169,7 @@ mod primary_button_tests {
             true
         ));
         for button in ["right", "middle"] {
-            assert!(!primary_button_needs_pointer(
+            assert!(!unadvertised_primary_button(
                 "AXButton",
                 &[],
                 "press",
@@ -178,7 +179,7 @@ mod primary_button_tests {
             ));
         }
         for count in [0, 2, 3] {
-            assert!(!primary_button_needs_pointer(
+            assert!(!unadvertised_primary_button(
                 "AXButton",
                 &[],
                 "press",
@@ -685,7 +686,7 @@ impl Tool for ClickTool {
         {
             let element_ptr = element_guard.as_ptr();
 
-            let button_pointer = match tokio::task::spawn_blocking({
+            let primary_button_ax = match tokio::task::spawn_blocking({
                 let action = action.clone();
                 let button = button_str.clone();
                 let has_modifiers = !modifiers.is_empty();
@@ -693,7 +694,7 @@ impl Tool for ClickTool {
                     let element = element_ptr as AXUIElementRef;
                     let role = copy_string_attr(element, "AXRole")
                         .ok_or_else(|| anyhow::anyhow!("current element role unavailable"))?;
-                    Ok::<_, anyhow::Error>(primary_button_needs_pointer(
+                    Ok::<_, anyhow::Error>(unadvertised_primary_button(
                         &role,
                         &copy_action_names(element),
                         &action,
@@ -717,14 +718,6 @@ impl Tool for ClickTool {
                     ))
                 }
             };
-            if button_pointer && !delivery_mode.is_foreground() {
-                return ToolResult::error("This button has no advertised AXPress; a primary click requires exact-window foreground physical delivery. No input was sent.")
-                    .with_structured(serde_json::json!({
-                        "code": "background_unavailable", "effect": "refused", "dispatch_attempted": false,
-                        "stage": "before_input", "escalation": {"recommended": "foreground"}
-                    }));
-            }
-
             let sidebar_pointer = button_str == "left"
                 && action == "press"
                 && modifiers.is_empty()
@@ -864,82 +857,66 @@ impl Tool for ClickTool {
                 self.state.cursor_registry.note_press(&cursor_key, cx, cy);
             }
 
-            if button_pointer {
-                let Some((cx, cy)) = center else {
-                    return ToolResult::error(
-                        "Button has no usable current pointer geometry; no input was sent",
-                    );
+            if primary_button_ax {
+                let prior_front = apps::frontmost_pid();
+                let foreground = delivery_mode.is_foreground();
+                let snapshot = if foreground {
+                    WindowChangeDetector::snapshot_without_suppression(prior_front)
+                } else {
+                    WindowChangeDetector::snapshot(prior_front)
                 };
-                let frame = match super::px_frame::resolve_or_refuse(wid).await {
-                    Ok(frame) => frame,
-                    Err(refusal) => return refusal,
-                };
-                if cx < frame.bounds.x
-                    || cy < frame.bounds.y
-                    || cx >= frame.bounds.x + frame.bounds.width
-                    || cy >= frame.bounds.y + frame.bounds.height
-                {
-                    return ToolResult::error(
-                        "Button center is outside the exact window; no input was sent",
-                    );
-                }
-                let snapshot =
-                    WindowChangeDetector::snapshot_without_suppression(apps::frontmost_pid());
-                let result = tokio::task::spawn_blocking(move || {
-                    crate::input::skylight::with_foreground_hid_activation(pid, wid, || unsafe {
-                        let element = element_ptr as AXUIElementRef;
-                        let mut actual_pid = 0;
-                        if crate::ax::bindings::AXUIElementGetPid(element, &mut actual_pid)
-                            != kAXErrorSuccess
-                            || actual_pid != pid
-                            || crate::ax::exact_target::element_window_id(element) != Some(wid)
-                        {
-                            anyhow::bail!(
-                                "button is no longer in the exact target window; no input was sent"
-                            );
-                        }
-                        if !primary_button_needs_pointer(
-                            &copy_string_attr(element, "AXRole").unwrap_or_default(),
-                            &copy_action_names(element),
-                            "press",
-                            "left",
-                            1,
-                            false,
-                        ) {
-                            anyhow::bail!(
-                                "button primary action changed; observe again before input"
-                            );
-                        }
-                        crate::input::ax_actions::ensure_ax_action_enabled(element_ptr, "AXPress")?;
-                        let live = crate::ax::bindings::element_screen_center(element).ok_or_else(
-                            || anyhow::anyhow!("button geometry unavailable; no input was sent"),
-                        )?;
-                        if (live.0 - cx).abs() > 0.5 || (live.1 - cy).abs() > 0.5 {
-                            anyhow::bail!(
-                                "button geometry changed during activation; no input was sent"
-                            );
-                        }
-                        crate::input::mouse::click_at_xy_desktop_with_modifiers_preserving_cursor(
-                            cx,
-                            cy,
-                            1,
-                            "left",
-                            &[],
-                        )
-                    })
-                })
-                .await;
+                let result = focus_guard::with_focus_suppressed(
+                    if foreground { None } else { Some(pid) },
+                    prior_front,
+                    "click.primaryAXPress",
+                    || async move {
+                        tokio::task::spawn_blocking(move || {
+                            let action = || unsafe {
+                                let element = element_ptr as AXUIElementRef;
+                                let mut actual_pid = 0;
+                                if crate::ax::bindings::AXUIElementGetPid(element, &mut actual_pid)
+                                    != kAXErrorSuccess
+                                    || actual_pid != pid
+                                    || crate::ax::exact_target::element_window_id(element) != Some(wid)
+                                {
+                                    anyhow::bail!("button is no longer in the exact target window; no action was sent");
+                                }
+                                if copy_string_attr(element, "AXRole").as_deref() != Some("AXButton") {
+                                    anyhow::bail!("primary button role changed; observe again before input");
+                                }
+                                crate::input::ax_actions::ensure_ax_action_enabled(element_ptr, "AXPress")?;
+                                let status = crate::ax::bindings::perform_action(element, "AXPress");
+                                if status != kAXErrorSuccess {
+                                    // No pointer/shortcut retry, even when enumeration omitted
+                                    // AXPress or its RPC outcome is uncertain after dispatch.
+                                    return Err(AxActionOutcomeUnknown {
+                                        action: "AXPress".into(),
+                                        code: status,
+                                    }.into());
+                                }
+                                Ok(())
+                            };
+                            if foreground {
+                                crate::input::skylight::with_foreground_hid_activation(pid, wid, action)
+                            } else {
+                                action()
+                            }
+                        }).await
+                    },
+                ).await;
                 let changes = super::finish_window_observation(snapshot).await;
                 return match result {
                     Ok(Ok(())) => ToolResult::text(format!(
-                        "Clicked button [{idx}] once in exact window {wid} using foreground physical input; confirm the effect in the next observation.{}",
+                        "Dispatched AXPress once on primary button [{idx}] in exact window {wid}; its action enumeration omitted AXPress. Confirm the effect in the next observation.{}",
                         changes.result_suffix(),
                     )).with_structured(serde_json::json!({
-                        "path": "cgevent_hid", "verified": false, "effect": "unverifiable",
-                        "dispatch_attempted": true, "ax_action_attempted": false,
+                        "path": if foreground { "ax_fg" } else { "ax" },
+                        "verified": false, "effect": "unverifiable",
+                        "dispatch_attempted": true, "ax_action_attempted": true,
+                        "action": "AXPress", "action_enumeration": "omitted",
                     })),
-                    Ok(Err(error)) => ToolResult::error(format!("Physical button click failed: {error}")),
-                    Err(error) => ToolResult::error(format!("Physical button click task failed: {error}")),
+                    Ok(Err(error)) => ax_action_error(error),
+                    Err(error) => ToolResult::error(format!("Primary button AX task failed: {error}")),
                 };
             }
 
