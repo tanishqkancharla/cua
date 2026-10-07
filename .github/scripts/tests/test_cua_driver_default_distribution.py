@@ -1,12 +1,14 @@
 from pathlib import Path
 import re
 
+from validate_release_versions import driver_release_powershell_path
+
 
 ROOT = Path(__file__).resolve().parents[3]
 WORKFLOW = ROOT / ".github/workflows/cd-rust-cua-driver.yml"
 PERCEPTION_WORKFLOW = ROOT / ".github/workflows/ci-cua-perception-release.yml"
 UNIX_INSTALLER = ROOT / "libs/cua-driver/scripts/_install-rust.sh"
-WINDOWS_INSTALLER = ROOT / "libs/cua-driver/scripts/install.ps1"
+WINDOWS_INSTALLER = driver_release_powershell_path(ROOT)
 
 FORBIDDEN_DISTRIBUTION_TOKENS = (
     "cua-perception",

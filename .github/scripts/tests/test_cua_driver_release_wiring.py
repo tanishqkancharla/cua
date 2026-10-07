@@ -8,8 +8,12 @@ import tempfile
 import textwrap
 import unittest
 
+from validate_release_versions import driver_release_powershell_path
+
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
+RELEASE_POWERSHELL = driver_release_powershell_path(REPO_ROOT)
+SOURCE_BUILD = RELEASE_POWERSHELL.name == "_upstream-install.ps1"
 
 
 class TestCuaDriverReleaseWiring(unittest.TestCase):
@@ -562,7 +566,7 @@ fi
             cleanup,
         )
 
-        powershell = self.read("libs/cua-driver/scripts/install.ps1")
+        powershell = RELEASE_POWERSHELL.read_text(encoding="utf-8-sig")
         cleanup = powershell.index("Remove-Item -LiteralPath $LegacyHomeDir -Recurse -Force")
         self.assertLess(
             powershell.index(
@@ -580,14 +584,14 @@ fi
         self.assertIn('CURSOR_THEME_REQUIRED_FROM="0.12.7"', shell)
         self.assertIn('"$VERSION" "$CURSOR_THEME_REQUIRED_FROM"', shell)
 
-        powershell = self.read("libs/cua-driver/scripts/install.ps1")
+        powershell = RELEASE_POWERSHELL.read_text(encoding="utf-8-sig")
         self.assertIn('$CursorThemeRequiredFrom = [version]"0.12.7"', powershell)
         self.assertIn("[version]$version -ge $CursorThemeRequiredFrom", powershell)
 
     def test_windows_installer_elevates_autostart_binary_without_command_string(
         self,
     ) -> None:
-        powershell = self.read("libs/cua-driver/scripts/install.ps1")
+        powershell = RELEASE_POWERSHELL.read_text(encoding="utf-8-sig")
         block = powershell.split(
             "function Register-CuaDriverAutostart {", maxsplit=1
         )[1].split(
@@ -608,8 +612,9 @@ fi
     def test_local_installer_does_not_clean_release_or_legacy_homes(self) -> None:
         installer = self.read("libs/cua-driver/scripts/_install-local-rust.sh")
 
+        local_home = ".opensky-driver" if SOURCE_BUILD else ".cua-driver-local"
         self.assertIn(
-            'HOME_DIR="${CUA_DRIVER_LOCAL_HOME:-$HOME/.cua-driver-local}"',
+            f'HOME_DIR="${{CUA_DRIVER_LOCAL_HOME:-$HOME/{local_home}}}"',
             installer,
         )
         self.assertNotIn("LEGACY_HOME_DIR", installer)
@@ -620,13 +625,28 @@ fi
         installer = self.read("libs/cua-driver/scripts/_install-local-rust.sh")
         shared_hints = self.read("libs/cua-driver/scripts/post-install-hints.txt")
 
-        self.assertIn('permission prompts say \\"Cua Driver Local\\"', installer)
+        identity = "OpenSky Driver" if SOURCE_BUILD else "Cua Driver Local"
+        self.assertIn(f'permission prompts say \\"{identity}\\"', installer)
         self.assertNotIn('permission prompts say \\"Cua Driver\\"', installer)
-        self.assertIn("launches the installed", shared_hints)
+        if SOURCE_BUILD:
+            self.assertIn("permissions grant", shared_hints)
+            self.assertIn("macOS: grant to OpenSky Driver", shared_hints)
+            self.assertNotIn("grant to Cua Driver", shared_hints)
+        else:
+            self.assertIn("launches the installed", shared_hints)
         self.assertNotIn("launches CuaDriver", shared_hints)
 
     def test_post_install_hints_include_muse_stdio_mcp_config(self) -> None:
         shared_hints = self.read("libs/cua-driver/scripts/post-install-hints.txt")
+
+        if SOURCE_BUILD:
+            self.assertIn("OpenSky Driver is installed.", shared_hints)
+            self.assertIn("opensky doctor", shared_hints)
+            self.assertIn("Use the OpenSky SDK and skill", shared_hints)
+            self.assertIn("https://github.com/tanishqkancharla/opensky", shared_hints)
+            self.assertIn("{{BINARY}} skills install", shared_hints)
+            self.assertNotIn('"mcp_servers": {', shared_hints)
+            return
 
         self.assertIn("Muse Code (macOS / Linux", shared_hints)
         self.assertIn("$XDG_CONFIG_HOME/muse/settings.json", shared_hints)
@@ -639,8 +659,16 @@ fi
     def test_post_install_hints_use_canonical_capability_manifest_flags(self) -> None:
         shared_hints = self.read("libs/cua-driver/scripts/post-install-hints.txt")
 
-        self.assertIn("--capability-manifest", shared_hints)
-        self.assertIn("--approve-capability-manifest", shared_hints)
+        if SOURCE_BUILD:
+            # Token-only OpenSky grants use the identity/permissions commands;
+            # do not advertise Cua's incompatible capability grant templates.
+            self.assertIn("{{BINARY}} --opensky-driver-identity", shared_hints)
+            self.assertIn("{{BINARY}} permissions grant", shared_hints)
+            self.assertNotIn("--capability-manifest", shared_hints)
+            self.assertNotIn("--approve-capability-manifest", shared_hints)
+        else:
+            self.assertIn("--capability-manifest", shared_hints)
+            self.assertIn("--approve-capability-manifest", shared_hints)
         self.assertNotIn("--session-policy", shared_hints)
         self.assertNotIn("--approve-session-policy", shared_hints)
 
@@ -684,7 +712,7 @@ fi
         self.assertLess(hint, shell.index('ditto "$SRC_APP" "$APP_DEST"'))
         self.assertLess(hint, shell.index('mv -Tf "$TMP_LINK" "$CURRENT_LINK"'))
 
-        powershell = self.read("libs/cua-driver/scripts/install.ps1")
+        powershell = RELEASE_POWERSHELL.read_text(encoding="utf-8-sig")
         hint = powershell.index("Set-Content -LiteralPath $telemetryHintPath")
         self.assertLess(hint, powershell.index("Ensure-Junction $CurrentDir    $versionedDir"))
 
@@ -698,7 +726,7 @@ fi
         self.assertIn('"telemetry_enabled"', shell)
         self.assertIn('[[ "$TELEMETRY_HINT_ENABLED" == "1" ]]', shell)
 
-        powershell = self.read("libs/cua-driver/scripts/install.ps1")
+        powershell = RELEASE_POWERSHELL.read_text(encoding="utf-8-sig")
         self.assertIn(
             "@('CUA_DRIVER_RS_TELEMETRY_ENABLED', 'CUA_TELEMETRY_ENABLED')",
             powershell,
