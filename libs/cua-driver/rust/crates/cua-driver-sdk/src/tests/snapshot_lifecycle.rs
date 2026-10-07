@@ -315,6 +315,7 @@ mod native {
                     u64::from(window),
                     AxSnapshot {
                         elements: vec![*ptr],
+                        object_ids: Vec::new(),
                     },
                 );
                 if window == 0 {
