@@ -13,7 +13,7 @@
 //! ordered set.
 
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicU8, Ordering},
     Arc, OnceLock,
 };
 use std::time::Duration;
@@ -48,8 +48,9 @@ tokio::task_local! {
     /// otherwise be allowed the full [`CALL_TIMEOUT`]. Set via [`bounded_for`]
     /// / [`walk_tree_bounded_with_timeout`]; absent for legacy callers.
     static OP_DEADLINE: tokio::time::Instant;
-    /// Sticky after a text mutation is dispatched; an unknown result must not replay.
-    static EDIT_DISPATCHED: Arc<AtomicBool>;
+    /// 0 before mutation, 1 for AT-SPI, 2 for legacy XSendEvent. Sticky after
+    /// dispatch: preserve the actual transport and never replay an unknown edit.
+    static EDIT_DISPATCHED: Arc<AtomicU8>;
 }
 
 /// Time left on the current operation's deadline, or [`CALL_TIMEOUT`] when no
@@ -141,10 +142,27 @@ fn bounded<T>(
 /// An edit was dispatched before an error or timeout. Keep this identity through
 /// lookup and input fallbacks; a second delivery can duplicate a partial write.
 #[derive(Debug)]
-pub(crate) struct EditDispatched;
+pub(crate) struct EditDispatched(u8);
+impl EditDispatched {
+    pub(crate) fn atspi() -> Self {
+        Self(1)
+    }
+    fn path(&self) -> &'static str {
+        if self.0 == 2 {
+            "x11_xsendevent"
+        } else {
+            "ax"
+        }
+    }
+}
+pub(crate) fn edit_dispatch_path(error: &anyhow::Error) -> Option<&'static str> {
+    error
+        .downcast_ref::<EditDispatched>()
+        .map(EditDispatched::path)
+}
 impl std::fmt::Display for EditDispatched {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("AT-SPI text edit may have changed the target; observe before retrying")
+        f.write_str("Text input may have changed the target; observe before retrying")
     }
 }
 impl std::error::Error for EditDispatched {}
@@ -152,8 +170,8 @@ pub(crate) fn edit_was_dispatched(error: &anyhow::Error) -> bool {
     error.downcast_ref::<EditDispatched>().is_some()
 }
 
-fn mark_edit_dispatched() {
-    let _ = EDIT_DISPATCHED.try_with(|phase| phase.store(true, Ordering::Relaxed));
+fn mark_edit_dispatched(transport: u8) {
+    let _ = EDIT_DISPATCHED.try_with(|phase| phase.store(transport, Ordering::Relaxed));
 }
 
 // An explicit false acknowledgement can permit a retry only if an earlier
@@ -166,14 +184,14 @@ async fn editable_mutation(
     }
     let prior = EDIT_DISPATCHED
         .try_with(|phase| phase.load(Ordering::Relaxed))
-        .unwrap_or(false);
-    mark_edit_dispatched();
+        .unwrap_or(0);
+    mark_edit_dispatched(1);
     let result = work
         .await
         .map_err(|error| anyhow!("AT-SPI text edit failed: {error}"))?;
     if !result {
         let _ = EDIT_DISPATCHED.try_with(|phase| phase.store(prior, Ordering::Relaxed));
-        if prior {
+        if prior != 0 {
             return Err(anyhow!(
                 "AT-SPI insertion rejected after selection deletion"
             ));
@@ -194,7 +212,7 @@ fn bounded_for<T>(
     runtime().block_on(async move {
         let deadline = tokio::time::Instant::now() + budget;
         let backstop = deadline + Duration::from_millis(500);
-        let phase = Arc::new(AtomicBool::new(false));
+        let phase = Arc::new(AtomicU8::new(0));
         let result = match tokio::time::timeout_at(
             backstop,
             EDIT_DISPATCHED.scope(phase.clone(), OP_DEADLINE.scope(deadline, work)),
@@ -202,15 +220,17 @@ fn bounded_for<T>(
         .await
         {
             Ok(r) => r,
-            Err(_) if phase.load(Ordering::Relaxed) => Err(anyhow!(EditDispatched)),
+            Err(_) if phase.load(Ordering::Relaxed) != 0 => {
+                Err(anyhow!(EditDispatched(phase.load(Ordering::Relaxed))))
+            }
             Err(_) => on_timeout(),
         };
-        if phase.load(Ordering::Relaxed) {
+        if phase.load(Ordering::Relaxed) != 0 {
             // Some legacy timeout callbacks return Ok(false). Once a mutation
             // started that is an uncertain edit, not permission to fall back.
             match result {
                 Ok(value) => Ok(value),
-                Err(error) => Err(error.context(EditDispatched)),
+                Err(error) => Err(error.context(EditDispatched(phase.load(Ordering::Relaxed)))),
             }
         } else {
             result
@@ -2856,6 +2876,9 @@ async fn write_through_editable_proxies(
         .await
         .map_err(|e| anyhow!("EditableText unavailable: {e}"))?;
 
+    // AT-SPI's InsertText length is UTF-8 bytes; its position/selection offsets
+    // are characters. Validate length before deleting anything.
+    let len = i32::try_from(text.len())?;
     // InsertText itself does not replace selected text. Read the selection
     // before dispatch, and never guess an offset or overwrite the whole field.
     let tp = proxies
@@ -2881,7 +2904,6 @@ async fn write_through_editable_proxies(
     if off < 0 {
         anyhow::bail!("invalid AT-SPI caret offset");
     }
-    let len = i32::try_from(text.chars().count())?;
     editable_mutation(et.insert_text(off, text, len)).await
 }
 
@@ -3056,7 +3078,7 @@ pub fn insert_text(pid: u32, text: &str) -> Result<bool> {
 
                             // Now type via X11 XSendEvent — the entry widget has internal focus
                             // so it should accept the keystrokes even though the window is unfocused.
-                            mark_edit_dispatched();
+                            mark_edit_dispatched(2);
                             crate::input::send_type_text(xid, text)?;
 
                             dlog!("GTK3 fallback: X11 click+type succeeded");
@@ -3905,7 +3927,8 @@ async fn write_into_focused_editable(
             // Only pre-dispatch lookup failures can move to another target.
             if EDIT_DISPATCHED
                 .try_with(|phase| phase.load(Ordering::Relaxed))
-                .unwrap_or(false)
+                .unwrap_or(0)
+                != 0
             {
                 return Err(error);
             }
@@ -7258,6 +7281,23 @@ mod budget_tests {
         .context("cached target resolution");
         assert!(edit_was_dispatched(&error));
         assert!(format!("{error:#}").contains("lost reply"));
+        assert_eq!(edit_dispatch_path(&error), Some("ax"));
+    }
+
+    #[test]
+    fn legacy_keyboard_error_keeps_its_transport_through_dispatch_context() {
+        let error = bounded_for(
+            INPUT_QUERY_BUDGET,
+            async {
+                mark_edit_dispatched(2);
+                Err::<bool, _>(anyhow!("keyboard reply lost"))
+            },
+            || Ok(false),
+        )
+        .unwrap_err()
+        .context("editable fallback");
+        assert!(edit_was_dispatched(&error));
+        assert_eq!(edit_dispatch_path(&error), Some("x11_xsendevent"));
     }
 
     #[test]

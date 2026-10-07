@@ -2512,9 +2512,9 @@ async fn spawn_blocking_bounded<T: Send + 'static>(
 /// message carries one so the caller can branch instead of parsing prose.
 fn input_error_result(e: anyhow::Error) -> ToolResult {
     let text = e.to_string();
-    if crate::atspi::native::edit_was_dispatched(&e) {
+    if let Some(path) = crate::atspi::native::edit_dispatch_path(&e) {
         return ToolResult::error(text.clone()).with_structured(json!({
-            "effect": "unverifiable", "path": "ax", "detail": text,
+            "effect": "unverifiable", "path": path, "detail": text,
         }));
     }
     if crate::input::is_uinput_unavailable(&e) {
@@ -8063,7 +8063,7 @@ impl Tool for TypeTextTool {
             let restored = crate::input::send_focus_out(xid);
             // Preserve a partial edit's identity even when focus restoration fails.
             result?;
-            restored.map_err(|error| error.context(crate::atspi::native::EditDispatched))
+            restored.map_err(|error| error.context(crate::atspi::native::EditDispatched::atspi()))
         })
         .await;
 
