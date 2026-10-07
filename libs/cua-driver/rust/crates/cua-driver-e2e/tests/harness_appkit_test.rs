@@ -876,6 +876,26 @@ fn harness_appkit_stale_element_token_fails_closed() {
                 "stale targeting mutated counter"
             );
             let fresh_token = element_token_by_id(&post, "btn-increment");
+            let probe = driver.call(
+                "get_window_state",
+                serde_json::json!({
+                    "pid": pid, "window_id": wid, "probe_only": true,
+                    "include_screenshot": false,
+                }),
+            );
+            assert!(
+                !probe.is_error(),
+                "exact metadata probe failed: {}",
+                probe.text()
+            );
+            assert_eq!(
+                probe.structured(),
+                &serde_json::json!({
+                    "pid": pid, "window_id": wid, "probe_only": true, "window_matched": true,
+                })
+            );
+            // The following existing effect oracle uses the PRE-probe token:
+            // the probe must not publish a replacement snapshot/cache entry.
             let delivered = driver.call(
                 "click",
                 serde_json::json!({"pid": pid as i64, "element_token": fresh_token}),

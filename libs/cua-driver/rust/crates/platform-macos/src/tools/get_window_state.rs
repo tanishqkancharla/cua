@@ -312,6 +312,34 @@ impl Tool for GetWindowStateTool {
             .unwrap_or(crate::ax::tree::DEFAULT_MAX_DEPTH);
         let timeout_ms = cua_driver_core::tool_schema::resolve_timeout_ms(args.get("timeout_ms"));
 
+        if probe_only {
+            let probe = tokio::task::spawn_blocking(move || {
+                crate::ax::tree::probe_window_scope(pid, window_id, timeout_ms)
+            });
+            let backstop =
+                std::time::Duration::from_millis(timeout_ms) * 2 + AX_WALK_BACKSTOP_GRACE;
+            let scope = match tokio::time::timeout(backstop, probe).await {
+                Ok(Ok(scope)) => scope,
+                Ok(Err(error)) => {
+                    return ToolResult::error(format!("AX window probe failed: {error}"))
+                }
+                Err(_) => {
+                    return ToolResult::error(format!(
+                        "AX window probe for pid={pid} did not return within {} s",
+                        backstop.as_secs()
+                    ))
+                }
+            };
+            if let Some(ref scope) = scope {
+                if let Some(refusal) = window_scope_refusal(pid, window_id, scope) {
+                    return refusal;
+                }
+            }
+            // Exact WindowServer and AX matching are checked; no descendant
+            // walk, snapshot/capture publication or action-cache replacement.
+            return window_probe_result(pid, window_id, scope.as_ref());
+        }
+
         let (tree_result, prepared_snapshot) = if want_tree {
             let q = query.clone();
             // `timeout_ms` bounds the walk itself: it returns the partial tree
@@ -358,12 +386,6 @@ impl Tool for GetWindowStateTool {
             if let Some(refusal) = window_scope_refusal(pid, window_id, scope) {
                 return refusal;
             }
-        }
-        // Public probe responses carry no actionable indices. Return before
-        // touching retained AX refs, token snapshots or screenshot transforms.
-        // WindowServer ownership and the actual AX scope were both checked.
-        if probe_only {
-            return window_probe_result(pid, window_id, window_scope.as_ref());
         }
         // `window_scope` is None only when no window_id was requested, which
         // this tool never does — so treat that as resolved.
