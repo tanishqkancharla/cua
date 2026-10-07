@@ -9,6 +9,57 @@ fn is_selectable_container_role(role: &str) -> bool {
     matches!(role, "AXRow" | "AXCell" | "AXListItem" | "AXImage")
 }
 
+/// File labels can expose AXSelected themselves while AXValue stays settable
+/// for renaming. Native resource/action evidence keeps ordinary editors out.
+fn is_collection_selection_role(role: &str, has_open: bool, resource: Option<&str>) -> bool {
+    is_selectable_container_role(role)
+        || (role == "AXTextField"
+            && has_open
+            && resource.is_some_and(|url| url.starts_with("file:")))
+}
+
+pub fn is_collection_selection_element(element: AXUIElementRef, role: &str) -> bool {
+    if is_selectable_container_role(role) {
+        return true;
+    }
+    if role != "AXTextField" {
+        return false;
+    }
+    // Existing collection rows keep priority over their rename-capable label.
+    // Clicking the label itself can start Finder's inline name editor.
+    let mut parent = unsafe { copy_element_attr(element, "AXParent") };
+    for _ in 0..MAX_SELECTION_ANCESTORS {
+        let Some(current) = parent else {
+            break;
+        };
+        let parent_role = unsafe { copy_string_attr(current, "AXRole") }.unwrap_or_default();
+        let selectable = is_selectable_container_role(&parent_role)
+            && unsafe { copy_bool_attr(current, "AXSelected") }.is_some();
+        let next = if selectable || matches!(parent_role.as_str(), "AXWindow" | "AXApplication") {
+            None
+        } else {
+            unsafe { copy_element_attr(current, "AXParent") }
+        };
+        unsafe { CFRelease(current as CFTypeRef) };
+        if selectable {
+            return false;
+        }
+        parent = next;
+    }
+    if let Some(remaining) = parent {
+        unsafe { CFRelease(remaining as CFTypeRef) };
+    }
+    let has_open = unsafe { copy_action_names(element) }
+        .iter()
+        .any(|action| action == "AXOpen");
+    let resource = if has_open {
+        unsafe { crate::ax::open_document::resource_url(element) }
+    } else {
+        None
+    };
+    is_collection_selection_role(role, has_open, resource.as_deref())
+}
+
 /// Sidebar selection writes can change AXSelected without activating the
 /// navigation destination. Identify only row/cell items in a reported sidebar;
 /// ordinary file collections retain their existing selection semantics.
@@ -69,7 +120,7 @@ pub fn select_nearest_container(element_ptr: usize) -> Option<String> {
 
     for _ in 0..MAX_SELECTION_ANCESTORS {
         let role = unsafe { copy_string_attr(current, "AXRole") }.unwrap_or_default();
-        if is_selectable_container_role(&role)
+        if is_collection_selection_element(current, &role)
             && unsafe { copy_bool_attr(current, "AXSelected") }.is_some()
         {
             let err = unsafe { set_bool_attr_true(current, "AXSelected") };
@@ -107,7 +158,7 @@ pub fn nearest_container_selection_state(element_ptr: usize) -> Option<(String, 
 
     for _ in 0..MAX_SELECTION_ANCESTORS {
         let role = unsafe { copy_string_attr(current, "AXRole") }.unwrap_or_default();
-        if is_selectable_container_role(&role) {
+        if is_collection_selection_element(current, &role) {
             if let Some(selected) = unsafe { copy_bool_attr(current, "AXSelected") } {
                 if owns_current {
                     unsafe { CFRelease(current as CFTypeRef) };
@@ -182,7 +233,7 @@ pub fn capture_nearest_container_selection(element_ptr: usize) -> Option<Selecti
 
     for _ in 0..MAX_SELECTION_ANCESTORS {
         let role = unsafe { copy_string_attr(current, "AXRole") }.unwrap_or_default();
-        if is_selectable_container_role(&role)
+        if is_collection_selection_element(current, &role)
             && unsafe { copy_bool_attr(current, "AXSelected") }.is_some()
         {
             if !owns_current {
@@ -360,6 +411,36 @@ mod advertised_action_tests {
     fn enabled_or_unreported_state_is_allowed() {
         assert!(ensure_ax_enabled(Some(true), "AXPress").is_ok());
         assert!(ensure_ax_enabled(None, "AXPress").is_ok());
+    }
+
+    #[test]
+    fn filename_selection_requires_both_native_file_resource_and_open_action() {
+        assert!(is_collection_selection_role(
+            "AXTextField",
+            true,
+            Some("file:///owned/request.rtf")
+        ));
+        assert!(!is_collection_selection_role(
+            "AXTextField",
+            false,
+            Some("file:///owned/request.rtf")
+        ));
+        assert!(!is_collection_selection_role("AXTextField", true, None));
+        assert!(!is_collection_selection_role(
+            "AXTextField",
+            true,
+            Some("https://example.org")
+        ));
+        assert!(!is_collection_selection_role(
+            "AXTextArea",
+            true,
+            Some("file:///owned/request.rtf")
+        ));
+        assert!(!is_collection_selection_role(
+            "AXComboBox",
+            true,
+            Some("file:///owned/request.rtf")
+        ));
     }
 
     #[test]
