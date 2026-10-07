@@ -13,10 +13,12 @@ use async_trait::async_trait;
 use cua_driver_core::health_report::{
     CheckData, CheckEntry, HealthCheckProvider, NAME_AX_CAPABILITY, NAME_BINARY_VERSION,
     NAME_BUNDLE_IDENTITY, NAME_PLATFORM_SUPPORTED, NAME_SCREEN_CAPTURE_CAPABILITY,
-    NAME_SESSION_ACTIVE, NAME_TCC_ACCESSIBILITY, NAME_TCC_SCREEN_RECORDING,
+    NAME_SESSION_ACTIVE, NAME_TCC_ACCESSIBILITY, NAME_TCC_EVENT_POSTING, NAME_TCC_SCREEN_RECORDING,
 };
 
-use crate::permissions::status::{accessibility_granted, current_status, screen_recording_granted};
+use crate::permissions::status::{
+    accessibility_granted, current_status, event_posting_granted, screen_recording_granted,
+};
 
 /// macOS run order, in the order consumers see them reflected back in
 /// `report.checks[]`. Matches the Swift PR #1905 contract.
@@ -27,6 +29,7 @@ pub const MACOS_CHECK_NAMES: &[&str] = &[
     NAME_BUNDLE_IDENTITY,
     NAME_TCC_ACCESSIBILITY,
     NAME_TCC_SCREEN_RECORDING,
+    NAME_TCC_EVENT_POSTING,
     NAME_AX_CAPABILITY,
     NAME_SCREEN_CAPTURE_CAPABILITY,
 ];
@@ -56,6 +59,9 @@ impl HealthCheckProvider for MacosHealthProvider {
             NAME_BUNDLE_IDENTITY => check_bundle_identity(),
             NAME_TCC_ACCESSIBILITY => check_tcc_accessibility(),
             NAME_TCC_SCREEN_RECORDING => check_tcc_screen_recording(),
+            NAME_TCC_EVENT_POSTING => {
+                event_posting_check(event_posting_granted(), current_bundle_identifier())
+            }
             NAME_AX_CAPABILITY => check_ax_capability(),
             NAME_SCREEN_CAPTURE_CAPABILITY => check_screen_capture_capability(),
             // Defensive: the dispatcher only forwards names in
@@ -183,6 +189,20 @@ fn check_embedded_bundle_identity(
         format!("Embedded daemon is directly hosted by {observed}."),
     )
     .with_data(data)
+}
+
+fn event_posting_check(granted: bool, bundle_identifier: Option<String>) -> CheckEntry {
+    let data = CheckData {
+        bundle_identifier,
+        ..Default::default()
+    };
+    if granted {
+        return CheckEntry::pass(NAME_TCC_EVENT_POSTING,
+            "Core Graphics event posting access is granted. This preflight does not prove that a target consumed an event.").with_data(data);
+    }
+    CheckEntry::fail(NAME_TCC_EVENT_POSTING,
+        "Core Graphics event posting access is NOT granted for this process.",
+        "Check Device Control / Accessibility for the app or executable macOS attributes this process to. For standalone CuaDriver, use its signed application launch and permission setup; for an embedded driver, use the host's permission setup. This read-only probe did not request a permission or post input.").with_data(data)
 }
 
 fn check_tcc_accessibility() -> CheckEntry {
@@ -403,7 +423,11 @@ mod tests {
     #[test]
     fn permission_remediation_preserves_attribution_uncertainty() {
         let mut wrong_hints = Vec::new();
-        for check in [accessibility_check, screen_recording_check] {
+        for check in [
+            accessibility_check,
+            screen_recording_check,
+            event_posting_check,
+        ] {
             for bid in [
                 None,
                 Some(CANONICAL_BUNDLE_ID.to_owned()),
@@ -431,6 +455,22 @@ mod tests {
             }
         }
         assert!(wrong_hints.is_empty(), "{}", wrong_hints.join("\n"));
+    }
+
+    #[test]
+    fn event_posting_readiness_does_not_claim_input_consumption_or_request_a_grant() {
+        let denied = event_posting_check(false, None);
+        assert_eq!(denied.name, NAME_TCC_EVENT_POSTING);
+        assert_eq!(denied.status, CheckStatus::Fail);
+        assert!(denied
+            .hint
+            .unwrap()
+            .contains("did not request a permission or post input"));
+        let granted = event_posting_check(true, None);
+        assert_eq!(granted.status, CheckStatus::Pass);
+        assert!(granted
+            .message
+            .contains("does not prove that a target consumed an event"));
     }
 
     #[test]
