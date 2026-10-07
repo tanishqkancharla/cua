@@ -47,6 +47,8 @@ pub const NAME_SESSION_ACTIVE: &str = "session_active";
 pub const NAME_BUNDLE_IDENTITY: &str = "bundle_identity";
 pub const NAME_TCC_ACCESSIBILITY: &str = "tcc_accessibility";
 pub const NAME_TCC_SCREEN_RECORDING: &str = "tcc_screen_recording";
+/// macOS daemon event-posting preflight; absent on other platforms.
+pub const NAME_TCC_EVENT_POSTING: &str = "tcc_event_posting";
 pub const NAME_AX_CAPABILITY: &str = "ax_capability";
 pub const NAME_SCREEN_CAPTURE_CAPABILITY: &str = "screen_capture_capability";
 
