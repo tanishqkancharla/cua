@@ -133,11 +133,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Test Windows release uninstall reporting
+      - name: Test Windows release uninstall ordering and reporting
         shell: powershell
         run: |
           $Uninstaller = python .github/scripts/validate_release_versions.py --print-driver-release-uninstaller windows
           if ($LASTEXITCODE -ne 0) { throw "Could not select the release uninstaller fixture" }
+          & ./libs/cua-driver/scripts/tests/uninstall-windows-history-regression.ps1 -UninstallerPath $Uninstaller
           & ./libs/cua-driver/scripts/tests/uninstall-windows-regression.ps1 -UninstallerPath $Uninstaller
       - name: Test Windows installer daemon cleanup spares its launcher
         shell: powershell
