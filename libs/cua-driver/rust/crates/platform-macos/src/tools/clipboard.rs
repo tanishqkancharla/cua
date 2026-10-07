@@ -168,9 +168,13 @@ mod tests {
 
     #[test]
     fn rich_paste_reports_lazy_initialization_failure() {
-        let backend = MacosClipboard::with_initializer(unavailable_context);
+        // Keep this failure fixture out of the concurrent retryability counter.
+        let backend =
+            MacosClipboard::with_initializer(|| Err("general pasteboard is unavailable".into()));
         assert_eq!(
-            backend.write_paste("plain".into(), Some("<b>rich</b>".into())).unwrap_err(),
+            backend
+                .write_paste("plain".into(), Some("<b>rich</b>".into()))
+                .unwrap_err(),
             "general pasteboard is unavailable"
         );
     }
