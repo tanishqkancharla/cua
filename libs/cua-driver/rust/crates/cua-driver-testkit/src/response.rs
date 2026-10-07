@@ -5,7 +5,8 @@ use serde_json::Value;
 /// A tool-call result, normalized across the MCP and CLI transports.
 ///
 /// MCP returns `{"result":{"content":[{"text":…}],"structuredContent":{…},
-/// "isError":bool}}`; the CLI prints `structuredContent` (or the text) directly.
+/// "isError":bool}}`; the CLI prints a success DTO (or text) directly and
+/// preserves the full tool-error envelope on nonzero exit.
 /// Each transport builds a `ToolResponse` with the same accessors below, so test
 /// assertions never branch on transport.
 pub struct ToolResponse {
