@@ -222,7 +222,32 @@ pub fn walk_tree_budgeted(
     window_id: Option<u32>,
     query: Option<&str>,
     max_depth: usize,
+    budget: WalkBudget,
+) -> TreeWalkResult {
+    collect_tree(pid, window_id, query, max_depth, budget, true)
+}
+
+/// Resolve the exact native AX window through the same readiness/ownership
+/// path as a full walk, without reading descendants or creating input objects.
+pub fn probe_window_scope(pid: i32, window_id: u32, timeout_ms: u64) -> Option<WindowScope> {
+    collect_tree(
+        pid,
+        Some(window_id),
+        None,
+        DEFAULT_MAX_DEPTH,
+        WalkBudget::new(timeout_ms, DEFAULT_MAX_ELEMENTS),
+        false,
+    )
+    .window_scope
+}
+
+fn collect_tree(
+    pid: i32,
+    window_id: Option<u32>,
+    query: Option<&str>,
+    max_depth: usize,
     mut budget: WalkBudget,
+    collect_descendants: bool,
 ) -> TreeWalkResult {
     let mut nodes: Vec<AXNode> = Vec::new();
     let mut lines: Vec<(usize, String)> = Vec::new(); // (depth, line)
@@ -296,6 +321,21 @@ pub fn walk_tree_budgeted(
             window_scope = Some(decision.scope);
             break (top_level, walk);
         };
+
+        if !collect_descendants {
+            // Matching is complete. A public probe must not read controls,
+            // render a tree, retain AX objects or replace snapshot authority.
+            release_all(top_level);
+            CFRelease(app_elem as CFTypeRef);
+            let walk = budget.outcome();
+            return TreeWalkResult {
+                tree_markdown: String::new(),
+                nodes,
+                truncated: walk.truncated(),
+                walk,
+                window_scope,
+            };
+        }
 
         // Walk each top-level child at depth 0.
         for child in walk_these {
