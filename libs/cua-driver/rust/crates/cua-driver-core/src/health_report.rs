@@ -387,6 +387,7 @@ If both are given, `include` wins.
 Canonical check names:
   macOS  : binary_version, platform_supported, session_active,
            bundle_identity, tcc_accessibility, tcc_screen_recording,
+           tcc_event_posting (read-only CGPreflightPostEventAccess),
            ax_capability, screen_capture_capability
   Windows: binary_version, platform_supported, session_active,
            ax_capability (via UIA), screen_capture_capability (via DXGI)
@@ -773,6 +774,14 @@ mod tests {
     }
 
     // ── tool description contract ────────────────────────────────────
+
+    #[test]
+    fn description_exposes_mac_event_posting_readiness_without_consumption_claim() {
+        assert!(def().description.contains(NAME_TCC_EVENT_POSTING));
+        assert!(def()
+            .description
+            .contains("read-only CGPreflightPostEventAccess"));
+    }
 
     #[test]
     fn description_commits_to_schema_version_1() {
