@@ -56,6 +56,12 @@ extern "C" {
         attribute: CFStringRef,
         value: *mut CFTypeRef,
     ) -> AXError;
+    pub fn AXUIElementCopyMultipleAttributeValues(
+        element: AXUIElementRef,
+        attributes: CFArrayRef,
+        options: u32,
+        values: *mut CFArrayRef,
+    ) -> AXError;
     pub fn AXUIElementCopyAttributeNames(
         element: AXUIElementRef,
         names: *mut CFArrayRef,
@@ -430,6 +436,225 @@ pub unsafe fn copy_stringish_attr(
     let result = coerce_stringish_value(value);
     CFRelease(value);
     result
+}
+
+/// Fresh role, display and geometry attributes used by the tree walker. Values
+/// are owned Rust data, so the temporary native array never escapes a read.
+#[derive(Debug, PartialEq)]
+pub struct TreeAttributes {
+    pub role: Option<String>,
+    pub frame: Option<[f64; 4]>,
+    pub title: Option<String>,
+    pub value: Option<StringishAttrValue>,
+    pub description: Option<String>,
+    pub identifier: Option<String>,
+    pub help: Option<String>,
+}
+
+unsafe fn tree_attributes_from_values(
+    values: &CFArray<core_foundation::base::CFType>,
+) -> Option<TreeAttributes> {
+    if values.len() != 8 {
+        return None;
+    }
+    let string = |index| {
+        let value = values.get(index)?;
+        (core_foundation::base::CFGetTypeID(value.as_CFTypeRef()) == CFStr::type_id())
+            .then(|| CFStr::wrap_under_get_rule(value.as_CFTypeRef() as _).to_string())
+    };
+    Some(TreeAttributes {
+        role: string(5),
+        frame: values
+            .get(6)
+            .zip(values.get(7))
+            .and_then(|(position, size)| {
+                frame_from_values(position.as_CFTypeRef(), size.as_CFTypeRef())
+            }),
+        title: string(0),
+        value: values
+            .get(1)
+            .and_then(|v| coerce_stringish_value(v.as_CFTypeRef())),
+        description: string(2),
+        identifier: string(3),
+        help: string(4),
+    })
+}
+
+/// Convert borrowed geometry slots without taking ownership or inventing bounds.
+unsafe fn frame_from_values(position: CFTypeRef, size: CFTypeRef) -> Option<[f64; 4]> {
+    if core_foundation::base::CFGetTypeID(position) != AXValueGetTypeID()
+        || core_foundation::base::CFGetTypeID(size) != AXValueGetTypeID()
+        || AXValueGetType(position as _) != kAXValueCGPointType
+        || AXValueGetType(size as _) != kAXValueCGSizeType
+    {
+        return None;
+    }
+    let mut point = CGPointValue { x: 0.0, y: 0.0 };
+    let mut dimensions = CGSizeValue {
+        width: 0.0,
+        height: 0.0,
+    };
+    if !AXValueGetValue(
+        position as _,
+        kAXValueCGPointType,
+        &mut point as *mut _ as _,
+    ) || !AXValueGetValue(
+        size as _,
+        kAXValueCGSizeType,
+        &mut dimensions as *mut _ as _,
+    ) || dimensions.width < 1.0
+        || dimensions.height < 1.0
+    {
+        return None;
+    }
+    Some([point.x, point.y, dimensions.width, dimensions.height])
+}
+
+/// Read role, display and geometry with one fresh AX request. With
+/// options=0, an unsupported attribute occupies its own CFNull/AXError slot;
+/// typed conversion preserves that slot as unknown without losing later data.
+/// An unavailable/malformed batch uses the existing individual reads. No
+/// values are cached and actions/writability/control state keep their own queries.
+///
+/// # Safety
+/// `element` must be a valid, live AX object bounded by its messaging timeout.
+pub unsafe fn copy_tree_attributes(element: AXUIElementRef) -> TreeAttributes {
+    let names = [
+        "AXTitle",
+        "AXValue",
+        "AXDescription",
+        "AXIdentifier",
+        "AXHelp",
+        "AXRole",
+        "AXPosition",
+        "AXSize",
+    ]
+    .map(CFStr::new);
+    let attributes = CFArray::from_CFTypes(&names);
+    let mut raw_values: CFArrayRef = std::ptr::null_mut();
+    let result = AXUIElementCopyMultipleAttributeValues(
+        element,
+        attributes.as_concrete_TypeRef(),
+        0,
+        &mut raw_values,
+    );
+    if !raw_values.is_null() {
+        let values = CFArray::<core_foundation::base::CFType>::wrap_under_create_rule(raw_values);
+        if result == kAXErrorSuccess {
+            if let Some(attributes) = tree_attributes_from_values(&values) {
+                return attributes;
+            }
+        }
+    }
+    TreeAttributes {
+        role: copy_string_attr(element, "AXRole"),
+        frame: element_screen_rect(element),
+        title: copy_string_attr(element, "AXTitle"),
+        value: copy_stringish_attr(element, "AXValue"),
+        description: copy_string_attr(element, "AXDescription"),
+        identifier: copy_string_attr(element, "AXIdentifier"),
+        help: copy_string_attr(element, "AXHelp"),
+    }
+}
+
+/// One fresh node read, including its ordered children. Child references live
+/// through recursion even after the temporary native batch array is released.
+/// No snapshot or cross-node cache is introduced.
+#[derive(Debug)]
+pub struct OwnedAxChildren(Vec<AXUIElementRef>);
+impl OwnedAxChildren {
+    pub fn iter(&self) -> impl Iterator<Item = AXUIElementRef> + '_ {
+        self.0.iter().copied()
+    }
+}
+impl Drop for OwnedAxChildren {
+    fn drop(&mut self) {
+        for child in &self.0 {
+            unsafe { CFRelease(*child as CFTypeRef) }
+        }
+    }
+}
+
+/// Decode the exact AXChildren type used by the existing individual reader.
+/// Unsupported/error slots stay unknown and require an individual fresh read;
+/// an actual empty array establishes no children.
+unsafe fn owned_children_from_value(value: CFTypeRef) -> Option<OwnedAxChildren> {
+    if value.is_null()
+        || core_foundation::base::CFGetTypeID(value) != CFArray::<CFTypeRef>::type_id()
+    {
+        return None;
+    }
+    let array = CFArray::<CFTypeRef>::wrap_under_get_rule(value as _);
+    let children = (0..array.len())
+        .filter_map(|i| {
+            let item = *array.get(i)?;
+            if item.is_null() || core_foundation::base::CFGetTypeID(item) != AXUIElementGetTypeID()
+            {
+                return None;
+            }
+            CFRetain(item);
+            Some(item as AXUIElementRef)
+        })
+        .collect();
+    Some(OwnedAxChildren(children))
+}
+
+unsafe fn tree_observation_from_values(
+    values: &CFArray<core_foundation::base::CFType>,
+) -> Option<(TreeAttributes, Option<OwnedAxChildren>)> {
+    if values.len() != 9 {
+        return None;
+    }
+    // Reuse the original eight-slot decoder and all of its typed semantics.
+    let prefix: Vec<_> = (0..8).map(|i| values.get(i).unwrap().clone()).collect();
+    let attributes = tree_attributes_from_values(&CFArray::from_CFTypes(&prefix))?;
+    let children = owned_children_from_value(values.get(8)?.as_CFTypeRef());
+    Some((attributes, children))
+}
+
+/// Read the same display/role/geometry and AXChildren through one native batch.
+/// Actions, writability and control-state authority remain separate fresh reads.
+/// A failed/malformed batch retains the original attribute and child readers;
+/// an unavailable child slot alone falls back only to the old child reader.
+///
+/// # Safety
+/// `element` must be live and bounded by its AX messaging timeout.
+pub unsafe fn copy_tree_observation(element: AXUIElementRef) -> (TreeAttributes, OwnedAxChildren) {
+    let names = [
+        "AXTitle",
+        "AXValue",
+        "AXDescription",
+        "AXIdentifier",
+        "AXHelp",
+        "AXRole",
+        "AXPosition",
+        "AXSize",
+        "AXChildren",
+    ]
+    .map(CFStr::new);
+    let attributes = CFArray::from_CFTypes(&names);
+    let mut raw_values: CFArrayRef = std::ptr::null_mut();
+    let result = AXUIElementCopyMultipleAttributeValues(
+        element,
+        attributes.as_concrete_TypeRef(),
+        0,
+        &mut raw_values,
+    );
+    if !raw_values.is_null() {
+        let values = CFArray::<core_foundation::base::CFType>::wrap_under_create_rule(raw_values);
+        if result == kAXErrorSuccess {
+            if let Some((attributes, children)) = tree_observation_from_values(&values) {
+                return (
+                    attributes,
+                    children.unwrap_or_else(|| OwnedAxChildren(copy_children(element))),
+                );
+            }
+        }
+    }
+    (
+        copy_tree_attributes(element),
+        OwnedAxChildren(copy_children(element)),
+    )
 }
 
 /// Get the action names for an AX element.
@@ -1195,6 +1420,218 @@ mod tests {
                 "unexpected binary state for {value:?}"
             );
         }
+    }
+
+    #[test]
+    fn batched_tree_attributes_keep_slot_order_and_control_value_types() {
+        let title = CFStr::new("");
+        let description = CFStr::new("Description");
+        let identifier = CFStr::new("Note[id=owned]");
+        let help = CFStr::new("Open note");
+        let values = [
+            CFStr::new("").as_CFType(),
+            CFNumber::from(8.0).as_CFType(),
+            CFBoolean::false_value().as_CFType(),
+        ];
+        for value in values {
+            let array = CFArray::from_CFTypes(&[
+                title.as_CFType(),
+                value.clone(),
+                description.as_CFType(),
+                identifier.as_CFType(),
+                help.as_CFType(),
+                CFStr::new("AXTextField").as_CFType(),
+                CFBoolean::false_value().as_CFType(),
+                CFBoolean::false_value().as_CFType(),
+            ]);
+            let observed = unsafe { tree_attributes_from_values(&array) }.unwrap();
+            assert_eq!(observed.role.as_deref(), Some("AXTextField"));
+            assert_eq!(observed.frame, None);
+            assert_eq!(observed.title.as_deref(), Some(""));
+            assert_eq!(observed.value, unsafe {
+                coerce_stringish_value(value.as_CFTypeRef())
+            });
+            assert_eq!(observed.description.as_deref(), Some("Description"));
+            assert_eq!(observed.identifier.as_deref(), Some("Note[id=owned]"));
+            assert_eq!(observed.help.as_deref(), Some("Open note"));
+        }
+    }
+
+    #[test]
+    fn batched_tree_attributes_keep_errors_unknown_without_shifting_later_slots() {
+        let error_code: AXError = kAXErrorAttributeUnsupported;
+        let error = unsafe { AXValueCreate(5, &error_code as *const _ as *const c_void) };
+        assert!(!error.is_null());
+        let error = unsafe { core_foundation::base::CFType::wrap_under_create_rule(error as _) };
+        let null = unsafe {
+            core_foundation::base::CFType::wrap_under_get_rule(core_foundation::base::kCFNull)
+        };
+        let identifier = CFStr::new("stable-id");
+        let array = CFArray::from_CFTypes(&[
+            error.clone(),
+            null,
+            CFNumber::from(4.0).as_CFType(),
+            identifier.as_CFType(),
+            error.clone(),
+            CFStr::new("AXButton").as_CFType(),
+            error.clone(),
+            error,
+        ]);
+        let observed = unsafe { tree_attributes_from_values(&array) }.unwrap();
+        assert_eq!(
+            observed,
+            TreeAttributes {
+                role: Some("AXButton".into()),
+                frame: None,
+                title: None,
+                value: None,
+                description: None,
+                identifier: Some("stable-id".into()),
+                help: None
+            }
+        );
+        for count in [0, 5, 7, 9] {
+            let wrong = CFArray::from_CFTypes(&vec![identifier.as_CFType(); count]);
+            assert!(unsafe { tree_attributes_from_values(&wrong) }.is_none());
+        }
+    }
+
+    #[test]
+    fn batched_children_keep_original_attribute_slots_and_known_empty_membership() {
+        let prefix = vec![
+            CFStr::new("title").as_CFType(),
+            CFNumber::from(8.0).as_CFType(),
+            CFStr::new("description").as_CFType(),
+            CFStr::new("identifier").as_CFType(),
+            CFStr::new("help").as_CFType(),
+            CFStr::new("AXOutline").as_CFType(),
+            CFBoolean::false_value().as_CFType(),
+            CFBoolean::false_value().as_CFType(),
+        ];
+        let expected =
+            unsafe { tree_attributes_from_values(&CFArray::from_CFTypes(&prefix)) }.unwrap();
+        let empty = CFArray::<core_foundation::base::CFType>::from_CFTypes(&[]);
+        let mut values = prefix;
+        values.push(empty.as_CFType());
+        let (attributes, children) =
+            unsafe { tree_observation_from_values(&CFArray::from_CFTypes(&values)) }.unwrap();
+        assert_eq!(attributes, expected);
+        assert_eq!(children.unwrap().iter().count(), 0);
+    }
+
+    #[test]
+    fn batched_children_errors_and_malformed_arrays_remain_unknown() {
+        let error_code: AXError = kAXErrorAttributeUnsupported;
+        let error = unsafe {
+            core_foundation::base::CFType::wrap_under_create_rule(AXValueCreate(
+                5,
+                &error_code as *const _ as *const c_void,
+            ) as _)
+        };
+        let null = unsafe {
+            core_foundation::base::CFType::wrap_under_get_rule(core_foundation::base::kCFNull)
+        };
+        for unavailable in [
+            error,
+            null,
+            CFBoolean::false_value().as_CFType(),
+            CFStr::new("not children").as_CFType(),
+        ] {
+            let mut slots = vec![CFStr::new("same").as_CFType(); 8];
+            slots.push(unavailable);
+            let (attributes, children) =
+                unsafe { tree_observation_from_values(&CFArray::from_CFTypes(&slots)) }.unwrap();
+            assert_eq!(attributes.role.as_deref(), Some("same"));
+            assert!(
+                children.is_none(),
+                "unknown child slot must require a fresh fallback"
+            );
+        }
+        for count in [0, 8, 10] {
+            let array = CFArray::from_CFTypes(&vec![CFStr::new("slot").as_CFType(); count]);
+            assert!(unsafe { tree_observation_from_values(&array) }.is_none());
+        }
+    }
+
+    #[test]
+    fn batched_children_retain_exact_ax_objects_in_source_order_and_release_them() {
+        // Only create opaque local references; no app attributes, input or
+        // per-user desktop state are queried by this hermetic ownership test.
+        let first = unsafe {
+            core_foundation::base::CFType::wrap_under_create_rule(AXUIElementCreateApplication(
+                i32::MAX,
+            ) as _)
+        };
+        let second = unsafe {
+            core_foundation::base::CFType::wrap_under_create_rule(AXUIElementCreateApplication(
+                i32::MAX - 1,
+            ) as _)
+        };
+        let before = (first.retain_count(), second.retain_count());
+        let array = CFArray::from_CFTypes(&[
+            first.clone(),
+            CFStr::new("not an AX object").as_CFType(),
+            second.clone(),
+        ]);
+        let children = unsafe { owned_children_from_value(array.as_CFTypeRef()) }.unwrap();
+        assert_eq!(
+            children.iter().collect::<Vec<_>>(),
+            vec![
+                first.as_CFTypeRef() as AXUIElementRef,
+                second.as_CFTypeRef() as AXUIElementRef,
+            ]
+        );
+        drop(array);
+        assert_eq!(
+            (first.retain_count(), second.retain_count()),
+            (before.0 + 1, before.1 + 1)
+        );
+        drop(children);
+        assert_eq!((first.retain_count(), second.retain_count()), before);
+    }
+
+    #[test]
+    fn batched_geometry_uses_exact_native_types_and_original_size_bounds() {
+        let position = CGPointValue { x: -40.5, y: 100.0 };
+        let make = |kind, data: *const c_void| unsafe {
+            core_foundation::base::CFType::wrap_under_create_rule(AXValueCreate(kind, data) as _)
+        };
+        let p = make(kAXValueCGPointType, &position as *const _ as _);
+        for (width, height, expected) in [
+            (200.0, 80.0, Some([-40.5, 100.0, 200.0, 80.0])),
+            (1.0, 1.0, Some([-40.5, 100.0, 1.0, 1.0])),
+            (0.0, 80.0, None),
+            (-1.0, 80.0, None),
+            (200.0, 0.5, None),
+        ] {
+            let size = CGSizeValue { width, height };
+            let s = make(kAXValueCGSizeType, &size as *const _ as _);
+            assert_eq!(
+                unsafe { frame_from_values(p.as_CFTypeRef(), s.as_CFTypeRef()) },
+                expected
+            );
+            assert!(unsafe { frame_from_values(s.as_CFTypeRef(), p.as_CFTypeRef()) }.is_none());
+            let slots = CFArray::from_CFTypes(&[
+                CFStr::new("title").as_CFType(),
+                CFStr::new("value").as_CFType(),
+                CFStr::new("").as_CFType(),
+                CFStr::new("id").as_CFType(),
+                CFStr::new("").as_CFType(),
+                CFStr::new("AXTextArea").as_CFType(),
+                p.clone(),
+                s,
+            ]);
+            assert_eq!(
+                unsafe { tree_attributes_from_values(&slots) }
+                    .unwrap()
+                    .frame,
+                expected
+            );
+        }
+        assert!(
+            unsafe { frame_from_values(p.as_CFTypeRef(), CFStr::new("size").as_CFTypeRef()) }
+                .is_none()
+        );
     }
 
     #[test]

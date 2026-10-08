@@ -784,6 +784,7 @@ fn transport_from_legacy(
             ActionTransport::LinuxCuaCompositorInject
         }
         "hid" | "cgevent_hid" | "cgevent_fg" => ActionTransport::MacosCgEventHid,
+        "cgevent_pid" => ActionTransport::MacosCgEventPid,
         "cgevent" => {
             if args
                 .get("delivery_mode")
@@ -1921,6 +1922,19 @@ mod tests {
             public.delivery.map(|delivery| delivery.mode),
             Some(cua_driver_contract::ActionDeliveryMode::Foreground)
         );
+
+        // Exact foreground focus does not make PID-addressed events global HID.
+        let targeted = ActionExecutionRecord::from_legacy(
+            "click",
+            &serde_json::json!({"delivery_mode": "foreground"}),
+            &serde_json::json!({"path": "cgevent_pid", "verified": false, "effect": "unverifiable"}),
+        ).expect("explicit PID event should normalize");
+        assert_eq!(targeted.transport, ActionTransport::MacosCgEventPid);
+        assert_eq!(targeted.actual_delivery, Some(ActualDelivery::Foreground));
+        let targeted_public = targeted.public_result().expect("public PID ActionResult");
+        assert_eq!(targeted_public.route, cua_driver_contract::ActionRoute::SyntheticEvents);
+        assert_eq!(targeted_public.effect, cua_driver_contract::ActionEffect::Unverifiable);
+
     }
 
     #[test]

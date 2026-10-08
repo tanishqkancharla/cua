@@ -477,7 +477,11 @@ unsafe fn walk_element(
     // element, so every descendant must be bounded before any attribute read.
     set_messaging_timeout(element);
 
-    let role = copy_string_attr(element, "AXRole").unwrap_or_else(|| "AXUnknown".into());
+    let (attributes, children) = copy_tree_observation(element);
+    let role = attributes
+        .role
+        .clone()
+        .unwrap_or_else(|| "AXUnknown".into());
 
     let in_web_content = in_web_content || is_web_content_role(&role);
 
@@ -494,33 +498,22 @@ unsafe fn walk_element(
     // A group may be an aggregate control rather than layout (for example a
     // duration picker with a value and increment/decrement actions). Read its
     // own semantics before collapsing it; reuse those reads below.
-    let group_attributes = (role == "AXGroup").then(|| {
-        (
-            copy_string_attr(element, "AXTitle"),
-            copy_stringish_attr(element, "AXValue"),
-            copy_string_attr(element, "AXDescription"),
-            copy_action_names(element),
+    let group_actions = (role == "AXGroup").then(|| copy_action_names(element));
+    let collapse_group = group_actions.as_ref().is_some_and(|actions| {
+        collapse_layout_group(
+            parent_selected.is_some(),
+            attributes.title.as_deref(),
+            attributes.value.as_ref().map(|v| v.state_value.as_str()),
+            attributes.description.as_deref(),
+            actions,
         )
     });
-    let collapse_group =
-        group_attributes
-            .as_ref()
-            .is_some_and(|(title, value, description, actions)| {
-                collapse_layout_group(
-                    parent_selected.is_some(),
-                    title.as_deref(),
-                    value.as_ref().map(|v| v.state_value.as_str()),
-                    description.as_deref(),
-                    actions,
-                )
-            });
     // Skip only pure layout groups; their children remain addressable.
     if role == "AXScrollArea" || collapse_group {
         // Still recurse — children may be interesting. Layout containers
         // collapse, so children inherit the parent's depth AND the same
         // parent_index (no actionable node was emitted here).
-        let children = copy_children(element);
-        for child in children {
+        for child in children.iter() {
             walk_element(
                 child,
                 depth,
@@ -532,7 +525,6 @@ unsafe fn walk_element(
                 budget,
                 max_depth,
             );
-            CFRelease(child as CFTypeRef);
         }
         return;
     }
@@ -542,14 +534,16 @@ unsafe fn walk_element(
     // This is critical for Calculator where AXTitle="" but AXDescription="2"
     // (digit buttons). Merging them would produce "2" (quoted) instead of (2)
     // (parens), breaking _find_calc_button which searches for "(2)".
-    let (title, copied_value, description, actions) = group_attributes.unwrap_or_else(|| {
-        (
-            copy_string_attr(element, "AXTitle"),
-            copy_stringish_attr(element, "AXValue"),
-            copy_string_attr(element, "AXDescription"),
-            copy_action_names(element),
-        )
-    });
+    let actions = group_actions.unwrap_or_else(|| copy_action_names(element));
+    let TreeAttributes {
+        role: _,
+        frame,
+        title,
+        value: copied_value,
+        description,
+        identifier,
+        help,
+    } = attributes;
     // Read AXValue once with enough type information to preserve the existing
     // string-only markdown while also exposing numeric/boolean control state.
     let value = copied_value
@@ -573,8 +567,7 @@ unsafe fn walk_element(
     } else {
         None
     };
-    let identifier = copy_string_attr(element, "AXIdentifier");
-    let help = copy_string_attr(element, "AXHelp").filter(|h| !h.trim().is_empty());
+    let help = help.filter(|h| !h.trim().is_empty());
 
     let visible_title = title.as_deref().unwrap_or("").trim().to_owned();
     let visible_description = description.as_deref().unwrap_or("").trim().to_owned();
@@ -608,8 +601,7 @@ unsafe fn walk_element(
         || (parent_selected.is_some() && enabled != Some(false));
 
     if !is_actionable && !has_content && role != "AXWindow" && role != "AXSheet" {
-        let children = copy_children(element);
-        for child in children {
+        for child in children.iter() {
             walk_element(
                 child,
                 depth + 1,
@@ -621,13 +613,11 @@ unsafe fn walk_element(
                 budget,
                 max_depth,
             );
-            CFRelease(child as CFTypeRef);
         }
         return;
     }
 
     let element_ptr = element as usize;
-    let frame = element_screen_rect(element);
     // Structured `elements` only contains actionable nodes. Keep all new AX
     // round-trips behind that same gate so display-only rows pay no cost.
     let control_state = read_control_state_if_actionable(is_actionable, || ControlState {
@@ -736,8 +726,7 @@ unsafe fn walk_element(
     lines.push((depth, line));
     nodes.push(node);
 
-    let children = copy_children(element);
-    for child in children {
+    for child in children.iter() {
         walk_element(
             child,
             depth + 1,
@@ -749,7 +738,6 @@ unsafe fn walk_element(
             budget,
             max_depth,
         );
-        CFRelease(child as CFTypeRef);
     }
 }
 

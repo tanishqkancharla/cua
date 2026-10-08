@@ -340,7 +340,7 @@ impl Tool for GetWindowStateTool {
             return window_probe_result(pid, window_id, scope.as_ref());
         }
 
-        let (tree_result, prepared_snapshot) = if want_tree {
+        let (tree_result, prepared_snapshot, native_collections) = if want_tree {
             let q = query.clone();
             // `timeout_ms` bounds the walk itself: it returns the partial tree
             // when the budget runs out. The outer deadline is only a backstop
@@ -354,15 +354,20 @@ impl Tool for GetWindowStateTool {
                     max_depth,
                     cua_driver_core::walk_budget::WalkBudget::new(timeout_ms, max_elements),
                 );
+                let collections = if !tree.truncated && q.is_none() {
+                    unsafe { crate::ax::collection_viewport::observe(&tree.nodes) }
+                } else {
+                    Vec::new()
+                };
                 let payload = crate::ax::snapshot::AxSnapshot::from_nodes(&tree.nodes);
-                (tree, payload)
+                (tree, payload, collections)
             });
             // A launching app is waited on for up to `timeout_ms` before the
             // walk's own `timeout_ms` starts (see `ax::launch`).
             let backstop =
                 std::time::Duration::from_millis(timeout_ms) * 2 + AX_WALK_BACKSTOP_GRACE;
             match tokio::time::timeout(backstop, walk_future).await {
-                Ok(Ok((tree, payload))) => (Some(tree), Some(payload)),
+                Ok(Ok((tree, payload, collections))) => (Some(tree), Some(payload), collections),
                 Ok(Err(e)) => return ToolResult::error(format!("AX tree walk failed: {e}")),
                 Err(_elapsed) => {
                     return ToolResult::error(format!(
@@ -375,7 +380,7 @@ impl Tool for GetWindowStateTool {
                 }
             }
         } else {
-            (None, None)
+            (None, None, Vec::new())
         };
 
         // The window can close, or its CGWindow can be re-parented onto another
@@ -703,6 +708,9 @@ impl Tool for GetWindowStateTool {
                 Issue #22865: use `max_elements` / `max_depth` to bound the \
                 AX walk on apps with very large trees."
         });
+        if !native_collections.is_empty() {
+            structured["native_collections"] = serde_json::json!(native_collections);
+        }
         if query.is_some() {
             structured["filtered_element_count"] = serde_json::json!(filtered_element_count);
         }

@@ -92,8 +92,9 @@ unsafe fn style(dict: CFDictionaryRef) -> Style {
 }
 
 /// Unsupported, oversized or inconsistent observations fall back to raw text.
-/// The attributed read must match the previously copied AXValue exactly: a
-/// concurrently edited or placeholder value cannot acquire stale format runs.
+/// The attributed read must match the previously copied AXValue, apart from
+/// one omitted terminal paragraph newline. Other content mismatches refuse
+/// formatting so concurrently edited text cannot acquire stale format runs.
 pub unsafe fn copy_formatted_value(
     element: AXUIElementRef,
     role: &str,
@@ -140,16 +141,17 @@ pub unsafe fn copy_formatted_value(
     let attributed = CFAttributedString::wrap_under_create_rule(value as _);
     let attributed_ref = attributed.as_concrete_TypeRef();
     let string = CFAttributedStringGetString(attributed_ref);
-    if string.is_null()
-        || CFGetTypeID(string as _) != CFString::type_id()
-        || attributed.char_len() != length as isize
-        || CFString::wrap_under_get_rule(string).to_string() != raw
-    {
+    if string.is_null() || CFGetTypeID(string as _) != CFString::type_id() {
+        return None;
+    }
+    let attributed_text = CFString::wrap_under_get_rule(string).to_string();
+    let styled_length = compatible_attributed_length(raw, &attributed_text)?;
+    if attributed.char_len() != styled_length as isize {
         return None;
     }
     let mut runs = Vec::new();
     let mut cursor = 0;
-    while cursor < length {
+    while cursor < styled_length {
         if runs.len() >= MAX_RUNS {
             return None;
         }
@@ -167,7 +169,7 @@ pub unsafe fn copy_formatted_value(
             return None;
         }
         let end = (range.location as usize).checked_add(range.length as usize)?;
-        if range.location as usize > cursor || end <= cursor || end > length {
+        if range.location as usize > cursor || end <= cursor || end > styled_length {
             return None;
         }
         runs.push(Run {
@@ -177,7 +179,25 @@ pub unsafe fn copy_formatted_value(
         });
         cursor = end;
     }
+    if styled_length < length {
+        // Notes can publish a terminal paragraph separator in AXValue but
+        // omit it from the attributed range. Keep that raw UTF-16 unit plain;
+        // no attribute run or selection coordinate is shifted or invented.
+        runs.push(Run {
+            start: styled_length,
+            end: length,
+            style: Style::default(),
+        });
+    }
     render(raw, &runs)
+}
+
+fn compatible_attributed_length(raw: &str, attributed: &str) -> Option<usize> {
+    if raw == attributed || raw.strip_suffix('\n') == Some(attributed) {
+        Some(attributed.encode_utf16().count())
+    } else {
+        None
+    }
 }
 
 fn render(raw: &str, runs: &[Run]) -> Option<String> {
@@ -375,6 +395,56 @@ mod tests {
             }]
         )
         .is_none());
+    }
+
+    #[test]
+    fn accepts_only_exact_text_or_one_omitted_terminal_newline() {
+        assert_eq!(compatible_attributed_length("title", "title"), Some(5));
+        assert_eq!(compatible_attributed_length("title\n", "title"), Some(5));
+        assert_eq!(compatible_attributed_length("😀x\n", "😀x"), Some(3));
+        for (raw, attributed) in [
+            ("title\n", "stale"),
+            ("title ", "title"),
+            ("title\r\n", "title"),
+            ("title\n\n", "title"),
+            ("prefix title\n", "title"),
+            ("title", "title\n"),
+        ] {
+            assert_eq!(compatible_attributed_length(raw, attributed), None);
+        }
+    }
+
+    #[test]
+    fn omitted_paragraph_terminator_preserves_raw_utf16_and_styled_content() {
+        let raw = "😀 title\nBody.\n";
+        let attributed = "😀 title\nBody.";
+        let end = compatible_attributed_length(raw, attributed).unwrap();
+        assert_eq!(end, raw.encode_utf16().count() - 1);
+        assert_eq!(
+            render(
+                raw,
+                &[
+                    Run {
+                        start: 0,
+                        end: 9,
+                        style: bold()
+                    },
+                    Run {
+                        start: 9,
+                        end,
+                        style: Style::default()
+                    },
+                    Run {
+                        start: end,
+                        end: end + 1,
+                        style: Style::default()
+                    },
+                ]
+            )
+            .as_deref(),
+            Some("**😀 title**\nBody.")
+        );
+        assert_eq!(raw, "😀 title\nBody.\n");
     }
 
     #[test]
