@@ -557,6 +557,106 @@ pub unsafe fn copy_tree_attributes(element: AXUIElementRef) -> TreeAttributes {
     }
 }
 
+/// One fresh node read, including its ordered children. Child references live
+/// through recursion even after the temporary native batch array is released.
+/// No snapshot or cross-node cache is introduced.
+#[derive(Debug)]
+pub struct OwnedAxChildren(Vec<AXUIElementRef>);
+impl OwnedAxChildren {
+    pub fn iter(&self) -> impl Iterator<Item = AXUIElementRef> + '_ {
+        self.0.iter().copied()
+    }
+}
+impl Drop for OwnedAxChildren {
+    fn drop(&mut self) {
+        for child in &self.0 {
+            unsafe { CFRelease(*child as CFTypeRef) }
+        }
+    }
+}
+
+/// Decode the exact AXChildren type used by the existing individual reader.
+/// Unsupported/error slots stay unknown and require an individual fresh read;
+/// an actual empty array establishes no children.
+unsafe fn owned_children_from_value(value: CFTypeRef) -> Option<OwnedAxChildren> {
+    if value.is_null()
+        || core_foundation::base::CFGetTypeID(value) != CFArray::<CFTypeRef>::type_id()
+    {
+        return None;
+    }
+    let array = CFArray::<CFTypeRef>::wrap_under_get_rule(value as _);
+    let children = (0..array.len())
+        .filter_map(|i| {
+            let item = *array.get(i)?;
+            if item.is_null() || core_foundation::base::CFGetTypeID(item) != AXUIElementGetTypeID()
+            {
+                return None;
+            }
+            CFRetain(item);
+            Some(item as AXUIElementRef)
+        })
+        .collect();
+    Some(OwnedAxChildren(children))
+}
+
+unsafe fn tree_observation_from_values(
+    values: &CFArray<core_foundation::base::CFType>,
+) -> Option<(TreeAttributes, Option<OwnedAxChildren>)> {
+    if values.len() != 9 {
+        return None;
+    }
+    // Reuse the original eight-slot decoder and all of its typed semantics.
+    let prefix: Vec<_> = (0..8).map(|i| values.get(i).unwrap().clone()).collect();
+    let attributes = tree_attributes_from_values(&CFArray::from_CFTypes(&prefix))?;
+    let children = owned_children_from_value(values.get(8)?.as_CFTypeRef());
+    Some((attributes, children))
+}
+
+/// Read the same display/role/geometry and AXChildren through one native batch.
+/// Actions, writability and control-state authority remain separate fresh reads.
+/// A failed/malformed batch retains the original attribute and child readers;
+/// an unavailable child slot alone falls back only to the old child reader.
+///
+/// # Safety
+/// `element` must be live and bounded by its AX messaging timeout.
+pub unsafe fn copy_tree_observation(element: AXUIElementRef) -> (TreeAttributes, OwnedAxChildren) {
+    let names = [
+        "AXTitle",
+        "AXValue",
+        "AXDescription",
+        "AXIdentifier",
+        "AXHelp",
+        "AXRole",
+        "AXPosition",
+        "AXSize",
+        "AXChildren",
+    ]
+    .map(CFStr::new);
+    let attributes = CFArray::from_CFTypes(&names);
+    let mut raw_values: CFArrayRef = std::ptr::null_mut();
+    let result = AXUIElementCopyMultipleAttributeValues(
+        element,
+        attributes.as_concrete_TypeRef(),
+        0,
+        &mut raw_values,
+    );
+    if !raw_values.is_null() {
+        let values = CFArray::<core_foundation::base::CFType>::wrap_under_create_rule(raw_values);
+        if result == kAXErrorSuccess {
+            if let Some((attributes, children)) = tree_observation_from_values(&values) {
+                return (
+                    attributes,
+                    children.unwrap_or_else(|| OwnedAxChildren(copy_children(element))),
+                );
+            }
+        }
+    }
+    (
+        copy_tree_attributes(element),
+        OwnedAxChildren(copy_children(element)),
+    )
+}
+
 /// Get the action names for an AX element.
 ///
 /// # Safety
@@ -1394,6 +1494,100 @@ mod tests {
             let wrong = CFArray::from_CFTypes(&vec![identifier.as_CFType(); count]);
             assert!(unsafe { tree_attributes_from_values(&wrong) }.is_none());
         }
+    }
+
+    #[test]
+    fn batched_children_keep_original_attribute_slots_and_known_empty_membership() {
+        let prefix = vec![
+            CFStr::new("title").as_CFType(),
+            CFNumber::from(8.0).as_CFType(),
+            CFStr::new("description").as_CFType(),
+            CFStr::new("identifier").as_CFType(),
+            CFStr::new("help").as_CFType(),
+            CFStr::new("AXOutline").as_CFType(),
+            CFBoolean::false_value().as_CFType(),
+            CFBoolean::false_value().as_CFType(),
+        ];
+        let expected =
+            unsafe { tree_attributes_from_values(&CFArray::from_CFTypes(&prefix)) }.unwrap();
+        let empty = CFArray::<core_foundation::base::CFType>::from_CFTypes(&[]);
+        let mut values = prefix;
+        values.push(empty.as_CFType());
+        let (attributes, children) =
+            unsafe { tree_observation_from_values(&CFArray::from_CFTypes(&values)) }.unwrap();
+        assert_eq!(attributes, expected);
+        assert_eq!(children.unwrap().iter().count(), 0);
+    }
+
+    #[test]
+    fn batched_children_errors_and_malformed_arrays_remain_unknown() {
+        let error_code: AXError = kAXErrorAttributeUnsupported;
+        let error = unsafe {
+            core_foundation::base::CFType::wrap_under_create_rule(AXValueCreate(
+                5,
+                &error_code as *const _ as *const c_void,
+            ) as _)
+        };
+        let null = unsafe {
+            core_foundation::base::CFType::wrap_under_get_rule(core_foundation::base::kCFNull)
+        };
+        for unavailable in [
+            error,
+            null,
+            CFBoolean::false_value().as_CFType(),
+            CFStr::new("not children").as_CFType(),
+        ] {
+            let mut slots = vec![CFStr::new("same").as_CFType(); 8];
+            slots.push(unavailable);
+            let (attributes, children) =
+                unsafe { tree_observation_from_values(&CFArray::from_CFTypes(&slots)) }.unwrap();
+            assert_eq!(attributes.role.as_deref(), Some("same"));
+            assert!(
+                children.is_none(),
+                "unknown child slot must require a fresh fallback"
+            );
+        }
+        for count in [0, 8, 10] {
+            let array = CFArray::from_CFTypes(&vec![CFStr::new("slot").as_CFType(); count]);
+            assert!(unsafe { tree_observation_from_values(&array) }.is_none());
+        }
+    }
+
+    #[test]
+    fn batched_children_retain_exact_ax_objects_in_source_order_and_release_them() {
+        // Only create opaque local references; no app attributes, input or
+        // per-user desktop state are queried by this hermetic ownership test.
+        let first = unsafe {
+            core_foundation::base::CFType::wrap_under_create_rule(AXUIElementCreateApplication(
+                i32::MAX,
+            ) as _)
+        };
+        let second = unsafe {
+            core_foundation::base::CFType::wrap_under_create_rule(AXUIElementCreateApplication(
+                i32::MAX - 1,
+            ) as _)
+        };
+        let before = (first.retain_count(), second.retain_count());
+        let array = CFArray::from_CFTypes(&[
+            first.clone(),
+            CFStr::new("not an AX object").as_CFType(),
+            second.clone(),
+        ]);
+        let children = unsafe { owned_children_from_value(array.as_CFTypeRef()) }.unwrap();
+        assert_eq!(
+            children.iter().collect::<Vec<_>>(),
+            vec![
+                first.as_CFTypeRef() as AXUIElementRef,
+                second.as_CFTypeRef() as AXUIElementRef,
+            ]
+        );
+        drop(array);
+        assert_eq!(
+            (first.retain_count(), second.retain_count()),
+            (before.0 + 1, before.1 + 1)
+        );
+        drop(children);
+        assert_eq!((first.retain_count(), second.retain_count()), before);
     }
 
     #[test]
