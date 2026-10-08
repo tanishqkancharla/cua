@@ -23,6 +23,7 @@ mod mpx_owner;
 /// One-shot targeted pointer/keyboard delivery with explicit
 /// auto/background/foreground semantics (embedders).
 pub mod targeted;
+mod x11_app_events;
 
 pub use focus_guard::{FocusGuardReport, FocusSnapshot, SameAppWindow};
 pub use foreground::{with_x11_foreground_opts, FocusAfter, ForegroundOptions, ForegroundReport};
@@ -3483,15 +3484,24 @@ pub fn send_type_text_xtest(text: &str) -> Result<()> {
         .get(..kpm)
         .and_then(|s| s.iter().copied().find(|&k| k != 0))
         .unwrap_or(50);
-    // Remap guards live until the function returns — see send_type_text_with_delay.
+    // Unsupported clients retain end-of-call guards. A participating client
+    // releases each borrowed mapping only after its input-queue response.
     let mut remap_guards = Vec::new();
+    let mut app_events: Option<Option<x11_app_events::AppEventBarrier<'_>>> = None;
     for ch in text.chars() {
         let cp = mpx_keyboard::keysym_for_char(ch);
+        let mut borrowed = None;
         let (keycode, needs_shift) = match char_to_keycode_shift(&mapping, cp) {
             Some(found) => found,
             None => match keycode_for_keysym(&conn, &mapping, cp, &ch.to_string()) {
                 Ok((keycode, guard)) => {
-                    remap_guards.extend(guard);
+                    borrowed = guard;
+                    if borrowed.is_some() && app_events.is_none() {
+                        app_events = Some(x11_app_events::AppEventBarrier::focused(&conn)?);
+                        if matches!(app_events, Some(None)) {
+                            tracing::warn!("Focused X11 client does not advertise _NET_WM_PING; borrowed-key application delivery remains unverified");
+                        }
+                    }
                     (keycode, false)
                 }
                 Err(_) => continue,
@@ -3507,6 +3517,19 @@ pub fn send_type_text_xtest(text: &str) -> Result<()> {
         }
         conn.flush()?;
         sleep(Duration::from_millis(KEY_DELAY_MS));
+        if let Some(guard) = borrowed {
+            if let Some(Some(barrier)) = &app_events {
+                // Translate this borrowed glyph before reusing its keycode for
+                // the next one. A stalled app keeps the mapping live; timeout
+                // reports unknown partial delivery and never replays input.
+                barrier.acknowledge()?;
+                drop(guard);
+            } else {
+                // Clients without the protocol retain the original unverified
+                // route, including its end-of-call keymap restoration.
+                remap_guards.push(guard);
+            }
+        }
     }
     // Round-trip so the server delivers the final character's key events before
     // this short-lived connection drops (see send_key_xtest — keyboard XTEST
