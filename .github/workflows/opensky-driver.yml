@@ -140,7 +140,10 @@ jobs:
             libdbus-1-dev libpipewire-0.3-dev libspa-0.2-dev libei-dev \
             libxkbcommon-dev libx11-dev libxi-dev libxtst-dev libxext-dev \
             libwebkit2gtk-4.1-dev libssl-dev libxdo-dev \
-            libayatana-appindicator3-dev librsvg2-dev ffmpeg gnome-keyring jq
+            libayatana-appindicator3-dev librsvg2-dev ffmpeg gnome-keyring jq python3-tk x11-utils
+          # Check the published-canvas fixture prerequisites before building Rust.
+          python3 -c 'import tkinter; print(tkinter.TkVersion)'
+          command -v xprop
       - name: Canonical Linux desktop harness
         if: runner.os == 'Linux'
         run: |
