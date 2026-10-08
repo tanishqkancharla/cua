@@ -477,7 +477,11 @@ unsafe fn walk_element(
     // element, so every descendant must be bounded before any attribute read.
     set_messaging_timeout(element);
 
-    let role = copy_string_attr(element, "AXRole").unwrap_or_else(|| "AXUnknown".into());
+    let attributes = copy_tree_attributes(element);
+    let role = attributes
+        .role
+        .clone()
+        .unwrap_or_else(|| "AXUnknown".into());
 
     let in_web_content = in_web_content || is_web_content_role(&role);
 
@@ -494,19 +498,16 @@ unsafe fn walk_element(
     // A group may be an aggregate control rather than layout (for example a
     // duration picker with a value and increment/decrement actions). Read its
     // own semantics before collapsing it; reuse those reads below.
-    let group_attributes =
-        (role == "AXGroup").then(|| (copy_tree_attributes(element), copy_action_names(element)));
-    let collapse_group = group_attributes
-        .as_ref()
-        .is_some_and(|(attributes, actions)| {
-            collapse_layout_group(
-                parent_selected.is_some(),
-                attributes.title.as_deref(),
-                attributes.value.as_ref().map(|v| v.state_value.as_str()),
-                attributes.description.as_deref(),
-                actions,
-            )
-        });
+    let group_actions = (role == "AXGroup").then(|| copy_action_names(element));
+    let collapse_group = group_actions.as_ref().is_some_and(|actions| {
+        collapse_layout_group(
+            parent_selected.is_some(),
+            attributes.title.as_deref(),
+            attributes.value.as_ref().map(|v| v.state_value.as_str()),
+            attributes.description.as_deref(),
+            actions,
+        )
+    });
     // Skip only pure layout groups; their children remain addressable.
     if role == "AXScrollArea" || collapse_group {
         // Still recurse — children may be interesting. Layout containers
@@ -535,9 +536,10 @@ unsafe fn walk_element(
     // This is critical for Calculator where AXTitle="" but AXDescription="2"
     // (digit buttons). Merging them would produce "2" (quoted) instead of (2)
     // (parens), breaking _find_calc_button which searches for "(2)".
-    let (attributes, actions) = group_attributes
-        .unwrap_or_else(|| (copy_tree_attributes(element), copy_action_names(element)));
+    let actions = group_actions.unwrap_or_else(|| copy_action_names(element));
     let TreeAttributes {
+        role: _,
+        frame,
         title,
         value: copied_value,
         description,
@@ -620,7 +622,6 @@ unsafe fn walk_element(
     }
 
     let element_ptr = element as usize;
-    let frame = element_screen_rect(element);
     // Structured `elements` only contains actionable nodes. Keep all new AX
     // round-trips behind that same gate so display-only rows pay no cost.
     let control_state = read_control_state_if_actionable(is_actionable, || ControlState {
