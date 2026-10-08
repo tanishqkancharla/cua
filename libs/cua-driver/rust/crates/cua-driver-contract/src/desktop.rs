@@ -9,7 +9,12 @@
 
 use crate::{
     ActionResult, ClickInput, ClipboardReadInput, ClipboardReadOutput, ClipboardWriteInput,
-    ClipboardWriteOutput, CursorAction, CursorPositionOutput, CursorSemantics, DesktopStateOutput, DragInput, GetCursorPositionInput, GetDesktopStateInput, GetScreenSizeInput, GetWindowStateInput, HotkeyInput, InvokeMenuInput, ListAppsInput, ListAppsOutput, ListWindowsInput, ListWindowsOutput, MoveCursorInput, Platform, PressKeyInput, SchemaMode, ScreenSizeOutput, ScrollInput, SetWindowFrameInput, ToolAnnotations, ToolContract, ToolInput, ToolOutput, TypeTextInput, WindowStateOutput, CloseWindowInput, CloseWindowOutput,
+    ClipboardWriteOutput, CloseWindowInput, CloseWindowOutput, CursorAction, CursorPositionOutput,
+    CursorSemantics, DesktopStateOutput, DragInput, GetCursorPositionInput, GetDesktopStateInput,
+    GetScreenSizeInput, GetWindowStateInput, HotkeyInput, InvokeMenuInput, ListAppsInput,
+    ListAppsOutput, ListWindowsInput, ListWindowsOutput, MoveCursorInput, Platform, PressKeyInput,
+    SchemaMode, ScreenSizeOutput, ScrollInput, SetWindowFrameInput, ToolAnnotations, ToolContract,
+    ToolInput, ToolOutput, TypeTextInput, WindowStateOutput,
 };
 
 const ALL_PLATFORMS: [Platform; 3] = [Platform::Macos, Platform::Windows, Platform::Linux];

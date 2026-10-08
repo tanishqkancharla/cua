@@ -2512,6 +2512,11 @@ async fn spawn_blocking_bounded<T: Send + 'static>(
 /// message carries one so the caller can branch instead of parsing prose.
 fn input_error_result(e: anyhow::Error) -> ToolResult {
     let text = e.to_string();
+    if let Some(path) = crate::atspi::native::edit_dispatch_path(&e) {
+        return ToolResult::error(text.clone()).with_structured(json!({
+            "effect": "unverifiable", "path": path, "detail": text,
+        }));
+    }
     if crate::input::is_uinput_unavailable(&e) {
         // The focus-free real-input route exists but this process cannot open
         // /dev/uinput: an honest refusal the operator can act on, not a bare
@@ -7486,13 +7491,22 @@ impl Tool for TypeTextTool {
             if !is_chromium_embedder(pid) && !is_webkitgtk_embedder(pid) {
                 if let Some(index) = resolved_elem_idx {
                     let text_ax = text.clone();
-                    if matches!(
-                        tokio::task::spawn_blocking(move || crate::atspi::type_into_editable_at(
-                            pid, index, &text_ax
-                        ))
-                        .await,
-                        Ok(Ok(()))
-                    ) {
+                    let targeted = tokio::task::spawn_blocking(move || {
+                        crate::atspi::type_into_editable_at(pid, index, &text_ax)
+                    })
+                    .await;
+                    match &targeted {
+                        Ok(Err(error)) if crate::atspi::native::edit_was_dispatched(error) => {
+                            return input_error_result(targeted.unwrap().unwrap_err());
+                        }
+                        Err(error) => {
+                            return ToolResult::error(format!(
+                                "Typing task failed; observe before retrying: {error}"
+                            ))
+                        }
+                        _ => {}
+                    }
+                    if matches!(targeted, Ok(Ok(()))) {
                         position_named_session_keyboard_cursor(
                             &self.state,
                             &args,
@@ -7600,6 +7614,17 @@ impl Tool for TypeTextTool {
                 crate::atspi::type_into_editable_at(pid, idx, &text_at)
             })
             .await;
+            match &targeted {
+                Ok(Err(error)) if crate::atspi::native::edit_was_dispatched(error) => {
+                    return input_error_result(targeted.unwrap().unwrap_err());
+                }
+                Err(error) => {
+                    return ToolResult::error(format!(
+                        "Typing task failed; observe before retrying: {error}"
+                    ))
+                }
+                _ => {}
+            }
             if let Ok(Ok(())) = targeted {
                 return type_text_ax_result_verified(
                     pid,
@@ -7719,6 +7744,14 @@ impl Tool for TypeTextTool {
             })
             .await;
             match targeted {
+                Ok(Err(error)) if crate::atspi::native::edit_was_dispatched(&error) => {
+                    return input_error_result(error)
+                }
+                Err(error) => {
+                    return ToolResult::error(format!(
+                        "Typing task failed; observe before retrying: {error}"
+                    ))
+                }
                 Ok(Ok(())) => {
                     return type_text_ax_result_verified(
                         pid,
@@ -7991,6 +8024,14 @@ impl Tool for TypeTextTool {
                 .await;
 
         match atspi_result {
+            Ok(Err(error)) if crate::atspi::native::edit_was_dispatched(&error) => {
+                return input_error_result(error)
+            }
+            Err(error) => {
+                return ToolResult::error(format!(
+                    "Typing task failed; observe before retrying: {error}"
+                ))
+            }
             Ok(Ok(())) => {
                 // AT-SPI succeeded — focus-free typing worked (Qt6, GTK4, etc.)!
                 // Electron/Chromium can echo this write without the renderer
@@ -8019,13 +8060,22 @@ impl Tool for TypeTextTool {
             let result = crate::atspi::type_into_editable(pid, &text_clone2);
 
             // Restore state with FocusOut
-            crate::input::send_focus_out(xid)?;
-
-            result
+            let restored = crate::input::send_focus_out(xid);
+            // Preserve a partial edit's identity even when focus restoration fails.
+            result?;
+            restored.map_err(|error| error.context(crate::atspi::native::EditDispatched::atspi()))
         })
         .await;
 
         match qt5_result {
+            Ok(Err(error)) if crate::atspi::native::edit_was_dispatched(&error) => {
+                return input_error_result(error)
+            }
+            Err(error) => {
+                return ToolResult::error(format!(
+                    "Typing task failed; observe before retrying: {error}"
+                ))
+            }
             Ok(Ok(())) => {
                 return type_text_ax_result(pid, text_len, "via AT-SPI with focus workaround");
             }
@@ -8055,8 +8105,10 @@ impl Tool for TypeTextTool {
             // focused widget, so background XSendEvent typing doesn't land. Fill
             // the editable field via AT-SPI instead — focus-free and toolkit-
             // agnostic. Fall back to Tk send or XSendEvent when no a11y field is exposed.
-            if crate::atspi::insert_text(pid, &text).unwrap_or(false) {
-                return Ok(("ax", None));
+            match crate::atspi::insert_text(pid, &text) {
+                Ok(true) => return Ok(("ax", None)),
+                Err(error) if crate::atspi::native::edit_was_dispatched(&error) => return Err(error),
+                _ => {}
             }
             // Tk apps: use Tk's `send` command (no AT-SPI bridge, so AT-SPI above
             // returned false). This is the Tk-specific override, like CDP for Chromium.

@@ -203,12 +203,10 @@ mod pacman {
                 for field in ["current_version", "current_channel"] {
                     assert!(!state[field].as_str().unwrap().is_empty(), "{state}");
                 }
-                assert!(
-                    state["error"]
-                        .as_str()
-                        .unwrap()
-                        .contains("sudo pacman -Syu")
-                );
+                assert!(state["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("sudo pacman -Syu"));
                 assert_eq!(std::fs::read_to_string(&preference).ok().as_deref(), saved);
                 assert_eq!(std::fs::read_to_string(&cache_path).unwrap(), cache);
             }

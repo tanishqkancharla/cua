@@ -6,7 +6,16 @@
 //! MCP and daemon transports are downstream adapters rather than peer contracts.
 
 use cua_driver_contract::{
-    ActionResult, ClickInput, ClipboardReadInput, ClipboardWriteInput, DragInput, EndSessionInput, EndSessionOutput, EscalateSessionInput, GetAgentCursorStateInput, GetCursorPositionInput, GetDesktopStateInput, GetScreenSizeInput, GetSessionInput, GetSessionStateInput, GetWindowStateInput, HotkeyInput, InvokeMenuInput, ListAppsInput, ListAppsOutput, ListSessionsInput, ListSessionsOutput, ListWindowsInput, ListWindowsOutput, MoveCursorInput, ParseVisualRegionsInput, PressKeyInput, ScrollInput, SessionOutput, SessionStateOutput, SetAgentCursorEnabledInput, SetAgentCursorMotionInput, SetAgentCursorThemeInput, SetWindowFrameInput, SnapshotImage, StartSessionInput, StartSessionOutput, ToolInput, ToolOutput, TypeTextInput, VerifyStateInput, VerifyStateOutput, WindowStateOutput, CloseWindowInput,
+    ActionResult, ClickInput, ClipboardReadInput, ClipboardWriteInput, CloseWindowInput, DragInput,
+    EndSessionInput, EndSessionOutput, EscalateSessionInput, GetAgentCursorStateInput,
+    GetCursorPositionInput, GetDesktopStateInput, GetScreenSizeInput, GetSessionInput,
+    GetSessionStateInput, GetWindowStateInput, HotkeyInput, InvokeMenuInput, ListAppsInput,
+    ListAppsOutput, ListSessionsInput, ListSessionsOutput, ListWindowsInput, ListWindowsOutput,
+    MoveCursorInput, ParseVisualRegionsInput, PressKeyInput, ScrollInput, SessionOutput,
+    SessionStateOutput, SetAgentCursorEnabledInput, SetAgentCursorMotionInput,
+    SetAgentCursorThemeInput, SetWindowFrameInput, SnapshotImage, StartSessionInput,
+    StartSessionOutput, ToolInput, ToolOutput, TypeTextInput, VerifyStateInput, VerifyStateOutput,
+    WindowStateOutput,
 };
 use cua_driver_core::daemon::{
     is_daemon_listening, request_daemon_metadata, send_request, socket_path_for_namespace,

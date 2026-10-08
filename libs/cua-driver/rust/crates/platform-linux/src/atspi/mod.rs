@@ -468,6 +468,7 @@ pub fn type_into_editable_at(pid: u32, idx: usize, text: &str) -> Result<()> {
     if let Some(object_ref) = cache::cached_element(pid, None, idx).and_then(|e| e.object_ref) {
         match native::type_into_editable_ref(&object_ref, text) {
             Ok(()) => return Ok(()),
+            Err(error) if native::edit_was_dispatched(&error) => return Err(error),
             Err(error) => tracing::debug!(
                 "cached element {idx} (pid {pid}) editable write failed, re-resolving: {error:#}"
             ),

@@ -50,7 +50,13 @@ pub use cursor::{
     CursorReducedMotion, CursorSemantics, CursorTarget, CursorThemeSelection,
 };
 pub use inputs::{
-    action_target_schema, ActionTarget, CaptureScope, ClickButton, ClickInput, ClickPosition, ClipboardReadInput, ClipboardWriteInput, CursorMotionSelection, DesktopScope, DragInput, EndSessionInput, EscalateSessionInput, EscalationReason, GetAgentCursorStateInput, GetCursorPositionInput, GetDesktopStateInput, GetScreenSizeInput, GetSessionInput, GetSessionStateInput, HotkeyInput, InputDeliveryMode, InvokeMenuInput, LegacyClickInput, ListSessionsInput, MoveCursorInput, PressKeyInput, ScrollBy, ScrollDirection, ScrollInput, SetAgentCursorEnabledInput, SetAgentCursorMotionInput, SetAgentCursorThemeInput, CloseWindowInput,
+    action_target_schema, ActionTarget, CaptureScope, ClickButton, ClickInput, ClickPosition,
+    ClipboardReadInput, ClipboardWriteInput, CloseWindowInput, CursorMotionSelection, DesktopScope,
+    DragInput, EndSessionInput, EscalateSessionInput, EscalationReason, GetAgentCursorStateInput,
+    GetCursorPositionInput, GetDesktopStateInput, GetScreenSizeInput, GetSessionInput,
+    GetSessionStateInput, HotkeyInput, InputDeliveryMode, InvokeMenuInput, LegacyClickInput,
+    ListSessionsInput, MoveCursorInput, PressKeyInput, ScrollBy, ScrollDirection, ScrollInput,
+    SetAgentCursorEnabledInput, SetAgentCursorMotionInput, SetAgentCursorThemeInput,
     SetWindowFrameInput, StartSessionInput, ToolInput, TypeTextInput,
     MULTI_CALL_SESSION_DESCRIPTION,
 };
@@ -59,13 +65,14 @@ pub use outputs::{
     refusal_envelope_schema, ActionDelivery, ActionDeliveryMode, ActionEffect, ActionError,
     ActionEscalation, ActionEscalationReason, ActionEscalationTarget, ActionEvidence,
     ActionEvidenceKind, ActionResult, ActionResultValidationError, ActionRoute,
-    AgentOverlayCapture, AgentOverlayCaptureStatus, ClipboardReadOutput, ClipboardWriteOutput, CloseWindowOutput, CloseWindowStatus,
-    CursorMotionOutput, CursorPointOutput, CursorPositionOutput, CursorThemeOutput,
-    CursorVisualOutput, DesktopStateOutput, EffectiveScope, EndSessionOutput,
-    GetAgentCursorStateOutput, ListSessionsOutput, ScreenSizeOutput, SessionClientKindOutput,
-    SessionLifecycleState, SessionOutput, SessionStateOutput, SessionTransportOutput,
-    SetAgentCursorEnabledOutput, SetAgentCursorMotionOutput, SetAgentCursorThemeOutput,
-    StartSessionOutput, ToolOutput, TOOL_INVOCATION_FAILED_CODE,
+    AgentOverlayCapture, AgentOverlayCaptureStatus, ClipboardReadOutput, ClipboardWriteOutput,
+    CloseWindowOutput, CloseWindowStatus, CursorMotionOutput, CursorPointOutput,
+    CursorPositionOutput, CursorThemeOutput, CursorVisualOutput, DesktopStateOutput,
+    EffectiveScope, EndSessionOutput, GetAgentCursorStateOutput, ListSessionsOutput,
+    ScreenSizeOutput, SessionClientKindOutput, SessionLifecycleState, SessionOutput,
+    SessionStateOutput, SessionTransportOutput, SetAgentCursorEnabledOutput,
+    SetAgentCursorMotionOutput, SetAgentCursorThemeOutput, StartSessionOutput, ToolOutput,
+    TOOL_INVOCATION_FAILED_CODE,
 };
 pub use verification::{
     BoundsExpectation, ElementPredicate, ElementSelector, PredicateOutcome, StatePredicate,
