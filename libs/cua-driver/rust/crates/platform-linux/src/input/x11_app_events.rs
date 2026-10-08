@@ -185,7 +185,7 @@ mod tests {
     use super::*;
     #[test]
     fn only_the_exact_client_timestamp_and_protocol_reply_releases_a_borrowed_key() {
-        let event = ClientMessageEvent::new(32, 1, 2, [3, 4, 5, 0, 0]);
+        let event = ClientMessageEvent::new(32, 1, 2u32, [3, 4, 5, 0, 0]);
         assert!(is_reply(&event, 1, 2, 3, 4, 5));
         for (root, protocols, ping, timestamp, client) in [
             (9, 2, 3, 4, 5),
@@ -196,9 +196,9 @@ mod tests {
         ] {
             assert!(!is_reply(&event, root, protocols, ping, timestamp, client));
         }
-        let wrong_format = ClientMessageEvent::new(8, 1, 2, [3, 4, 5, 0, 0]);
+        let wrong_format = ClientMessageEvent::new(8, 1, 2u32, [3, 4, 5, 0, 0]);
         assert!(!is_reply(&wrong_format, 1, 2, 3, 4, 5));
-        let changed_reserved_fields = ClientMessageEvent::new(32, 1, 2, [3, 4, 5, 8, 0]);
+        let changed_reserved_fields = ClientMessageEvent::new(32, 1, 2u32, [3, 4, 5, 8, 0]);
         assert!(!is_reply(&changed_reserved_fields, 1, 2, 3, 4, 5));
     }
 }
