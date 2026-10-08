@@ -438,10 +438,12 @@ pub unsafe fn copy_stringish_attr(
     result
 }
 
-/// The display attributes already read together by the tree walker. Values
+/// Fresh role, display and geometry attributes used by the tree walker. Values
 /// are owned Rust data, so the temporary native array never escapes a read.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 pub struct TreeAttributes {
+    pub role: Option<String>,
+    pub frame: Option<[f64; 4]>,
     pub title: Option<String>,
     pub value: Option<StringishAttrValue>,
     pub description: Option<String>,
@@ -452,7 +454,7 @@ pub struct TreeAttributes {
 unsafe fn tree_attributes_from_values(
     values: &CFArray<core_foundation::base::CFType>,
 ) -> Option<TreeAttributes> {
-    if values.len() != 5 {
+    if values.len() != 8 {
         return None;
     }
     let string = |index| {
@@ -461,6 +463,13 @@ unsafe fn tree_attributes_from_values(
             .then(|| CFStr::wrap_under_get_rule(value.as_CFTypeRef() as _).to_string())
     };
     Some(TreeAttributes {
+        role: string(5),
+        frame: values
+            .get(6)
+            .zip(values.get(7))
+            .and_then(|(position, size)| {
+                frame_from_values(position.as_CFTypeRef(), size.as_CFTypeRef())
+            }),
         title: string(0),
         value: values
             .get(1)
@@ -471,11 +480,41 @@ unsafe fn tree_attributes_from_values(
     })
 }
 
-/// Read the same five display attributes with one fresh AX request. With
+/// Convert borrowed geometry slots without taking ownership or inventing bounds.
+unsafe fn frame_from_values(position: CFTypeRef, size: CFTypeRef) -> Option<[f64; 4]> {
+    if core_foundation::base::CFGetTypeID(position) != AXValueGetTypeID()
+        || core_foundation::base::CFGetTypeID(size) != AXValueGetTypeID()
+        || AXValueGetType(position as _) != kAXValueCGPointType
+        || AXValueGetType(size as _) != kAXValueCGSizeType
+    {
+        return None;
+    }
+    let mut point = CGPointValue { x: 0.0, y: 0.0 };
+    let mut dimensions = CGSizeValue {
+        width: 0.0,
+        height: 0.0,
+    };
+    if !AXValueGetValue(
+        position as _,
+        kAXValueCGPointType,
+        &mut point as *mut _ as _,
+    ) || !AXValueGetValue(
+        size as _,
+        kAXValueCGSizeType,
+        &mut dimensions as *mut _ as _,
+    ) || dimensions.width < 1.0
+        || dimensions.height < 1.0
+    {
+        return None;
+    }
+    Some([point.x, point.y, dimensions.width, dimensions.height])
+}
+
+/// Read role, display and geometry with one fresh AX request. With
 /// options=0, an unsupported attribute occupies its own CFNull/AXError slot;
 /// typed conversion preserves that slot as unknown without losing later data.
 /// An unavailable/malformed batch uses the existing individual reads. No
-/// values are cached and actions/writability/geometry keep their own queries.
+/// values are cached and actions/writability/control state keep their own queries.
 ///
 /// # Safety
 /// `element` must be a valid, live AX object bounded by its messaging timeout.
@@ -486,6 +525,9 @@ pub unsafe fn copy_tree_attributes(element: AXUIElementRef) -> TreeAttributes {
         "AXDescription",
         "AXIdentifier",
         "AXHelp",
+        "AXRole",
+        "AXPosition",
+        "AXSize",
     ]
     .map(CFStr::new);
     let attributes = CFArray::from_CFTypes(&names);
@@ -505,6 +547,8 @@ pub unsafe fn copy_tree_attributes(element: AXUIElementRef) -> TreeAttributes {
         }
     }
     TreeAttributes {
+        role: copy_string_attr(element, "AXRole"),
+        frame: element_screen_rect(element),
         title: copy_string_attr(element, "AXTitle"),
         value: copy_stringish_attr(element, "AXValue"),
         description: copy_string_attr(element, "AXDescription"),
@@ -1296,8 +1340,13 @@ mod tests {
                 description.as_CFType(),
                 identifier.as_CFType(),
                 help.as_CFType(),
+                CFStr::new("AXTextField").as_CFType(),
+                CFBoolean::false_value().as_CFType(),
+                CFBoolean::false_value().as_CFType(),
             ]);
             let observed = unsafe { tree_attributes_from_values(&array) }.unwrap();
+            assert_eq!(observed.role.as_deref(), Some("AXTextField"));
+            assert_eq!(observed.frame, None);
             assert_eq!(observed.title.as_deref(), Some(""));
             assert_eq!(observed.value, unsafe {
                 coerce_stringish_value(value.as_CFTypeRef())
@@ -1323,12 +1372,17 @@ mod tests {
             null,
             CFNumber::from(4.0).as_CFType(),
             identifier.as_CFType(),
+            error.clone(),
+            CFStr::new("AXButton").as_CFType(),
+            error.clone(),
             error,
         ]);
         let observed = unsafe { tree_attributes_from_values(&array) }.unwrap();
         assert_eq!(
             observed,
             TreeAttributes {
+                role: Some("AXButton".into()),
+                frame: None,
                 title: None,
                 value: None,
                 description: None,
@@ -1336,10 +1390,54 @@ mod tests {
                 help: None
             }
         );
-        for count in [0, 4, 6] {
+        for count in [0, 5, 7, 9] {
             let wrong = CFArray::from_CFTypes(&vec![identifier.as_CFType(); count]);
             assert!(unsafe { tree_attributes_from_values(&wrong) }.is_none());
         }
+    }
+
+    #[test]
+    fn batched_geometry_uses_exact_native_types_and_original_size_bounds() {
+        let position = CGPointValue { x: -40.5, y: 100.0 };
+        let make = |kind, data: *const c_void| unsafe {
+            core_foundation::base::CFType::wrap_under_create_rule(AXValueCreate(kind, data) as _)
+        };
+        let p = make(kAXValueCGPointType, &position as *const _ as _);
+        for (width, height, expected) in [
+            (200.0, 80.0, Some([-40.5, 100.0, 200.0, 80.0])),
+            (1.0, 1.0, Some([-40.5, 100.0, 1.0, 1.0])),
+            (0.0, 80.0, None),
+            (-1.0, 80.0, None),
+            (200.0, 0.5, None),
+        ] {
+            let size = CGSizeValue { width, height };
+            let s = make(kAXValueCGSizeType, &size as *const _ as _);
+            assert_eq!(
+                unsafe { frame_from_values(p.as_CFTypeRef(), s.as_CFTypeRef()) },
+                expected
+            );
+            assert!(unsafe { frame_from_values(s.as_CFTypeRef(), p.as_CFTypeRef()) }.is_none());
+            let slots = CFArray::from_CFTypes(&[
+                CFStr::new("title").as_CFType(),
+                CFStr::new("value").as_CFType(),
+                CFStr::new("").as_CFType(),
+                CFStr::new("id").as_CFType(),
+                CFStr::new("").as_CFType(),
+                CFStr::new("AXTextArea").as_CFType(),
+                p.clone(),
+                s,
+            ]);
+            assert_eq!(
+                unsafe { tree_attributes_from_values(&slots) }
+                    .unwrap()
+                    .frame,
+                expected
+            );
+        }
+        assert!(
+            unsafe { frame_from_values(p.as_CFTypeRef(), CFStr::new("size").as_CFTypeRef()) }
+                .is_none()
+        );
     }
 
     #[test]
