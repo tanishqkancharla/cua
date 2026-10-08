@@ -494,26 +494,19 @@ unsafe fn walk_element(
     // A group may be an aggregate control rather than layout (for example a
     // duration picker with a value and increment/decrement actions). Read its
     // own semantics before collapsing it; reuse those reads below.
-    let group_attributes = (role == "AXGroup").then(|| {
-        (
-            copy_string_attr(element, "AXTitle"),
-            copy_stringish_attr(element, "AXValue"),
-            copy_string_attr(element, "AXDescription"),
-            copy_action_names(element),
-        )
-    });
-    let collapse_group =
-        group_attributes
-            .as_ref()
-            .is_some_and(|(title, value, description, actions)| {
-                collapse_layout_group(
-                    parent_selected.is_some(),
-                    title.as_deref(),
-                    value.as_ref().map(|v| v.state_value.as_str()),
-                    description.as_deref(),
-                    actions,
-                )
-            });
+    let group_attributes =
+        (role == "AXGroup").then(|| (copy_tree_attributes(element), copy_action_names(element)));
+    let collapse_group = group_attributes
+        .as_ref()
+        .is_some_and(|(attributes, actions)| {
+            collapse_layout_group(
+                parent_selected.is_some(),
+                attributes.title.as_deref(),
+                attributes.value.as_ref().map(|v| v.state_value.as_str()),
+                attributes.description.as_deref(),
+                actions,
+            )
+        });
     // Skip only pure layout groups; their children remain addressable.
     if role == "AXScrollArea" || collapse_group {
         // Still recurse — children may be interesting. Layout containers
@@ -542,14 +535,15 @@ unsafe fn walk_element(
     // This is critical for Calculator where AXTitle="" but AXDescription="2"
     // (digit buttons). Merging them would produce "2" (quoted) instead of (2)
     // (parens), breaking _find_calc_button which searches for "(2)".
-    let (title, copied_value, description, actions) = group_attributes.unwrap_or_else(|| {
-        (
-            copy_string_attr(element, "AXTitle"),
-            copy_stringish_attr(element, "AXValue"),
-            copy_string_attr(element, "AXDescription"),
-            copy_action_names(element),
-        )
-    });
+    let (attributes, actions) = group_attributes
+        .unwrap_or_else(|| (copy_tree_attributes(element), copy_action_names(element)));
+    let TreeAttributes {
+        title,
+        value: copied_value,
+        description,
+        identifier,
+        help,
+    } = attributes;
     // Read AXValue once with enough type information to preserve the existing
     // string-only markdown while also exposing numeric/boolean control state.
     let value = copied_value
@@ -573,8 +567,7 @@ unsafe fn walk_element(
     } else {
         None
     };
-    let identifier = copy_string_attr(element, "AXIdentifier");
-    let help = copy_string_attr(element, "AXHelp").filter(|h| !h.trim().is_empty());
+    let help = help.filter(|h| !h.trim().is_empty());
 
     let visible_title = title.as_deref().unwrap_or("").trim().to_owned();
     let visible_description = description.as_deref().unwrap_or("").trim().to_owned();
