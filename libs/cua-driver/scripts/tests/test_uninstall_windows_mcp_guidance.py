@@ -1,10 +1,14 @@
 """Regression coverage for ownership-safe Windows Claude MCP guidance."""
 
 from pathlib import Path
+import sys
 
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
-UNINSTALL_PS1 = REPO_ROOT / "libs/cua-driver/scripts/uninstall.ps1"
+sys.path.insert(0, str(REPO_ROOT / ".github/scripts"))
+from validate_release_versions import driver_release_uninstaller_path
+
+UNINSTALL_PS1 = driver_release_uninstaller_path(REPO_ROOT, "windows")
 
 
 def test_windows_guidance_requires_command_ownership_verification() -> None:

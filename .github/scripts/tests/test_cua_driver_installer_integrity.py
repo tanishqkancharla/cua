@@ -17,6 +17,8 @@ import sys
 import tarfile
 from pathlib import Path
 
+from validate_release_versions import driver_release_powershell_path
+
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -300,7 +302,7 @@ def test_without_cosign_a_signed_release_warns_and_installs(fixture: Fixture) ->
 
 def test_installers_share_the_checksum_floor_and_workflow_identity() -> None:
     shell = (SCRIPTS / "_install-rust.sh").read_text(encoding="utf-8")
-    powershell = (SCRIPTS / "install.ps1").read_text(encoding="utf-8")
+    powershell = driver_release_powershell_path(REPO_ROOT).read_text(encoding="utf-8")
     assert 'CHECKSUMS_REQUIRED_FROM="0.31.0"' in shell
     assert '$ChecksumsRequiredFrom = [version]"0.31.0"' in powershell
     assert 'SIGSTORE_REQUIRED_FROM="0.32.0"' in shell
@@ -381,7 +383,7 @@ def run_pwsh(fixture: Fixture, version: str, name: str, *, cosign: bool, require
             "-File",
             str(harness),
             "-Script",
-            str(SCRIPTS / "install.ps1"),
+            str(driver_release_powershell_path(REPO_ROOT)),
             "-Releases",
             str(fixture.releases),
             "-Tag",
@@ -399,6 +401,24 @@ def run_pwsh(fixture: Fixture, version: str, name: str, *, cosign: bool, require
         text=True,
         timeout=120,
     )
+
+
+def test_windows_integrity_runner_binds_preserved_release_script(tmp_path: Path, monkeypatch):
+    # Run command construction on every OS even when PowerShell is unavailable.
+    # This does not claim execution of the Windows installer or native behavior.
+    fixture = Fixture(tmp_path)
+    calls = []
+    def capture(args, **kwargs):
+        calls.append((args, kwargs))
+        return subprocess.CompletedProcess(args, 0, "", "")
+    monkeypatch.setattr(subprocess, "run", capture)
+    run_pwsh(fixture, "0.33.4", "owned-fixture.zip", cosign=False)
+    args, kwargs = calls[0]
+    assert Path(args[args.index("-Script") + 1]) == SCRIPTS / "_upstream-install.ps1"
+    assert str(SCRIPTS / "install.ps1") not in args
+    assert args[args.index("-Releases") + 1] == str(fixture.releases)
+    assert (tmp_path / "harness.ps1").is_file()
+    assert kwargs["timeout"] == 120
 
 
 needs_pwsh = pytest.mark.skipif(shutil.which("pwsh") is None, reason="needs PowerShell 7")

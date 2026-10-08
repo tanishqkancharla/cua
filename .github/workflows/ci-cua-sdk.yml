@@ -53,6 +53,19 @@ env:
   CARGO_BUILD_JOBS: "4"
 
 jobs:
+  fixture-lock:
+    name: Standalone fixture lock preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
+        with:
+          toolchain: "1.97.1"
+      - name: Resolve the original standalone fixture with its checked-in lock
+        # Full metadata catches the lock mismatch; --no-deps does not.
+        run: cargo metadata --locked --format-version 1 --manifest-path libs/cua-spacesd/tests/spaces-e2e/Cargo.toml > /dev/null
+
   rust:
     name: rust (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -152,6 +165,7 @@ jobs:
   # cua-spacesd server core in process. A standalone workspace so libs/cua
   # never depends on the driver workspace (see the boundary check above).
   spaces-e2e:
+    needs: fixture-lock
     name: spaces e2e (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
@@ -238,6 +252,7 @@ jobs:
         run: gradle --no-daemon -p libs/cua/kotlin compileKotlin
 
   python:
+    needs: fixture-lock
     name: python smoke (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     # A cold Windows run builds cua-sdk (release), the fixtures and the CLI:
@@ -284,6 +299,7 @@ jobs:
           uv run --no-project --isolated --python 3.12 --with pytest --with "$WHEEL" pytest -q -p no:cacheprovider tests
 
   node:
+    needs: fixture-lock
     name: node smoke (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     # A cold macOS run (release cua-sdk, fixtures, both CLIs) passed 45
@@ -325,6 +341,7 @@ jobs:
         run: npm --prefix typescript test
 
   browser:
+    needs: fixture-lock
     name: browser (wasm32) build + smoke
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -363,6 +380,7 @@ jobs:
           cd typescript && node --test test/browser.test.mjs
 
   swift:
+    needs: fixture-lock
     name: swift smoke (macOS)
     runs-on: macos-26
     # Cold, the release cua-sdk build alone nears 45 minutes on macos-26.

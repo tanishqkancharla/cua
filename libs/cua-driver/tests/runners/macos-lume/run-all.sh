@@ -17,6 +17,8 @@ LOCAL_APP="/Applications/OpenSkyDriver.app"
 # Match this fork's installer, runtime daemon namespace and stable app identity.
 INSTALLED_BIN="${HOME}/.local/bin/opensky-driver"
 LOCAL_PLIST="${HOME}/Library/LaunchAgents/com.opensky.driver.plist"
+SCREEN_CAPTURE_APPROVALS="${HOME}/Library/Group Containers/group.com.apple.replayd/ScreenCaptureApprovals.plist"
+SCREEN_CAPTURE_CLIENT="com.opensky.driver"
 CUA_E2E_MACOS_DAEMON_SOCKET="${CUA_E2E_MACOS_DAEMON_SOCKET:-${HOME}/Library/Caches/opensky-driver/opensky-driver.sock}"
 # A run-owned Cargo namespace keeps a certification build off the seed image's
 # and any other commit's target state without deleting a shared cache.

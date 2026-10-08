@@ -4,7 +4,9 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Result};
-use platform_linux::input::{send_click, send_key, send_key_at, send_key_xtest, send_type_text};
+use platform_linux::input::{
+    send_click, send_key, send_key_at, send_key_xtest, send_type_text, send_type_text_xtest,
+};
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::*;
 use x11rb::protocol::Event;
@@ -277,5 +279,42 @@ fn background_keys_deliver_complete_sequences_without_changing_focus() -> Result
         assert_key(&conn, &pair[0].1, keysym)?;
     }
     assert_eq!(conn.get_input_focus()?.reply()?.focus, sentinel);
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires an isolated X11 display"]
+fn unicode_typing_restores_borrowed_keycodes_before_its_connection_closes() -> Result<()> {
+    let (conn, screen) = connect()?;
+    let root = conn.setup().roots[screen].root;
+    let target = input_window(&conn, root, 20, 20)?;
+    conn.set_input_focus(InputFocus::PARENT, target, x11rb::CURRENT_TIME)?
+        .check()?;
+    let first_keycode = conn.setup().min_keycode;
+    let keycode_count = conn.setup().max_keycode - first_keycode + 1;
+    let before = conn
+        .get_keyboard_mapping(first_keycode, keycode_count)?
+        .reply()?;
+    let text = "é—中文😀é";
+    for foreground in [false, true] {
+        if foreground {
+            send_type_text_xtest(text)?;
+        } else {
+            send_type_text(u64::from(target), text)?;
+        }
+        let events = keyboard_events(&conn, text.chars().count() * 2)?;
+        for pair in events.chunks_exact(2) {
+            assert!(pair[0].0 && !pair[1].0);
+            assert_eq!(pair[0].1.event, target);
+            assert_eq!(pair[1].1.event, target);
+            assert_eq!(pair[0].1.detail, pair[1].1.detail);
+        }
+        let after = conn
+            .get_keyboard_mapping(first_keycode, keycode_count)?
+            .reply()?;
+        assert_eq!(after.keysyms_per_keycode, before.keysyms_per_keycode);
+        assert_eq!(after.keysyms, before.keysyms);
+        assert_eq!(conn.get_input_focus()?.reply()?.focus, target);
+    }
     Ok(())
 }

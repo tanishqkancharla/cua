@@ -4144,16 +4144,23 @@ pub(crate) struct RemappedKeycode<'a> {
 impl Drop for RemappedKeycode<'_> {
     fn drop(&mut self) {
         // Best-effort restore: re-install the original keysyms for this keycode
-        // and flush. Errors are swallowed deliberately — Drop must not panic in
-        // the daemon, and the worst case of a failed restore is a single spare
-        // keycode left mapped (it was unused to begin with), never a crash.
-        let _ = self.conn.change_keyboard_mapping(
+        // and wait for the server to process it. A flush alone can leave restore
+        // pending at the server when this short-lived connection closes.
+        // Drop still must not panic; a failed restore remains an explicit
+        // diagnostic and never triggers another input attempt.
+        let restored = self.conn.change_keyboard_mapping(
             1,
             self.keycode,
             self.keysyms_per_keycode,
             &self.original_keysyms,
         );
-        let _ = self.conn.flush();
+        let failure = match restored {
+            Ok(cookie) => cookie.check().err().map(|error| error.to_string()),
+            Err(error) => Some(error.to_string()),
+        };
+        if let Some(error) = failure {
+            tracing::warn!(keycode = self.keycode, %error, "Failed to restore borrowed X11 keycode");
+        }
     }
 }
 

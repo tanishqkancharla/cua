@@ -871,7 +871,11 @@ impl BrowserEngine {
             self.platform.isolated_browser_executable()?
         };
         let prepared_profile = prepare_profile(profile_request)?;
-        let command = isolated_browser_command(&executable, &prepared_profile.path, profile_request.headless);
+        let command = isolated_browser_command(
+            &executable,
+            &prepared_profile.path,
+            profile_request.headless,
+        );
         let mut child = self
             .platform
             .spawn_isolated_browser(command, &prepared_profile.path)
