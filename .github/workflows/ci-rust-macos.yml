@@ -55,7 +55,8 @@ jobs:
         with:
           workspaces: "libs/cua-driver/rust -> target"
           shared-key: macos-unit
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          # Same-repository PR writes stay scoped to the PR merge ref.
+          save-if: ${{ github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
       # Run each crate's whole inline suite so new test modules cannot be
       # silently left out by a hand-maintained filter list. Tests that need a
       # logged-in, TCC-authorized desktop are #[ignore] and belong to the Lume
