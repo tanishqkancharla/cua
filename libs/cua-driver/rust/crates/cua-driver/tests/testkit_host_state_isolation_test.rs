@@ -32,7 +32,9 @@ fn history_roots(home: &Path) -> Vec<PathBuf> {
             .expect("independent source distribution metadata");
     assert_eq!(metadata["schemaVersion"], 1);
     assert_eq!(metadata["distribution"], "source-build");
-    let namespace = metadata["product"].as_str().expect("source product namespace");
+    let namespace = metadata["product"]
+        .as_str()
+        .expect("source product namespace");
     assert_eq!(namespace, "opensky-driver");
     // Seed both the actual source product and inherited namespaces. Keep the
     // shared-host refusal control: a misplaced seed must still fail this owner.

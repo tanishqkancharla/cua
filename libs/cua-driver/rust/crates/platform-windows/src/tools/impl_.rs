@@ -395,7 +395,9 @@ async fn track_overlay_drag(
     crate::overlay::send_command(key, cursor_overlay::OverlayCommand::SetPressed(false));
 }
 use cua_driver_contract::{
-    ClickButton, DragInput, GetCursorPositionInput, GetDesktopStateInput, GetScreenSizeInput, HotkeyInput, InvokeMenuInput, MoveCursorInput, PressKeyInput, ScrollDirection, ScrollInput, TypeTextInput, ClickInput, CloseWindowInput,
+    ClickButton, ClickInput, CloseWindowInput, DragInput, GetCursorPositionInput,
+    GetDesktopStateInput, GetScreenSizeInput, HotkeyInput, InvokeMenuInput, MoveCursorInput,
+    PressKeyInput, ScrollDirection, ScrollInput, TypeTextInput,
 };
 use cua_driver_core::{
     protocol::ToolResult,
