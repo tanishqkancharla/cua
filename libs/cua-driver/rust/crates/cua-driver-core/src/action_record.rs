@@ -1932,9 +1932,14 @@ mod tests {
         assert_eq!(targeted.transport, ActionTransport::MacosCgEventPid);
         assert_eq!(targeted.actual_delivery, Some(ActualDelivery::Foreground));
         let targeted_public = targeted.public_result().expect("public PID ActionResult");
-        assert_eq!(targeted_public.route, cua_driver_contract::ActionRoute::SyntheticEvents);
-        assert_eq!(targeted_public.effect, cua_driver_contract::ActionEffect::Unverifiable);
-
+        assert_eq!(
+            targeted_public.route,
+            cua_driver_contract::ActionRoute::SyntheticEvents
+        );
+        assert_eq!(
+            targeted_public.effect,
+            cua_driver_contract::ActionEffect::Unverifiable
+        );
     }
 
     #[test]
