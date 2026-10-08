@@ -983,18 +983,18 @@ impl Tool for ClickTool {
                         "Dispatched one guarded foreground PID-addressed pointer click on primary button [{idx}] in exact window {wid}; AXPress is not advertised. Confirm the effect in the next observation.{}",
                         changes.result_suffix(),
                     )).with_structured(serde_json::json!({
-                        "path": "cgevent", "verified": false, "effect": "unverifiable",
+                        "path": "cgevent_pid", "verified": false, "effect": "unverifiable",
                         "dispatch_attempted": true, "ax_action_attempted": false,
                         "action_enumeration": "omitted",
                     })),
                     Ok(Err((error, attempted))) => ToolResult::error(format!("Primary button foreground pointer failed: {error}; observe before deciding on another input"))
                         .with_structured(serde_json::json!({
-                            "path": "cgevent", "verified": false,
+                            "path": "cgevent_pid", "verified": false,
                             "effect": if attempted { "unknown" } else { "refused" },
                             "dispatch_attempted": attempted, "retry": "observe_before_deciding",
                         })),
                     Err(error) => ToolResult::error(format!("Primary button pointer task failed: {error}; its outcome is unknown; do not automatically replay"))
-                        .with_structured(serde_json::json!({ "path": "cgevent", "effect": "unknown", "verified": false, "retry": "observe_before_deciding" })),
+                        .with_structured(serde_json::json!({ "path": "cgevent_pid", "effect": "unknown", "verified": false, "retry": "observe_before_deciding" })),
                 };
             }
 
