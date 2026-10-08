@@ -1898,7 +1898,11 @@ fn perform_ax_click(
                     window_id,
                     1,
                     &modifier_refs,
-                    crate::input::mouse::WindowClickDelivery::from_foreground(foreground),
+                    if foreground {
+                        crate::input::mouse::WindowClickDelivery::Foreground
+                    } else {
+                        crate::input::mouse::WindowClickDelivery::NativeCollectionBackground
+                    },
                 )?;
             }
             // AppKit may publish a transient AXSelected transition while the
