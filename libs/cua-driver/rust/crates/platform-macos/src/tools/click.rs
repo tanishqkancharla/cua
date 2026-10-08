@@ -964,31 +964,37 @@ impl Tool for ClickTool {
                         let point = primary_button_pointer_point(
                             crate::ax::bindings::element_screen_center(element), Some(current.bounds),
                         )?;
-                        // Choose one physical input before dispatch. Do not perform
-                        // an unadvertised AX action or replay a failed pointer call.
+                        // Deliver one public PID-addressed, window-local click after
+                        // proving exact foreground focus. The global HID tap can
+                        // acknowledge dispatch without Safari consuming the event.
+                        // Do not invoke an unadvertised AX action or replay input.
                         attempted = true;
-                        crate::input::mouse::click_at_xy_desktop_with_modifiers(point.0, point.1, 1, "left", &[])
+                        crate::input::mouse::click_at_xy_with_window_local(
+                            pid, point.0, point.1,
+                            point.0 - current.bounds.x, point.1 - current.bounds.y,
+                            wid, 1, &[], crate::input::mouse::WindowClickDelivery::Foreground,
+                        )
                     });
                     result.map_err(|error| (error, attempted))
                 }).await;
                 let changes = super::finish_window_observation(snapshot).await;
                 return match result {
                     Ok(Ok(())) => ToolResult::text(format!(
-                        "Dispatched one guarded foreground pointer click on primary button [{idx}] in exact window {wid}; AXPress is not advertised. Confirm the effect in the next observation.{}",
+                        "Dispatched one guarded foreground PID-addressed pointer click on primary button [{idx}] in exact window {wid}; AXPress is not advertised. Confirm the effect in the next observation.{}",
                         changes.result_suffix(),
                     )).with_structured(serde_json::json!({
-                        "path": "cgevent_fg", "verified": false, "effect": "unverifiable",
+                        "path": "cgevent", "verified": false, "effect": "unverifiable",
                         "dispatch_attempted": true, "ax_action_attempted": false,
                         "action_enumeration": "omitted",
                     })),
                     Ok(Err((error, attempted))) => ToolResult::error(format!("Primary button foreground pointer failed: {error}; observe before deciding on another input"))
                         .with_structured(serde_json::json!({
-                            "path": "cgevent_fg", "verified": false,
+                            "path": "cgevent", "verified": false,
                             "effect": if attempted { "unknown" } else { "refused" },
                             "dispatch_attempted": attempted, "retry": "observe_before_deciding",
                         })),
                     Err(error) => ToolResult::error(format!("Primary button pointer task failed: {error}; its outcome is unknown; do not automatically replay"))
-                        .with_structured(serde_json::json!({ "path": "cgevent_fg", "effect": "unknown", "verified": false, "retry": "observe_before_deciding" })),
+                        .with_structured(serde_json::json!({ "path": "cgevent", "effect": "unknown", "verified": false, "retry": "observe_before_deciding" })),
                 };
             }
 
