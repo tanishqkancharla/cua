@@ -477,7 +477,7 @@ unsafe fn walk_element(
     // element, so every descendant must be bounded before any attribute read.
     set_messaging_timeout(element);
 
-    let attributes = copy_tree_attributes(element);
+    let (attributes, children) = copy_tree_observation(element);
     let role = attributes
         .role
         .clone()
@@ -513,8 +513,7 @@ unsafe fn walk_element(
         // Still recurse — children may be interesting. Layout containers
         // collapse, so children inherit the parent's depth AND the same
         // parent_index (no actionable node was emitted here).
-        let children = copy_children(element);
-        for child in children {
+        for child in children.iter() {
             walk_element(
                 child,
                 depth,
@@ -526,7 +525,6 @@ unsafe fn walk_element(
                 budget,
                 max_depth,
             );
-            CFRelease(child as CFTypeRef);
         }
         return;
     }
@@ -603,8 +601,7 @@ unsafe fn walk_element(
         || (parent_selected.is_some() && enabled != Some(false));
 
     if !is_actionable && !has_content && role != "AXWindow" && role != "AXSheet" {
-        let children = copy_children(element);
-        for child in children {
+        for child in children.iter() {
             walk_element(
                 child,
                 depth + 1,
@@ -616,7 +613,6 @@ unsafe fn walk_element(
                 budget,
                 max_depth,
             );
-            CFRelease(child as CFTypeRef);
         }
         return;
     }
@@ -730,8 +726,7 @@ unsafe fn walk_element(
     lines.push((depth, line));
     nodes.push(node);
 
-    let children = copy_children(element);
-    for child in children {
+    for child in children.iter() {
         walk_element(
             child,
             depth + 1,
@@ -743,7 +738,6 @@ unsafe fn walk_element(
             budget,
             max_depth,
         );
-        CFRelease(child as CFTypeRef);
     }
 }
 
