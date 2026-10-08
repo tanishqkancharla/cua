@@ -28,6 +28,9 @@ enum MousePostMode {
 pub enum WindowClickDelivery {
     Background,
     Foreground,
+    /// Native AppKit collections consume one window-local PID event pair.
+    /// Chromium's off-screen activation primer clears their selection.
+    NativeCollectionBackground,
 }
 
 impl WindowClickDelivery {
@@ -302,15 +305,17 @@ pub fn click_at_xy_with_window_local(
         WindowClickDelivery::Background => {
             click_at_xy_chromium(pid, x, y, wx, wy, wid, count, modifiers)
         }
-        WindowClickDelivery::Foreground => click_at_xy_inner(
-            pid,
-            (x, y),
-            Some((wx, wy)),
-            Some(wid),
-            count,
-            modifiers,
-            MousePostMode::PublicOnly,
-        ),
+        WindowClickDelivery::Foreground | WindowClickDelivery::NativeCollectionBackground => {
+            click_at_xy_inner(
+                pid,
+                (x, y),
+                Some((wx, wy)),
+                Some(wid),
+                count,
+                modifiers,
+                MousePostMode::PublicOnly,
+            )
+        }
     }
 }
 
