@@ -37,3 +37,5 @@ pub use window_scope::WindowScope;
 pub(crate) mod collection_selection;
 
 pub mod open_document;
+
+pub(crate) mod collection_viewport;
