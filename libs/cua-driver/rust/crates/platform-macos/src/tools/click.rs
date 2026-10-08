@@ -962,7 +962,7 @@ impl Tool for ClickTool {
                                 && window.on_current_space != Some(false))
                             .ok_or_else(|| anyhow::anyhow!("exact visible ordinary window unavailable; no click was sent"))?;
                         let point = primary_button_pointer_point(
-                            crate::ax::bindings::element_screen_center(element), Some(current.bounds),
+                            crate::ax::bindings::element_screen_center(element), Some(current.bounds.clone()),
                         )?;
                         // Deliver one public PID-addressed, window-local click after
                         // proving exact foreground focus. The global HID tap can
