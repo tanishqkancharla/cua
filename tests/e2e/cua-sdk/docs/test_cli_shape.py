@@ -129,6 +129,22 @@ class CliShapeTest(unittest.TestCase):
                 found = problems(code)
                 self.assertTrue(any(needle in p for p in found), found)
 
+    def test_declared_driver_program_uses_its_component_spec(self):
+        specs = dict(SPEC)
+        specs["cua-driver"] = dict(SPEC["cua-driver"], name="opensky-driver")
+        for code in ["opensky-driver serve", "/opt/bin/opensky-driver serve"]:
+            with self.subTest(code=code):
+                self.assertEqual(cs.check_block(code, "bash", specs), (1, []))
+        self.assertEqual(
+            cs.check_block("opensky-driver sreve", "bash", specs),
+            (1, ["'opensky-driver sreve': cua-driver: unknown command 'sreve' (expected one of serve)"]),
+        )
+        self.assertEqual(
+            cs.check_block("opensky-driver serve --unknown", "bash", specs),
+            (1, ["'opensky-driver serve --unknown': cua-driver serve: unknown option --unknown"]),
+        )
+        self.assertEqual(cs.check_block("unrelated-driver serve", "bash", specs), (0, []))
+
     def test_console_blocks_check_prompted_lines_only(self):
         code = "$ cua sb create linux\ncreated dev\n$ cua sb ls\nNAME STATUS\n"
         self.assertEqual(
