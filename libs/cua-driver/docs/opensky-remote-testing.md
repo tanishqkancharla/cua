@@ -63,7 +63,7 @@ References: [GitHub runner limitations](https://docs.github.com/en/actions/refer
 [exe.dev documentation](https://exe.dev/docs/all), and the repository's
 [test harness guide](test-harnesses-guide.md).
 
-## Initial hosted evidence — 2026-09-07
+## Initial hosted evidence : 2026-09-07
 
 The initial diagnostic run is
 [34149118620](https://github.com/tanishqkancharla/cua/actions/runs/34149118620),
