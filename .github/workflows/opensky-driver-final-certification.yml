@@ -1,0 +1,18 @@
+name: "OpenSky: final Linux driver certification"
+on:
+  push:
+    branches: [codex/driver-linux-certification144]
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: opensky-final-linux-certification-${{ github.sha }}
+  cancel-in-progress: false
+jobs:
+  linux:
+    name: Complete canonical Linux matrix
+    uses: ./.github/workflows/e2e-rust-linux.yml
+    with:
+      ref: "0ea22c6dcf527959d87b6261c3a3d0955e2dd11a"
+      lane: all
+      cell_filter: ""
