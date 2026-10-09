@@ -50,9 +50,11 @@ const expectedFiles = [
   'WORKFLOW.md',
 ];
 const sourcePack = resolve(HERE, '../../../libs/cua-driver/rust/Skills/cua-driver');
+// Modern response metadata preserves the protocol namespace owned by
+// mcp_wire.rs; the legacy initialize response uses the distribution product.
 const expectedServerName = JSON.parse(readFileSync(
-  resolve(HERE, '../../../libs/cua-driver/installer-distribution.json'), 'utf8'
-)).product;
+  join(HERE, 'expected-tools.json'), 'utf8'
+)).serverName;
 assert(typeof expectedServerName === 'string' && expectedServerName.trim());
 const driver = process.env.CUA_DRIVER_BINARY && resolve(process.env.CUA_DRIVER_BINARY);
 assert(driver, 'CUA_DRIVER_BINARY must name the source-built candidate');
