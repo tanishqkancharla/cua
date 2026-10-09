@@ -12,108 +12,108 @@ description: "Check for and apply updates, and choose the release channel."
 
 | Command | Description |
 | --- | --- |
-| [`cua-driver check-update`](#cua-driver-check-update) | Check whether a newer cua-driver release is available. |
-| [`cua-driver update`](#cua-driver-update) | Check for an update and optionally apply it. |
-| [`cua-driver channel`](#cua-driver-channel) | Inspect or change the stable/nightly update channel. |
-| [`cua-driver channel status`](#cua-driver-channel-status) | Show selected and current release channels. |
-| [`cua-driver channel set`](#cua-driver-channel-set) | Save stable or nightly as the update channel. |
+| [`opensky-driver check-update`](#opensky-driver-check-update) | Check whether a newer opensky-driver release is available. |
+| [`opensky-driver update`](#opensky-driver-update) | Check for an update and optionally apply it. |
+| [`opensky-driver channel`](#opensky-driver-channel) | Inspect or change the stable/nightly update channel. |
+| [`opensky-driver channel status`](#opensky-driver-channel-status) | Show selected and current release channels. |
+| [`opensky-driver channel set`](#opensky-driver-channel-set) | Save stable or nightly as the update channel. |
 
 Every command also accepts the [global options](/cua-driver/reference/cli#global-options).
 
-## `cua-driver check-update`
+## `opensky-driver check-update`
 
-Check whether a newer cua-driver release is available.
+Check whether a newer opensky-driver release is available.
 
 Read-only. Uses the same update-state payload as the check_for_update MCP tool.
 
 ```text output
-cua-driver check-update [OPTIONS]
+opensky-driver check-update [OPTIONS]
 ```
 
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
-| <span id="cua-driver-check-update--json"></span>`--json` | boolean | `false` | Emit a machine-readable JSON payload. |
-| <span id="cua-driver-check-update--no-cache"></span>`--no-cache` | boolean | `false` | Skip the 20-hour on-disk cache and force a GitHub request. |
+| <span id="opensky-driver-check-update--json"></span>`--json` | boolean | `false` | Emit a machine-readable JSON payload. |
+| <span id="opensky-driver-check-update--no-cache"></span>`--no-cache` | boolean | `false` | Skip the 20-hour on-disk cache and force a GitHub request. |
 
 **Examples**
 
-```bash test="cli-shape" id="ref-cua-driver-check-update"
+```bash test="cli-shape" id="ref-opensky-driver-check-update"
 # Check for a newer release
-cua-driver check-update
+opensky-driver check-update
 
 # Check now, as JSON
-cua-driver check-update --json --no-cache
+opensky-driver check-update --json --no-cache
 ```
 
-## `cua-driver update`
+## `opensky-driver update`
 
 Check for an update and optionally apply it.
 
 The apply path delegates to the canonical platform installer scripts.
 
 ```text output
-cua-driver update [OPTIONS]
+opensky-driver update [OPTIONS]
 ```
 
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
-| <span id="cua-driver-update--apply"></span>`--apply` | boolean | `false` | Download and install the latest release when one is available. |
-| <span id="cua-driver-update--json"></span>`--json` | boolean | `false` | Emit the structured update-state payload. |
+| <span id="opensky-driver-update--apply"></span>`--apply` | boolean | `false` | Download and install the latest release when one is available. |
+| <span id="opensky-driver-update--json"></span>`--json` | boolean | `false` | Emit the structured update-state payload. |
 
 **Examples**
 
-```bash test="cli-shape" id="ref-cua-driver-update"
+```bash test="cli-shape" id="ref-opensky-driver-update"
 # Check and print the install command
-cua-driver update
+opensky-driver update
 
 # Install the latest release
-cua-driver update --apply
+opensky-driver update --apply
 ```
 
-## `cua-driver channel`
+## `opensky-driver channel`
 
 Inspect or change the stable/nightly update channel.
 
-Selection is persistent but never installs by itself; use cua-driver update --apply after changing it.
+Selection is persistent but never installs by itself; use opensky-driver update --apply after changing it.
 
 ```text output
-cua-driver channel [COMMAND]
+opensky-driver channel [COMMAND]
 ```
 
-Without a subcommand, runs `cua-driver channel status`.
+Without a subcommand, runs `opensky-driver channel status`.
 
 **Examples**
 
-```bash test="cli-shape" id="ref-cua-driver-channel"
+```bash test="cli-shape" id="ref-opensky-driver-channel"
 # Show the selected release channel
-cua-driver channel
+opensky-driver channel
 ```
 
-### `cua-driver channel status`
+### `opensky-driver channel status`
 
 Show selected and current release channels.
 
 ```text output
-cua-driver channel status [OPTIONS]
+opensky-driver channel status [OPTIONS]
 ```
 
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
-| <span id="cua-driver-channel-status--json"></span>`--json` | boolean | `false` | Emit machine-readable channel state. |
+| <span id="opensky-driver-channel-status--json"></span>`--json` | boolean | `false` | Emit machine-readable channel state. |
 
 **Examples**
 
-```bash test="cli-shape" id="ref-cua-driver-channel-status"
+```bash test="cli-shape" id="ref-opensky-driver-channel-status"
 # Show the channels as JSON
-cua-driver channel status --json
+opensky-driver channel status --json
 ```
 
-### `cua-driver channel set`
+### `opensky-driver channel set`
 
 Save stable or nightly as the update channel.
 
 ```text output
-cua-driver channel set [OPTIONS] <channel>
+opensky-driver channel set [OPTIONS] <channel>
 ```
 
 | Argument | Type | Default | Description |
@@ -122,13 +122,13 @@ cua-driver channel set [OPTIONS] <channel>
 
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
-| <span id="cua-driver-channel-set--json"></span>`--json` | boolean | `false` | Emit machine-readable channel state. |
+| <span id="opensky-driver-channel-set--json"></span>`--json` | boolean | `false` | Emit machine-readable channel state. |
 
 **Examples**
 
-```bash test="cli-shape" id="ref-cua-driver-channel-set"
+```bash test="cli-shape" id="ref-opensky-driver-channel-set"
 # Follow nightly builds (then run update --apply)
-cua-driver channel set nightly
+opensky-driver channel set nightly
 ```
 
 ## Exit codes

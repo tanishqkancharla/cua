@@ -18,6 +18,7 @@ import { Tab, Tabs } from 'fumadocs-ui/components/tabs';
 | [`list_windows`](#list_windows) | List all layer-0 top-level windows currently known to WindowServer. | macOS, Linux, Windows |
 | [`launch_app`](#launch_app) | Launch a macOS app in the background: the target does NOT come to the foreground. | macOS, Linux, Windows |
 | [`kill_app`](#kill_app) | Force-terminate a process by pid (kill -9 equivalent on macOS / Linux; taskkill /F equivalent on Windows). | macOS, Linux, Windows |
+| [`close_window`](#close_window) | Cooperatively close one exact top-level window without activating it, then independently verify that the original window identity disappeared. | macOS, Linux, Windows |
 | [`bring_to_front`](#bring_to_front) | Persistently activate an app and leave it in the foreground. | macOS, Linux, Windows |
 | [`set_window_frame`](#set_window_frame) | Set one exact top-level window's frame in the desktop-coordinate space reported by list_windows and verify the resulting geometry through an independent readback. | macOS, Linux, Windows |
 | [`invoke_menu`](#invoke_menu) | Resolve an exact application-menu path one live native level at a time and invoke its final item through accessibility APIs. | macOS, Linux, Windows |
@@ -102,6 +103,7 @@ Per-record fields: window_id, pid, app_name, title, bounds (x/y/width/height, to
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
+| <span id="list_windows--macos--include_document_urls"></span>`include_document_urls` | `boolean` |  | With an explicit pid, include each exact AXWindow's AXDocument as document_url (null when unavailable). Read-only; never matches a document by its title. Default false. |
 | <span id="list_windows--macos--on_screen_only"></span>`on_screen_only` | `boolean` |  | When true, drop windows not on the current Space. Default false. |
 | <span id="list_windows--macos--pid"></span>`pid` | `integer` |  | Optional pid filter. When set, only this pid's windows are returned. |
 
@@ -237,17 +239,17 @@ Effect: destructive, idempotent. Platforms: macOS, Linux, Windows.
 <Tabs items={['macOS', 'Linux', 'Windows']} groupId="platform" persist>
 <Tab value="macOS">
 
-Force-terminate a process by pid (kill -9 equivalent on macOS / Linux; taskkill /F equivalent on Windows). Use as escalation when the cooperative close path (hotkey cmd+q on macOS, click-the-X on Windows) failed to make the process exit. Unsaved state is lost: prefer the cooperative path first.
+Force-terminate a process by pid (kill -9 equivalent on macOS / Linux; taskkill /F equivalent on Windows). Use as escalation when the cooperative close_window path failed to make the process exit. Unsaved state is lost: prefer the cooperative path first.
 
 </Tab>
 <Tab value="Linux">
 
-Force-terminate a process by pid (kill -9 equivalent on Linux). Use as escalation when the cooperative close path failed to make the process exit. Unsaved state is lost: prefer the cooperative path first.
+Force-terminate a process by pid (kill -9 equivalent on Linux). Use as escalation when the cooperative close_window path failed to make the process exit. Unsaved state is lost: prefer the cooperative path first.
 
 </Tab>
 <Tab value="Windows">
 
-Force-terminate a process by pid. Use when the standard close path (Alt+F4 / WM_CLOSE via `click` on the X button) fails to make the process exit: typical for UWP / WinUI3 apps (Calculator, Photos, modern Notepad) that route WM_CLOSE into a suspended-but-resident state. Equivalent to `taskkill /F /PID <pid>`. Unsaved state is lost. Prefer the click-the-X path first; only escalate to `kill_app` when polite close didn't terminate.
+Force-terminate a process by pid. Use when the cooperative close_window path fails to make the process exit: typical for UWP / WinUI3 apps (Calculator, Photos, modern Notepad) that route WM_CLOSE into a suspended-but-resident state. Equivalent to `taskkill /F /PID <pid>`. Unsaved state is lost. Prefer close_window; only escalate to `kill_app` when cooperative close didn't terminate.
 
 </Tab>
 </Tabs>
@@ -265,6 +267,24 @@ Force-terminate a process by pid. Use when the standard close path (Alt+F4 / WM_
 {"pid":1}
 ```
 
+## `close_window`
+
+Cooperatively close one exact top-level window without activating it, then independently verify that the original window identity disappeared. The operation never falls back to hotkeys, menu labels, coordinates, or process termination. Missing, mismatched, ambiguous, disabled, unsupported, confirmation-required, and unconfirmed no-op outcomes fail closed.
+
+Effect: destructive. Platforms: macOS, Linux, Windows.
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| <span id="close_window--pid"></span>`pid` | `integer` | required | Process ID of the application that owns the exact window. Minimum: 1. |
+| <span id="close_window--session"></span>`session` | `string` |  | For multi-call work, prefer a short public session label and repeat it on every call that accepts it. Omit it to use the authenticated transport's implicit lifecycle session. |
+| <span id="close_window--window_id"></span>`window_id` | `integer` | required | Exact native window ID from list_windows; no app-wide close fallback. Minimum: 1. |
+
+**Example arguments**
+
+```json
+{"pid":1,"window_id":1}
+```
+
 ## `bring_to_front`
 
 Effect: mutating, idempotent. Platforms: macOS, Linux, Windows.
@@ -278,8 +298,9 @@ Persistently activate an app and leave it in the foreground. Most input does not
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| <span id="bring_to_front--macos--pid"></span>`pid` | `integer` | required | Process ID of the app to activate. |
-| <span id="bring_to_front--macos--window_id"></span>`window_id` | `integer` |  | CGWindowID to verify as the focused, frontmost window. Omit to activate the app only. |
+| <span id="bring_to_front--macos--activation_scope"></span>`activation_scope` | `"exact_window" \| "app_menu"` |  | Default exact_window. app_menu requires window_id and verifies only the persistent app-global menu context. |
+| <span id="bring_to_front--macos--pid"></span>`pid` | `integer` | required | Process ID of the application to activate. |
+| <span id="bring_to_front--macos--window_id"></span>`window_id` | `integer` |  | Exact native window ID from list_windows; verifies this window is focused. |
 
 </Tab>
 <Tab value="Linux">

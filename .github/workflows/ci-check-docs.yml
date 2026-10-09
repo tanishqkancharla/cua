@@ -157,8 +157,8 @@ jobs:
       - name: Test generator ownership
         run: node docs/node_modules/tsx/dist/cli.mjs --test scripts/docs-generators/runner.test.ts scripts/docs-generators/cua-driver.test.ts scripts/docs-generators/cua-driver-platform.test.ts scripts/docs-generators/sandbox.test.ts
       # Restore the release build that CI: cua-driver contract clients saves
-      # from main. Its MCP discovery job installs the same toolchain, so the
-      # cache key matches. Pull requests never save.
+      # from main or the same-repository PR. Its MCP discovery job installs
+      # the same toolchain, so the cache key matches. Docs only restores it.
       - uses: dtolnay/rust-toolchain@stable
         if: matrix.library == 'cua-driver'
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2

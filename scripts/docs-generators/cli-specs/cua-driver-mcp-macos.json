@@ -24,6 +24,10 @@
    "input_schema": {
     "additionalProperties": false,
     "properties": {
+     "include_document_urls": {
+      "description": "With an explicit pid, include each exact AXWindow's AXDocument as document_url (null when unavailable). Read-only; never matches a document by its title. Default false.",
+      "type": "boolean"
+     },
      "on_screen_only": {
       "description": "When true, drop windows not on the current Space. Default false.",
       "type": "boolean"
@@ -43,7 +47,7 @@
    "read_only": true
   },
   {
-   "description": "Walk a running app's AX tree and return BOTH a structured `elements` array (preferred) AND a Markdown rendering of the same tree (back-compat). Every actionable element is tagged with [element_index N] in the markdown and as `element_index` in the structured array; pass each element's `element_token` to click, type_text, press_key, etc.\n\nINVARIANT: call get_window_state once per turn per (pid, window_id) before any element action. The next snapshot of the window replaces this one, stales its element tokens, and lists the replaced ids in `invalidated_snapshot_ids`.\n\nPREFERRED CONSUMERS read `structuredContent.elements` (one entry per indexed row with `element_index`, `role`, `label`, `value` (the element's text/AXValue when present — use it to verify what a field holds), `actions` (names of AX actions exposed by the element, omitted when empty), `frame: {x,y,w,h}`, `parent_index`, `depth`). The markdown `tree_markdown` stays available and unchanged in shape for existing text-parsing callers — but new fields will only be added to the structured side.\n\nAlways returns BOTH the element tree AND a screenshot — ground on both and cross-check (the tree lies on some surfaces: Electron echo-confirms, Catalyst null values, virtualized off-viewport rows with `h:1` frames). You choose the modality at ACTION time, not here: an element ax action (pass `element_token` → the accessibility rung) or an element px action (pass `x`,`y` → the pixel rung, read straight off this screenshot). `capture_mode` is deprecated and ignored. Pass `include_screenshot:false` to skip the grab and get the tree only — the cheap path when you're just re-indexing before an element ax action.\n\nThe mirror image: pass `include_accessibility_tree:false` to SKIP the AX walk entirely (the expensive part, bounded by timeout_ms) and return just the screenshot plus window metadata — `window_bounds`, `screenshot_scale`, `screenshot_width`/`screenshot_height`, `app_name`, and `window_title` — the capture-only path for rendering a live window preview / picture-in-picture without paying for perception. Setting BOTH `include_accessibility_tree:false` and `include_screenshot:false` is an error (nothing to return). Optional `max_image_dimension` overrides the configured screenshot long-edge limit for this call; use 0 for native resolution. The legacy `max_dimension` remains a tighter cap for compatibility.\n\nThe snapshot is SCOPED to `window_id`: a window_id that no longer exists is refused with `window_id_not_found`, and one owned by another process is refused with `window_owner_pid_mismatch` naming the real `owner_pid` to retry with (macOS hosts a sandboxed app's Open/Save panel out-of-process, so its window belongs to the panel service, not the app). If the window is live under this pid but its accessibility surface can't be resolved, the tree comes back EMPTY with `degraded_reason: ax_window_unresolved` and the screenshot of the requested window; background input is refused until it resolves, so re-snapshot or act with `delivery_mode:\"foreground\"`. When that pid is an app still launching (its window exists before it answers accessibility), the walk first waits up to `timeout_ms` for it; if it never answers, the tree comes back EMPTY with `degraded_reason: ax_app_launching`, `truncated: true` and `truncation_reason: app_lookup_timeout`. A window on another Space still resolves by its exact CGWindowID. This tool never returns another surface's elements under your window_id. Before exposing a screenshot, its raw dimensions are validated as a coherent 1x/2x representation of the requested WindowServer bounds. `px_frame_mismatch` or `px_capture_unavailable` omits an unprovable screenshot/pixel frame instead of guessing a transform; the truthful AX payload remains available.\n\nOptional `query` projects both tree_markdown and structured `elements` to matching lines plus their ancestor chain (case-insensitive substring). The element_index values are unchanged, the complete snapshot remains actionable, and `element_count` continues to report its total size; `filtered_element_count` reports the projected response size.\n\nOptional `max_elements` / `max_depth` bound the AX walk to mitigate context-window blow-up on Electron / Obsidian / large web apps that produce 10k+ element trees. When applied, BOTH the markdown and the structured elements are truncated identically. Omit both for current default behaviour (≤2 000 elements, depth ≤25).",
+   "description": "Walk a running app's AX tree and return BOTH a structured `elements` array (preferred) AND a Markdown rendering of the same tree (back-compat). Every actionable element is tagged with [element_index N] in the markdown and as `element_index` in the structured array; pass each element's `element_token` to click, type_text, press_key, etc.\n\nINVARIANT: call get_window_state once per turn per (pid, window_id) before any element action. The next snapshot of the window replaces this one, stales its element tokens, and lists the replaced ids in `invalidated_snapshot_ids`.\n\nPREFERRED CONSUMERS read `structuredContent.elements` (one entry per indexed row with `element_index`, `role`, `label`, `value` (the element's text/AXValue when present — use it to verify what a field holds), `actions` (names of AX actions exposed by the element, omitted when empty), `frame: {x,y,w,h}`, `parent_index`, `depth`). The markdown `tree_markdown` stays available and unchanged in shape for existing text-parsing callers — but new fields will only be added to the structured side.\n\nAlways returns BOTH the element tree AND a screenshot — ground on both and cross-check (the tree lies on some surfaces: Electron echo-confirms, Catalyst null values, virtualized off-viewport rows with `h:1` frames). You choose the modality at ACTION time, not here: an element ax action (pass `element_token` → the accessibility rung) or an element px action (pass `x`,`y` → the pixel rung, read straight off this screenshot). `capture_mode` is deprecated and ignored. Pass `include_screenshot:false` to skip the grab and get the tree only — the cheap path when you're just re-indexing before an element ax action.\n\nThe mirror image: pass `include_accessibility_tree:false` to SKIP the AX walk entirely (the expensive part, bounded by timeout_ms) and return just the screenshot plus window metadata — `window_bounds`, `screenshot_scale`, `screenshot_width`/`screenshot_height`, `app_name`, and `window_title` — the capture-only path for rendering a live window preview / picture-in-picture without paying for perception. Setting BOTH `include_accessibility_tree:false` and `include_screenshot:false` is an error (nothing to return). Optional `max_image_dimension` overrides the configured screenshot long-edge limit for this call; use 0 for native resolution. The legacy `max_dimension` remains a tighter cap for compatibility.\n\nThe snapshot is SCOPED to `window_id`: a window_id that no longer exists is refused with `window_id_not_found`, and one owned by another process is refused with `window_owner_pid_mismatch` naming the real `owner_pid` to retry with (macOS hosts a sandboxed app's Open/Save panel out-of-process, so its window belongs to the panel service, not the app). If the window is live under this pid but its accessibility surface can't be resolved, the tree comes back EMPTY with `degraded_reason: ax_window_unresolved` and the screenshot of the requested window; background input is refused until it resolves, so re-snapshot or act with `delivery_mode:\"foreground\"`. When that pid is an app still launching (its window exists before it answers accessibility), the walk first waits up to `timeout_ms` for it; if it never answers, the tree comes back EMPTY with `degraded_reason: ax_app_launching`, `truncated: true` and `truncation_reason: app_lookup_timeout`. A window on another Space still resolves by its exact CGWindowID. This tool never returns another surface's elements under your window_id. Before exposing a screenshot, its raw dimensions are validated as a coherent 1x/2x representation of the requested WindowServer bounds. `px_frame_mismatch` or `px_capture_unavailable` omits an unprovable screenshot/pixel frame instead of guessing a transform; the truthful AX payload remains available.\n\nOptional `query` projects both tree_markdown and structured `elements` to matching lines plus their ancestor chain (case-insensitive substring). The element_index values are unchanged, the complete snapshot remains actionable, and `element_count` continues to report its total size; `filtered_element_count` reports the projected response size.\n\n`probe_only:true` checks exact WindowServer ownership and AXWindow matching without replacing action caches, tokens or screenshot bindings. It returns only window-match metadata, never elements, a tree or a screenshot.\n\nOptional `max_elements` / `max_depth` bound the AX walk to mitigate context-window blow-up on Electron / Obsidian / large web apps that produce 10k+ element trees. When applied, BOTH the markdown and the structured elements are truncated identically. Omit both for current default behaviour (≤2 000 elements, depth ≤25).",
    "destructive": false,
    "idempotent": false,
    "input_schema": {
@@ -88,6 +92,10 @@
      "pid": {
       "description": "Target process ID.",
       "type": "integer"
+     },
+     "probe_only": {
+      "description": "Default false. Check exact ownership and AXWindow matching with a bounded walk without replacing action caches, snapshot tokens or screenshot bindings. Returns only pid, window_id, probe_only, window_matched and a degraded_reason when unresolved. No controls or screenshot are returned. Incompatible with query, screenshot_out_file, include_screenshot:true or include_accessibility_tree:false.",
+      "type": "boolean"
      },
      "query": {
       "description": "Case-insensitive filter for tree_markdown and structured elements. Returns matching actionable rows plus their actionable ancestors without renumbering element_index values.",
@@ -331,7 +339,7 @@
    "read_only": false
   },
   {
-   "description": "Force-terminate a process by pid (kill -9 equivalent on macOS / Linux; taskkill /F equivalent on Windows). Use as escalation when the cooperative close path (hotkey cmd+q on macOS, click-the-X on Windows) failed to make the process exit. Unsaved state is lost — prefer the cooperative path first.",
+   "description": "Force-terminate a process by pid (kill -9 equivalent on macOS / Linux; taskkill /F equivalent on Windows). Use as escalation when the cooperative close_window path failed to make the process exit. Unsaved state is lost — prefer the cooperative path first.",
    "destructive": true,
    "idempotent": true,
    "input_schema": {
@@ -355,14 +363,54 @@
    "read_only": false
   },
   {
+   "description": "Cooperatively close one exact top-level window without activating it, then independently verify that the original window identity disappeared. The operation never falls back to hotkeys, menu labels, coordinates, or process termination. Missing, mismatched, ambiguous, disabled, unsupported, confirmation-required, and unconfirmed no-op outcomes fail closed.",
+   "destructive": true,
+   "idempotent": false,
+   "input_schema": {
+    "additionalProperties": false,
+    "description": "Exact top-level window to close cooperatively through the operating\nsystem's accessibility/window-management API.",
+    "properties": {
+     "pid": {
+      "description": "Process ID of the application that owns the exact window.",
+      "minimum": 1,
+      "type": "integer"
+     },
+     "session": {
+      "description": "For multi-call work, prefer a short public session label and repeat it on every call that\naccepts it. Omit it to use the authenticated transport's implicit lifecycle session.",
+      "type": "string"
+     },
+     "window_id": {
+      "description": "Exact native window ID from list_windows; no app-wide close fallback.",
+      "minimum": 1,
+      "type": "integer"
+     }
+    },
+    "required": [
+     "pid",
+     "window_id"
+    ],
+    "type": "object"
+   },
+   "name": "close_window",
+   "read_only": false
+  },
+  {
    "description": "Persistently activate an app and leave it in the foreground. Most input does not need this; use it only for a focus-proxy surface that must remain foreground across interactions. With window_id, success means the exact ordinary macOS window was independently verified as the frontmost process's focused window and the front window of that process on the display it sits on. `exact_window_effect.frontmost_ordinary` additionally reports whether it is first in the global WindowServer layer-0 order; another application (an always-raised utility window, another display's front window) can hold that spot without the requested window losing keyboard focus, so it is reported and not required. Request acceptance alone is reported as a partial result, never as activation. This DOES steal foreground and does NOT restore the previously frontmost application.",
    "destructive": false,
    "idempotent": true,
    "input_schema": {
     "additionalProperties": false,
     "properties": {
+     "activation_scope": {
+      "description": "Default exact_window. app_menu requires window_id and verifies only the persistent app-global menu context.",
+      "enum": [
+       "exact_window",
+       "app_menu"
+      ],
+      "type": "string"
+     },
      "pid": {
-      "description": "Process ID of the app to activate.",
+      "description": "Process ID of the application to activate.",
       "type": "integer"
      },
      "session": {
@@ -370,7 +418,7 @@
       "type": "string"
      },
      "window_id": {
-      "description": "CGWindowID to verify as the focused, frontmost window. Omit to activate the app only.",
+      "description": "Exact native window ID from list_windows; verifies this window is focused.",
       "type": "integer"
      }
     },
@@ -487,7 +535,7 @@
     "additionalProperties": false,
     "properties": {
      "action": {
-      "description": "AX action: press, show_menu, pick, confirm, cancel, open.",
+      "description": "AX action: press, show_menu, pick, confirm, cancel, open. select_collection_item selects an indexed Mac item only through its independently validated enabled parent AXSelectedChildren capability.",
       "type": "string"
      },
      "button": {
@@ -877,7 +925,7 @@
     "additionalProperties": false,
     "properties": {
      "delay_ms": {
-      "description": "Milliseconds between characters in the CGEvent fallback path. Default 30. Ignored when the AX path succeeds.",
+      "description": "Milliseconds between characters in the CGEvent fallback path. Default 30. Zero uses bounded Unicode packets only for a confirmed editable text control in the guarded foreground non-terminal window; other keyboard consumers receive individual character events. Ignored when the AX path succeeds.",
       "maximum": 200,
       "minimum": 0,
       "type": "integer"
@@ -1238,6 +1286,14 @@
    "input_schema": {
     "additionalProperties": false,
     "properties": {
+     "delivery_mode": {
+      "description": "Default background preserves semantic AX writes. Foreground keeps the exact window active and verifies focus of native text controls before writing; this does not submit the field.",
+      "enum": [
+       "background",
+       "foreground"
+      ],
+      "type": "string"
+     },
      "element_token": {
       "description": "Opaque per-snapshot element handle from `structuredContent.elements[].element_token`. Returns an explicit stale error naming the current snapshots once a newer read supersedes it.",
       "pattern": "^s[0-9a-f]{8}:[0-9]+$",
@@ -1267,6 +1323,122 @@
     "type": "object"
    },
    "name": "set_value",
+   "read_only": false
+  },
+  {
+   "description": "Paste text, HTML or CommonMark into one exact macOS native accessibility control with Cmd+V. Requires an exact pid and window_id, verifies the same focused AX element before the clipboard write and key dispatch, and succeeds only when AXValue read-back equals the expected UTF-16-range insertion. Rich payloads are imported by AppKit and written as RTF plus their exact plain string; this receipt proves text insertion, not every visual style. Observe resulting formatting. clipboard_policy:\"leave\" retains the payload. clipboard_policy:\"restore\" snapshots supported prior item representations privately (up to 64 items,128 types per item,32 MiB total), refuses unreadable/unstable snapshots before mutation, and restores after verified insertion or proved no-input refusal only while its own clipboard token/payload remains. Restoration is separately reported; an observed newer writer or unknown input skips restoration. NSPasteboard has no atomic compare-and-restore, so the last ownership-check/write can still race. delivery_mode:\"background\" (default) never fronts the target. delivery_mode:\"foreground\" briefly fronts the exact target for one physical HID Cmd+V chord, revalidates the AX target and clipboard immediately before that chord, then restores the prior frontmost app. After dispatch, any unverified result is reported as effect:\"unknown\" and must not be replayed automatically.",
+   "destructive": true,
+   "idempotent": false,
+   "input_schema": {
+    "additionalProperties": false,
+    "properties": {
+     "clipboard_policy": {
+      "description": "Required. leave retains the payload; restore privately snapshots supported prior item representations and restores after proved insertion/no-input while the own token/payload remains. Newer observed writers and unknown input skip restoration; final check/write is not atomic.",
+      "enum": [
+       "leave",
+       "restore"
+      ],
+      "type": "string"
+     },
+     "delivery_mode": {
+      "description": "Best-effort-background ladder rung (default \"background\"). \"background\": posts one PID-routed Cmd+V without fronting the target. \"foreground\": briefly front the exact target, revalidate the retained AX target and clipboard immediately before one physical HID Cmd+V chord, then restore the prior frontmost app. Choose the delivery mode before dispatch; never replay an uncertain paste.",
+      "enum": [
+       "background",
+       "foreground"
+      ],
+      "type": "string"
+     },
+     "format": {
+      "default": "text",
+      "description": "text is plain; html is imported by AppKit; md is CommonMark rendered to HTML then imported. Rich clipboard data is RTF plus its exact plain string.",
+      "enum": [
+       "text",
+       "md",
+       "html"
+      ],
+      "type": "string"
+     },
+     "pid": {
+      "description": "Exact target process ID.",
+      "type": "integer"
+     },
+     "session": {
+      "description": "For multi-call work, prefer a short public session label and repeat it on every call that accepts it. Omit it to use the authenticated transport's implicit lifecycle session.",
+      "type": "string"
+     },
+     "text": {
+      "description": "Source to paste (at most 16 KiB UTF-8).",
+      "type": "string"
+     },
+     "window_id": {
+      "description": "Exact target CGWindowID.",
+      "type": "integer"
+     }
+    },
+    "required": [
+     "pid",
+     "window_id",
+     "text",
+     "clipboard_policy"
+    ],
+    "type": "object"
+   },
+   "name": "native_paste",
+   "read_only": false
+  },
+  {
+   "description": "Select one unambiguous occurrence of text in a native editable element, or place the caret immediately before/after it. The exact window, element, and resulting UTF-16 selection are verified. Use prefix/suffix to disambiguate repeated text.",
+   "destructive": false,
+   "idempotent": true,
+   "input_schema": {
+    "additionalProperties": false,
+    "properties": {
+     "element_token": {
+      "description": "Opaque per-snapshot element handle from `structuredContent.elements[].element_token`. Returns an explicit stale error naming the current snapshots once a newer read supersedes it.",
+      "pattern": "^s[0-9a-f]{8}:[0-9]+$",
+      "type": "string"
+     },
+     "pid": {
+      "description": "Process ID owning the editor.",
+      "type": "integer"
+     },
+     "prefix": {
+      "description": "Literal adjacent prefix to disambiguate repeated text.",
+      "type": "string"
+     },
+     "selection_type": {
+      "description": "Select the occurrence (text, default), or place the caret before/after it.",
+      "enum": [
+       "text",
+       "cursor_before",
+       "cursor_after"
+      ],
+      "type": "string"
+     },
+     "session": {
+      "description": "For multi-call work, prefer a short public session label and repeat it on every call that accepts it. Omit it to use the authenticated transport's implicit lifecycle session.",
+      "type": "string"
+     },
+     "suffix": {
+      "description": "Literal adjacent suffix to disambiguate repeated text.",
+      "type": "string"
+     },
+     "text": {
+      "description": "Non-empty literal text to select in the editor value.",
+      "type": "string"
+     },
+     "window_id": {
+      "description": "Exact native window ID containing the observed editor.",
+      "type": "integer"
+     }
+    },
+    "required": [
+     "pid",
+     "text"
+    ],
+    "type": "object"
+   },
+   "name": "select_text",
    "read_only": false
   },
   {
@@ -1870,7 +2042,7 @@
    "read_only": false
   },
   {
-   "description": "Single-call end-to-end driver diagnostics. Designed to let downstream consumers ship one stable call instead of stitching together check_permissions, doctor, version, bundle attribution, and platform capability status. On macOS, prompt-capable direct capture is deliberately skipped. For standalone CuaDriver, use `cua-driver permissions grant` to verify it explicitly. For an embedded or linked driver, use the host's permission flow for the app or executable macOS attributes this process's permission request to; the standalone command does not verify the host's capture readiness. cua-driver owns the health model; consumers stay thin.\n\nInput — all optional:\n  {\n    \"include\": [\"<check_name>\", ...],   // run only these\n    \"skip\":    [\"<check_name>\", ...]    // skip these\n  }\nIf both are given, `include` wins.\n\nCanonical check names:\n  macOS  : binary_version, platform_supported, session_active,\n           bundle_identity, tcc_accessibility, tcc_screen_recording,\n           ax_capability, screen_capture_capability\n  Windows: binary_version, platform_supported, session_active,\n           ax_capability (via UIA), screen_capture_capability (via DXGI)\n  Linux  : binary_version, platform_supported, session_active,\n           ax_capability (via AT-SPI), screen_capture_capability (via X11)\n\nOutput — stable contract, schema_version=\"1\":\n  {\n    \"schema_version\": \"1\",\n    \"platform\": \"darwin\" | \"win32\" | \"linux\",\n    \"driver_version\": \"<semver>\",\n    \"overall\": \"ok\" | \"degraded\" | \"failed\",\n    \"checks\": [\n      {\n        \"name\": \"<one of the canonical names above>\",\n        \"status\": \"pass\" | \"fail\" | \"skip\",\n        \"message\": \"<one-line summary, always present>\",\n        \"hint\": \"<remediation step, present when status=fail>\",\n        \"data\": { /* check-specific structured fields */ }\n      },\n      ...\n    ]\n  }\n\n`overall` rules:\n  - `ok`       — every non-skipped check passes\n  - `degraded` — at least one non-core check fails (binary is still usable)\n  - `failed`   — any core check fails (binary_version, platform_supported, session_active)\n\nStability: schema_version=\"1\" is the contract. Future breaking changes will be `\"2\"`. Adding new check names under the same schema_version is non-breaking; consumers must tolerate unknown check names.",
+   "description": "Single-call end-to-end driver diagnostics. Designed to let downstream consumers ship one stable call instead of stitching together check_permissions, doctor, version, bundle attribution, and platform capability status. On macOS, prompt-capable direct capture is deliberately skipped. For standalone CuaDriver, use `cua-driver permissions grant` to verify it explicitly. For an embedded or linked driver, use the host's permission flow for the app or executable macOS attributes this process's permission request to; the standalone command does not verify the host's capture readiness. cua-driver owns the health model; consumers stay thin.\n\nInput — all optional:\n  {\n    \"include\": [\"<check_name>\", ...],   // run only these\n    \"skip\":    [\"<check_name>\", ...]    // skip these\n  }\nIf both are given, `include` wins.\n\nCanonical check names:\n  macOS  : binary_version, platform_supported, session_active,\n           bundle_identity, tcc_accessibility, tcc_screen_recording,\n           tcc_event_posting (read-only CGPreflightPostEventAccess),\n           ax_capability, screen_capture_capability\n  Windows: binary_version, platform_supported, session_active,\n           ax_capability (via UIA), screen_capture_capability (via DXGI)\n  Linux  : binary_version, platform_supported, session_active,\n           ax_capability (via AT-SPI), screen_capture_capability (via X11)\n\nOutput — stable contract, schema_version=\"1\":\n  {\n    \"schema_version\": \"1\",\n    \"platform\": \"darwin\" | \"win32\" | \"linux\",\n    \"driver_version\": \"<semver>\",\n    \"overall\": \"ok\" | \"degraded\" | \"failed\",\n    \"checks\": [\n      {\n        \"name\": \"<one of the canonical names above>\",\n        \"status\": \"pass\" | \"fail\" | \"skip\",\n        \"message\": \"<one-line summary, always present>\",\n        \"hint\": \"<remediation step, present when status=fail>\",\n        \"data\": { /* check-specific structured fields */ }\n      },\n      ...\n    ]\n  }\n\n`overall` rules:\n  - `ok`       — every non-skipped check passes\n  - `degraded` — at least one non-core check fails (binary is still usable)\n  - `failed`   — any core check fails (binary_version, platform_supported, session_active)\n\nStability: schema_version=\"1\" is the contract. Future breaking changes will be `\"2\"`. Adding new check names under the same schema_version is non-breaking; consumers must tolerate unknown check names.",
    "destructive": false,
    "idempotent": true,
    "input_schema": {
@@ -2145,14 +2317,18 @@
    "read_only": false
   },
   {
-   "description": "Read-only browser inspection. Mode 1 (bind): pass pid + window_id of a native browser window to classify it, correlate it to a CDP target (exact-or-refuse), and mint a session-scoped target id plus tab ids. Mode 2 (snapshot): pass target_id + tab_id. The dom_refs_v1 compatibility format returns composed DOM refs. semantic_v2 joins accessibility, DOM, layout, and viewport state; ranks visible content before retained/offscreen state; and returns a semantic outline, typed action refs, content refs, scoped reads, and opaque continuation. Never performs setup — a missing endpoint is a structured browser_requires_setup refusal pointing at browser_prepare.",
+   "description": "Read-only browser inspection. Mode 1 (bind): pass pid + window_id of a native browser window to classify it, correlate it to a CDP target (exact-or-refuse), and mint a session-scoped target id plus tab ids. A driver-owned headless browser binds with pid alone. Mode 2 (snapshot): pass target_id + tab_id. The dom_refs_v1 compatibility format returns composed DOM refs. semantic_v2 joins accessibility, DOM, layout, and viewport state; ranks visible content before retained/offscreen state; and returns a semantic outline, typed action refs, content refs, scoped reads, and opaque continuation. Never performs setup — a missing endpoint is a structured browser_requires_setup refusal pointing at browser_prepare.",
    "destructive": false,
    "idempotent": true,
    "input_schema": {
     "additionalProperties": true,
     "properties": {
+     "context_ref": {
+      "description": "Current issued semantic/content ref whose bounded same-snapshot structural context should be observed. Cannot be combined with query, scope_ref, continuation, or screenshot.",
+      "type": "string"
+     },
      "continuation": {
-      "description": "Opaque continuation minted by an earlier semantic_v2 response.",
+      "description": "Opaque single-use continuation minted by an earlier semantic_v2 response. It advances either filtered matches or a bounded context window within that exact stored snapshot and never recollects the page.",
       "type": "string"
      },
      "include_screenshot": {
@@ -2165,7 +2341,7 @@
       "type": "integer"
      },
      "query": {
-      "description": "Read-only semantic match over role, accessible name, and visible text.",
+      "description": "Read-only semantic match over role, accessible name, and visible text. semantic_v2 query responses also include bounded same-snapshot query_contexts with unmatched nearby structural labels as read-only refs.",
       "type": "string"
      },
      "scope_ref": {
@@ -2221,6 +2397,16 @@
       "additionalProperties": false,
       "description": "Driver-owned isolated Chromium profile to launch with allow_launch=true. mode=isolated_new creates a fresh throwaway profile; mode=isolated_named reuses the named driver-owned profile. Never an existing user profile.",
       "properties": {
+       "expose_debugger_endpoint": {
+        "default": false,
+        "description": "Return the loopback HTTP debugger endpoint for a driver-owned headless browser so a trusted test host can attach.",
+        "type": "boolean"
+       },
+       "headless": {
+        "default": false,
+        "description": "Launch a driver-owned isolated Chromium process without a native window.",
+        "type": "boolean"
+       },
        "mode": {
         "enum": [
          "isolated_new",
@@ -2270,12 +2456,21 @@
    "read_only": false
   },
   {
-   "description": "Navigate one tab of an exactly-bound browser target to a new URL (http/https/about only). Refused for heuristic bindings. Navigation invalidates all p<snapshot>:<index> refs for the tab.",
+   "description": "Navigate one tab of an exactly-bound browser target to a new URL (http/https/about only), backward or forward by one history entry, or reload it. Pass exactly one of url or action. Refused for heuristic bindings. Navigation invalidates all p<snapshot>:<index> refs for the tab.",
    "destructive": false,
    "idempotent": false,
    "input_schema": {
     "additionalProperties": true,
     "properties": {
+     "action": {
+      "description": "Exact-tab history or reload action; alternative to url.",
+      "enum": [
+       "back",
+       "forward",
+       "reload"
+      ],
+      "type": "string"
+     },
      "session": {
       "description": "For multi-call work, prefer a short public session label and repeat it on every call that accepts it. Omit it to use the authenticated transport's implicit lifecycle session. Browser targets, tabs, and refs belong to the resolved lifecycle session.",
       "type": "string"
@@ -2295,8 +2490,7 @@
     },
     "required": [
      "target_id",
-     "tab_id",
-     "url"
+     "tab_id"
     ],
     "type": "object"
    },
@@ -2362,17 +2556,27 @@
    "read_only": false
   },
   {
-   "description": "Type text into an exactly-bound tab via the Input domain. mode=\"insert_text\" (default) uses Input.insertText; mode=\"keystrokes\" dispatches per-character key events. Both insert at the caret, so typing into a field that already holds text appends to it; pass replace=true to set the field instead, or to clear it by typing an empty string. Pass a ref to an editable element from the latest snapshot. A ref is required; heuristic bindings are refused.",
+   "description": "Type text into an exactly-bound tab via the Input domain. mode=\"insert_text\" (default) uses Input.insertText; mode=\"keystrokes\" dispatches per-character key events. mode=\"paste\" writes text/HTML to the clipboard and invokes a real browser paste; it leaves the supplied content on the clipboard. All modes insert at the caret, so typing into a field that already holds text appends to it; pass replace=true to set the field instead, or to clear it by typing an empty string. Pass a ref to an editable element from the latest snapshot. A ref is required; heuristic bindings are refused.",
    "destructive": false,
    "idempotent": false,
    "input_schema": {
     "additionalProperties": true,
     "properties": {
+     "format": {
+      "description": "Paste format; Markdown is literal source.",
+      "enum": [
+       "text",
+       "md",
+       "html"
+      ],
+      "type": "string"
+     },
      "mode": {
-      "description": "insert_text (default): bulk Input.insertText. keystrokes: per-character Input.dispatchKeyEvent.",
+      "description": "insert_text (default): bulk Input.insertText. keystrokes: per-character Input.dispatchKeyEvent. paste: real clipboard paste (no replace).",
       "enum": [
        "insert_text",
-       "keystrokes"
+       "keystrokes",
+       "paste"
       ],
       "type": "string"
      },
@@ -2410,6 +2614,51 @@
     "type": "object"
    },
    "name": "browser_type",
+   "read_only": false
+  },
+  {
+   "description": "Press one xdotool-style key or modifier combination in an exactly-bound browser tab through trusted CDP Input events. The event is delivered to the page's current focus without activating browser chrome. Optionally pass a current type-capable semantic ref to focus that exact editable node first. Browser-level shortcuts are not emulated; use browser_navigate for back, forward, and reload.",
+   "destructive": false,
+   "idempotent": false,
+   "input_schema": {
+    "additionalProperties": true,
+    "properties": {
+     "key": {
+      "description": "One key or combination, for example Return, Tab, Escape, super+v, ctrl+a, Up, F5, or KP_0.",
+      "type": "string"
+     },
+     "modifiers": {
+      "description": "Optional modifier aliases; equivalent to including them in key.",
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     "ref": {
+      "description": "Page element ref in the p<snapshot>:<index> namespace from get_browser_state. Refs are invalidated by navigation and by newer snapshots of the same tab.",
+      "type": "string"
+     },
+     "session": {
+      "description": "For multi-call work, prefer a short public session label and repeat it on every call that accepts it. Omit it to use the authenticated transport's implicit lifecycle session. Browser targets, tabs, and refs belong to the resolved lifecycle session.",
+      "type": "string"
+     },
+     "tab_id": {
+      "description": "Opaque tab id from get_browser_state (session-scoped).",
+      "type": "string"
+     },
+     "target_id": {
+      "description": "Opaque browser target id minted by get_browser_state (session-scoped; never a CDP id).",
+      "type": "string"
+     }
+    },
+    "required": [
+     "target_id",
+     "tab_id",
+     "key"
+    ],
+    "type": "object"
+   },
+   "name": "browser_key",
    "read_only": false
   },
   {

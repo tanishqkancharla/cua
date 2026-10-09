@@ -12,11 +12,11 @@ description: "macOS permission grants, diagnostic probes and install reports."
 
 | Command | Description |
 | --- | --- |
-| [`cua-driver permissions`](#cua-driver-permissions) | Inspect or raise macOS TCC permission grants (macOS only). |
-| [`cua-driver permissions status`](#cua-driver-permissions-status) | Report Accessibility and Screen Recording status through a running daemon (read-only, no prompt). |
-| [`cua-driver permissions grant`](#cua-driver-permissions-grant) | Launch CuaDriver through LaunchServices so the permission prompts are attributed to the app. |
-| [`cua-driver doctor`](#cua-driver-doctor) | Run platform-aware diagnostic probes. |
-| [`cua-driver diagnose`](#cua-driver-diagnose) | Print a pasteable install-layout and permission-attribution report. |
+| [`opensky-driver permissions`](#opensky-driver-permissions) | Inspect or raise macOS TCC permission grants (macOS only). |
+| [`opensky-driver permissions status`](#opensky-driver-permissions-status) | Report Accessibility and Screen Recording status through a running daemon (read-only, no prompt). |
+| [`opensky-driver permissions grant`](#opensky-driver-permissions-grant) | Launch CuaDriver through LaunchServices so the permission prompts are attributed to the app. |
+| [`opensky-driver doctor`](#opensky-driver-doctor) | Run platform-aware diagnostic probes. |
+| [`opensky-driver diagnose`](#opensky-driver-diagnose) | Print a pasteable install-layout and permission-attribution report. |
 
 `cua-driver permissions` exists on macOS only; Windows and Linux have no TCC equivalent.
 
@@ -29,96 +29,96 @@ See [Permissions](/cua-driver/guides/permissions) for the grant flow and recover
 
 Every command also accepts the [global options](/cua-driver/reference/cli#global-options).
 
-## `cua-driver permissions`
+## `opensky-driver permissions`
 
 Inspect or raise macOS TCC permission grants (macOS only).
 
 macOS only: Accessibility and Screen Recording are macOS TCC grants. See the macOS permissions reference.
 
 ```text output
-cua-driver permissions [COMMAND]
+opensky-driver permissions [COMMAND]
 ```
 
-Without a subcommand, runs `cua-driver permissions status`.
+Without a subcommand, runs `opensky-driver permissions status`.
 
 **Examples**
 
-```bash test="cli-shape" id="ref-cua-driver-permissions"
+```bash test="cli-shape" id="ref-opensky-driver-permissions"
 # Report Accessibility and Screen Recording status
-cua-driver permissions
+opensky-driver permissions
 ```
 
-### `cua-driver permissions status`
+### `opensky-driver permissions status`
 
 Report Accessibility and Screen Recording status through a running daemon (read-only, no prompt). The default subcommand.
 
 ```text output
-cua-driver permissions status [OPTIONS]
+opensky-driver permissions status [OPTIONS]
 ```
 
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
-| <span id="cua-driver-permissions-status--json"></span>`--json` | boolean | `false` | Emit machine-readable output. |
+| <span id="opensky-driver-permissions-status--json"></span>`--json` | boolean | `false` | Emit machine-readable output. |
 
 **Examples**
 
-```bash test="cli-shape" id="ref-cua-driver-permissions-status"
+```bash test="cli-shape" id="ref-opensky-driver-permissions-status"
 # Report the grants as JSON
-cua-driver permissions status --json
+opensky-driver permissions status --json
 ```
 
-### `cua-driver permissions grant`
+### `opensky-driver permissions grant`
 
 Launch CuaDriver through LaunchServices so the permission prompts are attributed to the app.
 
 ```text output
-cua-driver permissions grant
+opensky-driver permissions grant
 ```
 
 **Examples**
 
-```bash test="cli-shape" id="ref-cua-driver-permissions-grant"
-# Request the grants for CuaDriver.app
-cua-driver permissions grant
+```bash test="cli-shape" id="ref-opensky-driver-permissions-grant"
+# Request the grants for OpenSkyDriver.app
+opensky-driver permissions grant
 ```
 
-## `cua-driver doctor`
+## `opensky-driver doctor`
 
 Run platform-aware diagnostic probes.
 
 Exit code is non-zero when any probe is an error.
 
 ```text output
-cua-driver doctor [OPTIONS]
+opensky-driver doctor [OPTIONS]
 ```
 
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
-| <span id="cua-driver-doctor--json"></span>`--json` | boolean | `false` | Emit the probe report as JSON. |
+| <span id="opensky-driver-doctor--json"></span>`--json` | boolean | `false` | Emit the probe report as JSON. |
 
 **Examples**
 
-```bash test="cli-shape" id="ref-cua-driver-doctor"
+```bash test="cli-shape" id="ref-opensky-driver-doctor"
 # Run the diagnostic probes
-cua-driver doctor
+opensky-driver doctor
 
 # Emit the probe report as JSON
-cua-driver doctor --json
+opensky-driver doctor --json
 ```
 
-## `cua-driver diagnose`
+## `opensky-driver diagnose`
 
 Print a pasteable install-layout and permission-attribution report.
 
 ```text output
-cua-driver diagnose
+opensky-driver diagnose
 ```
 
 **Examples**
 
-```bash test="cli-shape" id="ref-cua-driver-diagnose"
+```bash test="cli-shape" id="ref-opensky-driver-diagnose"
 # Print an install and permission report to paste into an issue
-cua-driver diagnose
+opensky-driver diagnose
 ```
 
 ## Exit codes

@@ -12,42 +12,42 @@ description: "Record, inspect and render action trajectories."
 
 | Command | Description |
 | --- | --- |
-| [`cua-driver recording start`](#cua-driver-recording-start) | Start trajectory recording to a directory. |
-| [`cua-driver recording stop`](#cua-driver-recording-stop) | Stop trajectory recording. |
-| [`cua-driver recording status`](#cua-driver-recording-status) | Print the current recording state. |
-| [`cua-driver recording render`](#cua-driver-recording-render) | Render a recorded trajectory directory to an MP4. |
+| [`opensky-driver recording start`](#opensky-driver-recording-start) | Start trajectory recording to a directory. |
+| [`opensky-driver recording stop`](#opensky-driver-recording-stop) | Stop trajectory recording. |
+| [`opensky-driver recording status`](#opensky-driver-recording-status) | Print the current recording state. |
+| [`opensky-driver recording render`](#opensky-driver-recording-render) | Render a recorded trajectory directory to an MP4. |
 
 Every command also accepts the [global options](/cua-driver/reference/cli#global-options).
 
-<span id="cua-driver-recording"></span>
+<span id="opensky-driver-recording"></span>
 
 Control trajectory recording on a running daemon.
 
 Recording state lives in the required daemon and survives client reconnects.
 
 ```text output
-cua-driver recording [OPTIONS] [COMMAND]
+opensky-driver recording [OPTIONS] [COMMAND]
 ```
 
-Without a subcommand, runs `cua-driver recording status`.
+Without a subcommand, runs `opensky-driver recording status`.
 
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
-| <span id="cua-driver-recording--socket"></span>`--socket` | string |  | Override the daemon socket or named-pipe path. |
+| <span id="opensky-driver-recording--socket"></span>`--socket` | string |  | Override the daemon socket or named-pipe path. |
 
 **Examples**
 
-```bash test="cli-shape" id="ref-cua-driver-recording"
+```bash test="cli-shape" id="ref-opensky-driver-recording"
 # Print the current recording state
-cua-driver recording
+opensky-driver recording
 ```
 
-## `cua-driver recording start`
+## `opensky-driver recording start`
 
 Start trajectory recording to a directory.
 
 ```text output
-cua-driver recording start <output-dir>
+opensky-driver recording start <output-dir>
 ```
 
 | Argument | Type | Default | Description |
@@ -56,49 +56,49 @@ cua-driver recording start <output-dir>
 
 **Examples**
 
-```bash test="cli-shape" id="ref-cua-driver-recording-start"
+```bash test="cli-shape" id="ref-opensky-driver-recording-start"
 # Record turns into a directory
-cua-driver recording start ~/cua-trajectories/demo1
+opensky-driver recording start ~/cua-trajectories/demo1
 ```
 
-## `cua-driver recording stop`
+## `opensky-driver recording stop`
 
 Stop trajectory recording.
 
 ```text output
-cua-driver recording stop
+opensky-driver recording stop
 ```
 
 **Examples**
 
-```bash test="cli-shape" id="ref-cua-driver-recording-stop"
+```bash test="cli-shape" id="ref-opensky-driver-recording-stop"
 # Stop recording
-cua-driver recording stop
+opensky-driver recording stop
 ```
 
-## `cua-driver recording status`
+## `opensky-driver recording status`
 
 Print the current recording state.
 
 ```text output
-cua-driver recording status
+opensky-driver recording status
 ```
 
 **Examples**
 
-```bash test="cli-shape" id="ref-cua-driver-recording-status"
+```bash test="cli-shape" id="ref-opensky-driver-recording-status"
 # Print the recording state
-cua-driver recording status
+opensky-driver recording status
 ```
 
-## `cua-driver recording render`
+## `opensky-driver recording render`
 
 Render a recorded trajectory directory to an MP4.
 
 This pure file-to-file path does not require a running daemon.
 
 ```text output
-cua-driver recording render [OPTIONS] <input-dir> <out-mp4>
+opensky-driver recording render [OPTIONS] <input-dir> <out-mp4>
 ```
 
 | Argument | Type | Default | Description |
@@ -108,14 +108,14 @@ cua-driver recording render [OPTIONS] <input-dir> <out-mp4>
 
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
-| <span id="cua-driver-recording-render--scale"></span>`--scale` | number |  | Scale factor for rendered frames. |
-| <span id="cua-driver-recording-render--no-zoom"></span>`--no-zoom` | boolean | `false` | Disable cursor/action zoom effects in the rendered video. |
+| <span id="opensky-driver-recording-render--scale"></span>`--scale` | number |  | Scale factor for rendered frames. |
+| <span id="opensky-driver-recording-render--no-zoom"></span>`--no-zoom` | boolean | `false` | Disable cursor/action zoom effects in the rendered video. |
 
 **Examples**
 
-```bash test="cli-shape" id="ref-cua-driver-recording-render"
+```bash test="cli-shape" id="ref-opensky-driver-recording-render"
 # Render a recorded trajectory to MP4
-cua-driver recording render ~/cua-trajectories/demo1 demo1.mp4
+opensky-driver recording render ~/cua-trajectories/demo1 demo1.mp4
 ```
 
 ## Exit codes

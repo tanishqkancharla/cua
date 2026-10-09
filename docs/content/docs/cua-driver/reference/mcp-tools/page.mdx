@@ -15,7 +15,7 @@ description: "Read and act on web pages, and prepare and navigate browsers."
 | [`page`](#page) | Legacy browser compatibility tool. | macOS, Linux, Windows |
 | [`get_browser_state`](#get_browser_state) | Read-only browser inspection. | macOS, Linux, Windows |
 | [`browser_prepare`](#browser_prepare) | Explicitly prepare an owned DevTools endpoint for a browser. | macOS, Linux, Windows |
-| [`browser_navigate`](#browser_navigate) | Navigate one tab of an exactly-bound browser target to a new URL (http/https/about only). | macOS, Linux, Windows |
+| [`browser_navigate`](#browser_navigate) | Navigate one tab of an exactly-bound browser target to a new URL (http/https/about only), backward or forward by one history entry, or reload it. | macOS, Linux, Windows |
 
 Served by `cua-driver mcp`; see [MCP tools](/cua-driver/reference/mcp-tools) for every tool.
 
@@ -58,16 +58,17 @@ Effect: mutating. Platforms: macOS, Linux, Windows.
 
 ## `get_browser_state`
 
-Read-only browser inspection. Mode 1 (bind): pass pid + window_id of a native browser window to classify it, correlate it to a CDP target (exact-or-refuse), and mint a session-scoped target id plus tab ids. Mode 2 (snapshot): pass target_id + tab_id. The dom_refs_v1 compatibility format returns composed DOM refs. semantic_v2 joins accessibility, DOM, layout, and viewport state; ranks visible content before retained/offscreen state; and returns a semantic outline, typed action refs, content refs, scoped reads, and opaque continuation. Never performs setup: a missing endpoint is a structured browser_requires_setup refusal pointing at browser_prepare.
+Read-only browser inspection. Mode 1 (bind): pass pid + window_id of a native browser window to classify it, correlate it to a CDP target (exact-or-refuse), and mint a session-scoped target id plus tab ids. A driver-owned headless browser binds with pid alone. Mode 2 (snapshot): pass target_id + tab_id. The dom_refs_v1 compatibility format returns composed DOM refs. semantic_v2 joins accessibility, DOM, layout, and viewport state; ranks visible content before retained/offscreen state; and returns a semantic outline, typed action refs, content refs, scoped reads, and opaque continuation. Never performs setup: a missing endpoint is a structured browser_requires_setup refusal pointing at browser_prepare.
 
 Effect: read-only, idempotent. Platforms: macOS, Linux, Windows.
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| <span id="get_browser_state--continuation"></span>`continuation` | `string` |  | Opaque continuation minted by an earlier semantic_v2 response. |
+| <span id="get_browser_state--context_ref"></span>`context_ref` | `string` |  | Current issued semantic/content ref whose bounded same-snapshot structural context should be observed. Cannot be combined with query, scope_ref, continuation, or screenshot. |
+| <span id="get_browser_state--continuation"></span>`continuation` | `string` |  | Opaque single-use continuation minted by an earlier semantic_v2 response. It advances either filtered matches or a bounded context window within that exact stored snapshot and never recollects the page. |
 | <span id="get_browser_state--include_screenshot"></span>`include_screenshot` | `boolean` | `false` | Capture the exact tab viewport as PNG through CDP without selecting the tab or foregrounding its native window. The request refuses if capture cannot be completed. |
 | <span id="get_browser_state--pid"></span>`pid` | `integer` |  | Native browser process id (bind mode). |
-| <span id="get_browser_state--query"></span>`query` | `string` |  | Read-only semantic match over role, accessible name, and visible text. |
+| <span id="get_browser_state--query"></span>`query` | `string` |  | Read-only semantic match over role, accessible name, and visible text. semantic_v2 query responses also include bounded same-snapshot query_contexts with unmatched nearby structural labels as read-only refs. |
 | <span id="get_browser_state--scope_ref"></span>`scope_ref` | `string` |  | Current semantic/content ref whose subtree should be observed. |
 | <span id="get_browser_state--session"></span>`session` | `string` |  | For multi-call work, prefer a short public session label and repeat it on every call that accepts it. Omit it to use the authenticated transport's implicit lifecycle session. Browser targets, tabs, and refs belong to the resolved lifecycle session. |
 | <span id="get_browser_state--snapshot_format"></span>`snapshot_format` | `"dom_refs_v1" \| "semantic_v2"` |  | Versioned snapshot contract. dom_refs_v1 remains the compatibility default. |
@@ -86,6 +87,8 @@ Effect: destructive. Platforms: macOS, Linux, Windows.
 | <span id="browser_prepare--allow_launch"></span>`allow_launch` | `boolean` |  | Allow a separate driver-owned isolated Chromium process to be launched (default false). |
 | <span id="browser_prepare--pid"></span>`pid` | `integer` |  | Browser process id to prepare. Required except for a driver-owned isolated_new/isolated_named launch with allow_launch=true. |
 | <span id="browser_prepare--profile"></span>`profile` | `object` |  | Driver-owned isolated Chromium profile to launch with allow_launch=true. mode=isolated_new creates a fresh throwaway profile; mode=isolated_named reuses the named driver-owned profile. Never an existing user profile. |
+| <span id="browser_prepare--profile-expose_debugger_endpoint"></span>`profile.expose_debugger_endpoint` | `boolean` | `false` | Return the loopback HTTP debugger endpoint for a driver-owned headless browser so a trusted test host can attach. |
+| <span id="browser_prepare--profile-headless"></span>`profile.headless` | `boolean` | `false` | Launch a driver-owned isolated Chromium process without a native window. |
 | <span id="browser_prepare--profile-mode"></span>`profile.mode` | `"isolated_new" \| "isolated_named"` |  |  |
 | <span id="browser_prepare--profile-name"></span>`profile.name` | `string` |  | Required only for isolated_named; 1-64 path-safe ASCII characters. |
 | <span id="browser_prepare--session"></span>`session` | `string` |  | For multi-call work, prefer a short public session label and repeat it on every call that accepts it. Omit it to use the authenticated transport's implicit lifecycle session. Browser targets, tabs, and refs belong to the resolved lifecycle session. |
@@ -95,19 +98,20 @@ Effect: destructive. Platforms: macOS, Linux, Windows.
 
 ## `browser_navigate`
 
-Navigate one tab of an exactly-bound browser target to a new URL (http/https/about only). Refused for heuristic bindings. Navigation invalidates all p&lt;snapshot&gt;:&lt;index&gt; refs for the tab.
+Navigate one tab of an exactly-bound browser target to a new URL (http/https/about only), backward or forward by one history entry, or reload it. Pass exactly one of url or action. Refused for heuristic bindings. Navigation invalidates all p&lt;snapshot&gt;:&lt;index&gt; refs for the tab.
 
 Effect: mutating. Platforms: macOS, Linux, Windows.
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
+| <span id="browser_navigate--action"></span>`action` | `"back" \| "forward" \| "reload"` |  | Exact-tab history or reload action; alternative to url. |
 | <span id="browser_navigate--session"></span>`session` | `string` |  | For multi-call work, prefer a short public session label and repeat it on every call that accepts it. Omit it to use the authenticated transport's implicit lifecycle session. Browser targets, tabs, and refs belong to the resolved lifecycle session. |
 | <span id="browser_navigate--tab_id"></span>`tab_id` | `string` | required | Opaque tab id from get_browser_state (session-scoped). |
 | <span id="browser_navigate--target_id"></span>`target_id` | `string` | required | Opaque browser target id minted by get_browser_state (session-scoped; never a CDP id). |
-| <span id="browser_navigate--url"></span>`url` | `string` | required | Destination URL (http:, https:, or about:). |
+| <span id="browser_navigate--url"></span>`url` | `string` |  | Destination URL (http:, https:, or about:). |
 
 **Example arguments**
 
 ```json
-{"target_id":"<target_id>","tab_id":"<tab_id>","url":"<url>"}
+{"target_id":"<target_id>","tab_id":"<tab_id>"}
 ```

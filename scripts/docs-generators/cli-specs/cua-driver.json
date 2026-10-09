@@ -4,14 +4,14 @@
   {
    "abstract": "Run the stdio MCP server.",
    "arguments": [],
-   "discussion": "On Windows and Linux, bare cua-driver mcp owns its runtime directly and shuts it down on stdin EOF. On macOS it proxies to CuaDriver.app so desktop permissions retain the app identity. Pass --direct to make the macOS MCP process own the runtime and TCC attribution, or --socket to select an explicit daemon endpoint.",
+   "discussion": "On Windows and Linux, bare opensky-driver mcp owns its runtime directly and shuts it down on stdin EOF. On macOS it proxies to OpenSkyDriver.app so desktop permissions retain the app identity. Pass --direct to make the macOS MCP process own the runtime and TCC attribution, or --socket to select an explicit daemon endpoint.",
    "examples": [
     {
-     "command": "cua-driver mcp",
+     "command": "opensky-driver mcp",
      "description": "Run the stdio MCP server (what MCP clients launch)"
     },
     {
-     "command": "cua-driver mcp --socket /tmp/cua-driver.sock",
+     "command": "opensky-driver mcp --socket /tmp/opensky-driver.sock",
      "description": "Connect to a daemon on an explicit socket"
     }
    ],
@@ -87,7 +87,7 @@
    "discussion": "",
    "examples": [
     {
-     "command": "cua-driver list-tools",
+     "command": "opensky-driver list-tools",
      "description": "List every tool with a one-line description"
     }
    ],
@@ -109,7 +109,7 @@
    "discussion": "",
    "examples": [
     {
-     "command": "cua-driver describe click",
+     "command": "opensky-driver describe click",
      "description": "Print a tool's description and input schema"
     }
    ],
@@ -134,18 +134,18 @@
      "type": "String"
     }
    ],
-   "discussion": "Requires a Cua Driver daemon. JSON arguments may be passed as a positional JSON object or through stdin.",
+   "discussion": "Requires a OpenSky Driver daemon. JSON arguments may be passed as a positional JSON object or through stdin.",
    "examples": [
     {
-     "command": "cua-driver call list_apps",
+     "command": "opensky-driver call list_apps",
      "description": "Call a tool with no arguments"
     },
     {
-     "command": "cua-driver call click '{\"pid\":844,\"x\":100,\"y\":200}'",
+     "command": "opensky-driver call click '{\"pid\":844,\"x\":100,\"y\":200}'",
      "description": "Click at window coordinates"
     },
     {
-     "command": "cua-driver call get_window_state '{\"pid\":844,\"window_id\":10725}' --screenshot-out-file state.png",
+     "command": "opensky-driver call get_window_state '{\"pid\":844,\"window_id\":10725}' --screenshot-out-file state.png",
      "description": "Save the screenshot from a tool response"
     }
    ],
@@ -177,15 +177,15 @@
    "discussion": "The daemon owns per-process state such as accessibility snapshots, recording state, and cursor overlay state.",
    "examples": [
     {
-     "command": "cua-driver serve",
+     "command": "opensky-driver serve",
      "description": "Run the daemon in the foreground"
     },
     {
-     "command": "cua-driver serve --permission-mode bounded --capability-manifest manifest.yaml --approve-capability-manifest",
+     "command": "opensky-driver serve --permission-mode bounded --capability-manifest manifest.yaml --approve-capability-manifest",
      "description": "Start a bounded daemon with a reviewed capability manifest"
     },
     {
-     "command": "cua-driver serve --no-overlay",
+     "command": "opensky-driver serve --no-overlay",
      "description": "Run without the agent cursor overlay"
     }
    ],
@@ -361,7 +361,7 @@
    "discussion": "",
    "examples": [
     {
-     "command": "cua-driver stop",
+     "command": "opensky-driver stop",
      "description": "Ask the running daemon to exit"
     }
    ],
@@ -393,11 +393,11 @@
    "discussion": "Revocation is deny-only and never accepts an approval token.",
    "examples": [
     {
-     "command": "cua-driver revoke --session 3f9c2a",
+     "command": "opensky-driver revoke --session 3f9c2a",
      "description": "Stop and revoke one session"
     },
     {
-     "command": "cua-driver revoke --all",
+     "command": "opensky-driver revoke --all",
      "description": "Stop and revoke every live session"
     }
    ],
@@ -431,12 +431,12 @@
    "subcommands": []
   },
   {
-   "abstract": "Report whether a Cua Driver daemon is running.",
+   "abstract": "Report whether a OpenSky Driver daemon is running.",
    "arguments": [],
    "discussion": "",
    "examples": [
     {
-     "command": "cua-driver status",
+     "command": "opensky-driver status",
      "description": "Check whether the daemon is running"
     }
    ],
@@ -469,7 +469,7 @@
    "discussion": "",
    "examples": [
     {
-     "command": "cua-driver sessions --json",
+     "command": "opensky-driver sessions --json",
      "description": "List live sessions as JSON"
     }
    ],
@@ -499,7 +499,7 @@
      "discussion": "",
      "examples": [
       {
-       "command": "cua-driver sessions list",
+       "command": "opensky-driver sessions list",
        "description": "List live sessions"
       }
      ],
@@ -514,10 +514,10 @@
    "abstract": "Encrypted, metadata-only Computer History early preview: lifecycle and local inspection.",
    "arguments": [],
    "default_subcommand": "status",
-   "discussion": "The daemon must be admitted for the preview (`cua-driver serve --experimental-history`); `enable` restarts a local daemon with it when needed.",
+   "discussion": "The daemon must be admitted for the preview (`opensky-driver serve --experimental-history`); `enable` restarts a local daemon with it when needed.",
    "examples": [
     {
-     "command": "cua-driver history",
+     "command": "opensky-driver history",
      "description": "Print the Computer History state"
     }
    ],
@@ -547,7 +547,7 @@
      "discussion": "",
      "examples": [
       {
-       "command": "cua-driver history enable",
+       "command": "opensky-driver history enable",
        "description": "Turn on the Computer History preview"
       }
      ],
@@ -562,7 +562,7 @@
      "discussion": "",
      "examples": [
       {
-       "command": "cua-driver history disable",
+       "command": "opensky-driver history disable",
        "description": "Turn Computer History off"
       }
      ],
@@ -577,7 +577,7 @@
      "discussion": "",
      "examples": [
       {
-       "command": "cua-driver history pause",
+       "command": "opensky-driver history pause",
        "description": "Pause recording"
       }
      ],
@@ -592,7 +592,7 @@
      "discussion": "",
      "examples": [
       {
-       "command": "cua-driver history resume",
+       "command": "opensky-driver history resume",
        "description": "Resume recording"
       }
      ],
@@ -607,7 +607,7 @@
      "discussion": "",
      "examples": [
       {
-       "command": "cua-driver history status --json",
+       "command": "opensky-driver history status --json",
        "description": "Print the state as JSON"
       }
      ],
@@ -629,7 +629,7 @@
      "discussion": "",
      "examples": [
       {
-       "command": "cua-driver history flush",
+       "command": "opensky-driver history flush",
        "description": "Seal the current chunk now"
       }
      ],
@@ -651,7 +651,7 @@
      "discussion": "",
      "examples": [
       {
-       "command": "cua-driver history list 20",
+       "command": "opensky-driver history list 20",
        "description": "List the 20 most recent events"
       }
      ],
@@ -680,7 +680,7 @@
      "discussion": "",
      "examples": [
       {
-       "command": "cua-driver history show 42 --json",
+       "command": "opensky-driver history show 42 --json",
        "description": "Print event 42 as JSON"
       }
      ],
@@ -702,7 +702,7 @@
      "discussion": "",
      "examples": [
       {
-       "command": "cua-driver history delete --yes",
+       "command": "opensky-driver history delete --yes",
        "description": "Delete every recorded chunk and its key"
       }
      ],
@@ -727,7 +727,7 @@
    "discussion": "macOS only: Accessibility and Screen Recording are macOS TCC grants. See the macOS permissions reference.",
    "examples": [
     {
-     "command": "cua-driver permissions",
+     "command": "opensky-driver permissions",
      "description": "Report Accessibility and Screen Recording status"
     }
    ],
@@ -741,7 +741,7 @@
      "discussion": "",
      "examples": [
       {
-       "command": "cua-driver permissions status --json",
+       "command": "opensky-driver permissions status --json",
        "description": "Report the grants as JSON"
       }
      ],
@@ -763,8 +763,8 @@
      "discussion": "",
      "examples": [
       {
-       "command": "cua-driver permissions grant",
-       "description": "Request the grants for CuaDriver.app"
+       "command": "opensky-driver permissions grant",
+       "description": "Request the grants for OpenSkyDriver.app"
       }
      ],
      "flags": [],
@@ -780,11 +780,11 @@
    "discussion": "Supported clients include claude, codex, cursor, antigravity, openclaw, opencode, hermes, pi, prime-agent, qwen, droid, and zcode.",
    "examples": [
     {
-     "command": "cua-driver mcp-config",
+     "command": "opensky-driver mcp-config",
      "description": "Print a generic mcpServers entry"
     },
     {
-     "command": "cua-driver mcp-config --client codex",
+     "command": "opensky-driver mcp-config --client codex",
      "description": "Print setup for Codex"
     }
    ],
@@ -809,7 +809,7 @@
    "discussion": "Recording state lives in the required daemon and survives client reconnects.",
    "examples": [
     {
-     "command": "cua-driver recording",
+     "command": "opensky-driver recording",
      "description": "Print the current recording state"
     }
    ],
@@ -839,7 +839,7 @@
      "discussion": "",
      "examples": [
       {
-       "command": "cua-driver recording start ~/cua-trajectories/demo1",
+       "command": "opensky-driver recording start ~/cua-trajectories/demo1",
        "description": "Record turns into a directory"
       }
      ],
@@ -854,7 +854,7 @@
      "discussion": "",
      "examples": [
       {
-       "command": "cua-driver recording stop",
+       "command": "opensky-driver recording stop",
        "description": "Stop recording"
       }
      ],
@@ -869,7 +869,7 @@
      "discussion": "",
      "examples": [
       {
-       "command": "cua-driver recording status",
+       "command": "opensky-driver recording status",
        "description": "Print the recording state"
       }
      ],
@@ -897,7 +897,7 @@
      "discussion": "This pure file-to-file path does not require a running daemon.",
      "examples": [
       {
-       "command": "cua-driver recording render ~/cua-trajectories/demo1 demo1.mp4",
+       "command": "opensky-driver recording render ~/cua-trajectories/demo1 demo1.mp4",
        "description": "Render a recorded trajectory to MP4"
       }
      ],
@@ -931,7 +931,7 @@
    "discussion": "Without a subcommand, prints the full config.",
    "examples": [
     {
-     "command": "cua-driver config",
+     "command": "opensky-driver config",
      "description": "Print the full config"
     }
    ],
@@ -954,7 +954,7 @@
      "discussion": "",
      "examples": [
       {
-       "command": "cua-driver config show",
+       "command": "opensky-driver config show",
        "description": "Print the full config"
       }
      ],
@@ -976,7 +976,7 @@
      "discussion": "",
      "examples": [
       {
-       "command": "cua-driver config get max_image_dimension",
+       "command": "opensky-driver config get max_image_dimension",
        "description": "Print one key"
       }
      ],
@@ -1004,19 +1004,19 @@
      "discussion": "Cursor motion defaults are saved keys that apply to sessions started afterwards: cursor.motion.style (signature_arc, spring_settle, magnetic, comet_swoop, adaptive, classic), cursor.motion.timing (native, fitts, fixed) and cursor.motion.effects.<trail|glow|magnet|ripple|squish> (true, false). Use null for a key to clear it, or cursor.motion null to clear all. A start_session cursor_motion or a set_agent_cursor_motion call overrides the saved default.",
      "examples": [
       {
-       "command": "cua-driver config set max_image_dimension 1568",
+       "command": "opensky-driver config set max_image_dimension 1568",
        "description": "Downscale screenshots to at most 1568 px"
       },
       {
-       "command": "cua-driver config set cursor.motion.style magnetic",
+       "command": "opensky-driver config set cursor.motion.style magnetic",
        "description": "Make magnetic the default cursor motion for new sessions"
       },
       {
-       "command": "cua-driver config set cursor.motion.timing fitts",
+       "command": "opensky-driver config set cursor.motion.timing fitts",
        "description": "Scale cursor move time with distance and target size"
       },
       {
-       "command": "cua-driver config set cursor.motion.effects.trail true",
+       "command": "opensky-driver config set cursor.motion.effects.trail true",
        "description": "Turn the cursor trail on by default"
       }
      ],
@@ -1031,7 +1031,7 @@
      "discussion": "",
      "examples": [
       {
-       "command": "cua-driver config reset",
+       "command": "opensky-driver config reset",
        "description": "Restore the defaults"
       }
      ],
@@ -1048,7 +1048,7 @@
    "discussion": "Telemetry is default-on. Disable retains the pseudonymous installation ID; reset-id erases the ID and event markers while preserving the preference.",
    "examples": [
     {
-     "command": "cua-driver telemetry status",
+     "command": "opensky-driver telemetry status",
      "description": "Show the effective telemetry setting"
     }
    ],
@@ -1062,7 +1062,7 @@
      "discussion": "",
      "examples": [
       {
-       "command": "cua-driver telemetry enable",
+       "command": "opensky-driver telemetry enable",
        "description": "Enable telemetry"
       }
      ],
@@ -1077,7 +1077,7 @@
      "discussion": "Retains the local installation ID.",
      "examples": [
       {
-       "command": "cua-driver telemetry disable",
+       "command": "opensky-driver telemetry disable",
        "description": "Disable every telemetry request"
       }
      ],
@@ -1092,7 +1092,7 @@
      "discussion": "",
      "examples": [
       {
-       "command": "cua-driver telemetry status --json",
+       "command": "opensky-driver telemetry status --json",
        "description": "Show the setting as JSON"
       }
      ],
@@ -1114,7 +1114,7 @@
      "discussion": "The persisted enabled/disabled preference is retained.",
      "examples": [
       {
-       "command": "cua-driver telemetry reset-id",
+       "command": "opensky-driver telemetry reset-id",
        "description": "Erase the installation ID"
       }
      ],
@@ -1136,7 +1136,7 @@
      "discussion": "The distinct ID is replaced with a redacted placeholder.",
      "examples": [
       {
-       "command": "cua-driver telemetry inspect cua_driver_cli_completed --json",
+       "command": "opensky-driver telemetry inspect cua_driver_cli_completed --json",
        "description": "Show the payload of one event without sending it"
       }
      ],
@@ -1155,16 +1155,16 @@
    ]
   },
   {
-   "abstract": "Check whether a newer cua-driver release is available.",
+   "abstract": "Check whether a newer opensky-driver release is available.",
    "arguments": [],
    "discussion": "Read-only. Uses the same update-state payload as the check_for_update MCP tool.",
    "examples": [
     {
-     "command": "cua-driver check-update",
+     "command": "opensky-driver check-update",
      "description": "Check for a newer release"
     },
     {
-     "command": "cua-driver check-update --json --no-cache",
+     "command": "opensky-driver check-update --json --no-cache",
      "description": "Check now, as JSON"
     }
    ],
@@ -1192,11 +1192,11 @@
    "discussion": "The apply path delegates to the canonical platform installer scripts.",
    "examples": [
     {
-     "command": "cua-driver update",
+     "command": "opensky-driver update",
      "description": "Check and print the install command"
     },
     {
-     "command": "cua-driver update --apply",
+     "command": "opensky-driver update --apply",
      "description": "Install the latest release"
     }
    ],
@@ -1222,10 +1222,10 @@
    "abstract": "Inspect or change the stable/nightly update channel.",
    "arguments": [],
    "default_subcommand": "status",
-   "discussion": "Selection is persistent but never installs by itself; use cua-driver update --apply after changing it.",
+   "discussion": "Selection is persistent but never installs by itself; use opensky-driver update --apply after changing it.",
    "examples": [
     {
-     "command": "cua-driver channel",
+     "command": "opensky-driver channel",
      "description": "Show the selected release channel"
     }
    ],
@@ -1239,7 +1239,7 @@
      "discussion": "",
      "examples": [
       {
-       "command": "cua-driver channel status --json",
+       "command": "opensky-driver channel status --json",
        "description": "Show the channels as JSON"
       }
      ],
@@ -1268,7 +1268,7 @@
      "discussion": "",
      "examples": [
       {
-       "command": "cua-driver channel set nightly",
+       "command": "opensky-driver channel set nightly",
        "description": "Follow nightly builds (then run update --apply)"
       }
      ],
@@ -1292,11 +1292,11 @@
    "discussion": "Exit code is non-zero when any probe is an error.",
    "examples": [
     {
-     "command": "cua-driver doctor",
+     "command": "opensky-driver doctor",
      "description": "Run the diagnostic probes"
     },
     {
-     "command": "cua-driver doctor --json",
+     "command": "opensky-driver doctor --json",
      "description": "Emit the probe report as JSON"
     }
    ],
@@ -1318,7 +1318,7 @@
    "discussion": "",
    "examples": [
     {
-     "command": "cua-driver diagnose",
+     "command": "opensky-driver diagnose",
      "description": "Print an install and permission report to paste into an issue"
     }
    ],
@@ -1333,7 +1333,7 @@
    "discussion": "Windows registers a logon Scheduled Task. macOS and Linux currently print manual-recipe guidance.",
    "examples": [
     {
-     "command": "cua-driver autostart status",
+     "command": "opensky-driver autostart status",
      "description": "Check the autostart entry"
     }
    ],
@@ -1347,7 +1347,7 @@
      "discussion": "",
      "examples": [
       {
-       "command": "cua-driver autostart enable",
+       "command": "opensky-driver autostart enable",
        "description": "Start the daemon at every logon"
       }
      ],
@@ -1362,7 +1362,7 @@
      "discussion": "",
      "examples": [
       {
-       "command": "cua-driver autostart disable",
+       "command": "opensky-driver autostart disable",
        "description": "Remove the autostart entry"
       }
      ],
@@ -1377,7 +1377,7 @@
      "discussion": "`not-registered` is emitted only when Task Scheduler explicitly reports that the named task does not exist. If the task cannot be inspected, the command exits non-zero and reports `permission-denied` or `unknown` together with the original diagnostic.",
      "examples": [
       {
-       "command": "cua-driver autostart status",
+       "command": "opensky-driver autostart status",
        "description": "Check the autostart entry"
       }
      ],
@@ -1392,7 +1392,7 @@
      "discussion": "",
      "examples": [
       {
-       "command": "cua-driver autostart kick",
+       "command": "opensky-driver autostart kick",
        "description": "Start the entry now"
       }
      ],
@@ -1410,7 +1410,7 @@
    "discussion": "The install script never touches agent skill directories automatically.",
    "examples": [
     {
-     "command": "cua-driver skills",
+     "command": "opensky-driver skills",
      "description": "Report skill-pack state"
     }
    ],
@@ -1424,11 +1424,11 @@
      "discussion": "",
      "examples": [
       {
-       "command": "cua-driver skills install",
+       "command": "opensky-driver skills install",
        "description": "Install the skill pack and link detected agents"
       },
       {
-       "command": "cua-driver skills install --from=main",
+       "command": "opensky-driver skills install --from=main",
        "description": "Install the latest skill pack from main"
       }
      ],
@@ -1465,7 +1465,7 @@
      "discussion": "Always re-fetches; takes the same options as install.",
      "examples": [
       {
-       "command": "cua-driver skills update",
+       "command": "opensky-driver skills update",
        "description": "Refresh the skill pack and links"
       }
      ],
@@ -1496,7 +1496,7 @@
      "discussion": "",
      "examples": [
       {
-       "command": "cua-driver skills uninstall --all",
+       "command": "opensky-driver skills uninstall --all",
        "description": "Remove the links and the local copy"
       }
      ],
@@ -1518,7 +1518,7 @@
      "discussion": "",
      "examples": [
       {
-       "command": "cua-driver skills status",
+       "command": "opensky-driver skills status",
        "description": "Report skill-pack and link state"
       }
      ],
@@ -1533,7 +1533,7 @@
      "discussion": "",
      "examples": [
       {
-       "command": "cua-driver skills path",
+       "command": "opensky-driver skills path",
        "description": "Print the skill-pack path"
       }
      ],
@@ -1551,7 +1551,7 @@
    "discussion": "Verified installs bind a pinned publisher identity and Ed25519 key validity/rotation state to exact catalog, archive, manifest, file, original-model, and converted-model hashes plus component licenses/notices and corresponding-source revisions. Inspect previews license, source, and provenance before mutation. Explicit developer-only unsigned installs remain visibly unverified. Install, update, and remove use platform-specific ownership and link/reparse-point checks on macOS, Linux, and Windows.",
    "examples": [
     {
-     "command": "cua-driver extension list",
+     "command": "opensky-driver extension list",
      "description": "List known extensions"
     }
    ],
@@ -1565,7 +1565,7 @@
      "discussion": "",
      "examples": [
       {
-       "command": "cua-driver extension list --json",
+       "command": "opensky-driver extension list --json",
        "description": "List extensions as JSON"
       }
      ],
@@ -1594,7 +1594,7 @@
      "discussion": "",
      "examples": [
       {
-       "command": "cua-driver extension info cua-perception",
+       "command": "opensky-driver extension info cua-perception",
        "description": "Show an installed extension"
       }
      ],
@@ -1623,7 +1623,7 @@
      "discussion": "",
      "examples": [
       {
-       "command": "cua-driver extension inspect cua-perception --catalog catalog.json",
+       "command": "opensky-driver extension inspect cua-perception --catalog catalog.json",
        "description": "Preview license, source and provenance"
       }
      ],
@@ -1675,7 +1675,7 @@
      "discussion": "",
      "examples": [
       {
-       "command": "cua-driver extension status cua-perception --self-test",
+       "command": "opensky-driver extension status cua-perception --self-test",
        "description": "Verify an extension and run its self-test"
       }
      ],
@@ -1710,7 +1710,7 @@
      "discussion": "Supported on macOS, Linux, and Windows with platform ownership and link/reparse-point checks.",
      "examples": [
       {
-       "command": "cua-driver extension install cua-perception --catalog catalog.json",
+       "command": "opensky-driver extension install cua-perception --catalog catalog.json",
        "description": "Install from a signed catalog"
       }
      ],
@@ -1756,7 +1756,7 @@
      "discussion": "Supported on macOS, Linux, and Windows with platform ownership and link/reparse-point checks.",
      "examples": [
       {
-       "command": "cua-driver extension update cua-perception --catalog catalog.json",
+       "command": "opensky-driver extension update cua-perception --catalog catalog.json",
        "description": "Activate a newer version"
       }
      ],
@@ -1802,7 +1802,7 @@
      "discussion": "Supported on macOS, Linux, and Windows with platform ownership and link/reparse-point checks.",
      "examples": [
       {
-       "command": "cua-driver extension remove cua-perception",
+       "command": "opensky-driver extension remove cua-perception",
        "description": "Remove an extension"
       }
      ],
@@ -1824,7 +1824,7 @@
      "discussion": "",
      "examples": [
       {
-       "command": "cua-driver extension path cua-perception",
+       "command": "opensky-driver extension path cua-perception",
        "description": "Print the active version directory"
       }
      ],
@@ -1841,7 +1841,7 @@
    "discussion": "This read-only local-input mode does not create a Driver capture. Its visual-regions JSON marks the result ineligible for Driver action authority.",
    "examples": [
     {
-     "command": "cua-driver perception parse --image screen.png --capture capture.json --json",
+     "command": "opensky-driver perception parse --image screen.png --capture capture.json --json",
      "description": "Parse a PNG into visual regions"
     }
    ],
@@ -1855,7 +1855,7 @@
      "discussion": "Requires --json. The capture file supplies source metadata only.",
      "examples": [
       {
-       "command": "cua-driver perception parse --image screen.png --capture capture.json --json",
+       "command": "opensky-driver perception parse --image screen.png --capture capture.json --json",
        "description": "Parse a PNG into visual regions"
       }
      ],
@@ -1896,7 +1896,7 @@
    "discussion": "Consumers can use this instead of hardcoding launch arguments such as the MCP invocation.",
    "examples": [
     {
-     "command": "cua-driver manifest --pretty",
+     "command": "opensky-driver manifest --pretty",
      "description": "Print the CLI surface as JSON"
     }
    ],
@@ -1918,7 +1918,7 @@
    "discussion": "This is a trusted local authoring workflow. Agent-facing tools may select an installed theme id, but cannot install source or compiled theme data.",
    "examples": [
     {
-     "command": "cua-driver cursor-theme list",
+     "command": "opensky-driver cursor-theme list",
      "description": "List cursor themes"
     }
    ],
@@ -1939,7 +1939,7 @@
      "discussion": "",
      "examples": [
       {
-       "command": "cua-driver cursor-theme validate my-cursor.lottie",
+       "command": "opensky-driver cursor-theme validate my-cursor.lottie",
        "description": "Validate a source archive"
       }
      ],
@@ -1968,7 +1968,7 @@
      "discussion": "",
      "examples": [
       {
-       "command": "cua-driver cursor-theme build my-cursor.lottie --output my-cursor.cua-theme",
+       "command": "opensky-driver cursor-theme build my-cursor.lottie --output my-cursor.cua-theme",
        "description": "Compile a theme"
       }
      ],
@@ -2006,7 +2006,7 @@
      "discussion": "",
      "examples": [
       {
-       "command": "cua-driver cursor-theme inspect my-cursor.cua-theme --json",
+       "command": "opensky-driver cursor-theme inspect my-cursor.cua-theme --json",
        "description": "Print a theme's metadata"
       }
      ],
@@ -2035,7 +2035,7 @@
      "discussion": "",
      "examples": [
       {
-       "command": "cua-driver cursor-theme preview my-cursor.cua-theme --output preview",
+       "command": "opensky-driver cursor-theme preview my-cursor.cua-theme --output preview",
        "description": "Render still frames"
       }
      ],
@@ -2066,7 +2066,7 @@
      "discussion": "",
      "examples": [
       {
-       "command": "cua-driver cursor-theme install my-cursor.cua-theme",
+       "command": "opensky-driver cursor-theme install my-cursor.cua-theme",
        "description": "Install a theme"
       }
      ],
@@ -2081,7 +2081,7 @@
      "discussion": "",
      "examples": [
       {
-       "command": "cua-driver cursor-theme list --json",
+       "command": "opensky-driver cursor-theme list --json",
        "description": "List themes as JSON"
       }
      ],
@@ -2110,7 +2110,7 @@
      "discussion": "The built-in cua.default theme cannot be removed.",
      "examples": [
       {
-       "command": "cua-driver cursor-theme uninstall com.example.my-cursor",
+       "command": "opensky-driver cursor-theme uninstall com.example.my-cursor",
        "description": "Remove an installed theme"
       }
      ],
@@ -2127,7 +2127,7 @@
    "discussion": "Forwards to the set_agent_cursor_motion tool on the running daemon. Fields you leave out keep their current value.",
    "examples": [
     {
-     "command": "cua-driver cursor motion --session demo --style magnetic",
+     "command": "opensky-driver cursor motion --session demo --style magnetic",
      "description": "Use the magnetic cursor motion"
     }
    ],
@@ -2141,15 +2141,15 @@
      "discussion": "Effects take on, off, or default (the style's own choice).",
      "examples": [
       {
-       "command": "cua-driver cursor motion --session demo --style comet_swoop",
+       "command": "opensky-driver cursor motion --session demo --style comet_swoop",
        "description": "Use the comet swoop cursor motion"
       },
       {
-       "command": "cua-driver cursor motion --session demo --timing fixed --glide-ms 900",
+       "command": "opensky-driver cursor motion --session demo --timing fixed --glide-ms 900",
        "description": "Make every move take 900 ms"
       },
       {
-       "command": "cua-driver cursor motion --session demo --effects trail=off,ripple=default",
+       "command": "opensky-driver cursor motion --session demo --effects trail=off,ripple=default",
        "description": "Turn off the trail and reset the click ripple"
       }
      ],
@@ -2215,7 +2215,7 @@
    "discussion": "Used by the docs generator to keep reference pages in sync with the live binary.",
    "examples": [
     {
-     "command": "cua-driver dump-docs --type cli --pretty",
+     "command": "opensky-driver dump-docs --type cli --pretty",
      "description": "Print the CLI documentation JSON"
     }
    ],
@@ -2259,6 +2259,6 @@
    "meaning": "Usage error: an unknown or missing subcommand or argument, or conflicting flags (for example `revoke` without exactly one of `--session` or `--all`, or an authorization flag passed to `mcp`)."
   }
  ],
- "name": "cua-driver",
+ "name": "opensky-driver",
  "version": "0.34.0"
 }

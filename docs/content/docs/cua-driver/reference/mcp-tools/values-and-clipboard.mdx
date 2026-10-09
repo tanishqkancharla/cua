@@ -1,6 +1,6 @@
 ---
 title: "Value and clipboard tools"
-description: "Set element values and read or write the clipboard."
+description: "Set element values, paste, and read or write the clipboard."
 ---
 
 {/*
@@ -15,6 +15,7 @@ import { Tab, Tabs } from 'fumadocs-ui/components/tabs';
 | Tool | Description | Platforms |
 | --- | --- | --- |
 | [`set_value`](#set_value) | Set a value on a UI element. | macOS, Linux, Windows |
+| [`native_paste`](#native_paste) | Paste text, HTML or CommonMark into one exact macOS native accessibility control with Cmd+V. | macOS |
 | [`clipboard_read`](#clipboard_read) | List available system clipboard types and optionally return privacy-sensitive plain text. | macOS, Linux, Windows |
 | [`clipboard_write`](#clipboard_write) | Replace the system clipboard with exactly one value: plain text, an image from an absolute local path, or a file URL from an absolute local path. | macOS, Linux, Windows |
 
@@ -41,6 +42,7 @@ For free-form text entry into web inputs, prefer `type_text_chars` which synthes
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
+| <span id="set_value--macos--delivery_mode"></span>`delivery_mode` | `"background" \| "foreground"` |  | Default background preserves semantic AX writes. Foreground keeps the exact window active and verifies focus of native text controls before writing; this does not submit the field. |
 | <span id="set_value--macos--value"></span>`value` | `string` | required | New value. AX will coerce to the element's native type. |
 | <span id="set_value--macos--window_id"></span>`window_id` | `integer` |  | CGWindowID. Omit when element_token is supplied (the token carries it). |
 
@@ -91,6 +93,28 @@ For free-form text entry that the target accepts via keystrokes only, prefer `ty
 
 ```json
 {"pid":1,"value":"<value>"}
+```
+
+## `native_paste`
+
+Paste text, HTML or CommonMark into one exact macOS native accessibility control with Cmd+V. Requires an exact pid and window_id, verifies the same focused AX element before the clipboard write and key dispatch, and succeeds only when AXValue read-back equals the expected UTF-16-range insertion. Rich payloads are imported by AppKit and written as RTF plus their exact plain string; this receipt proves text insertion, not every visual style. Observe resulting formatting. clipboard_policy:"leave" retains the payload. clipboard_policy:"restore" snapshots supported prior item representations privately (up to 64 items,128 types per item,32 MiB total), refuses unreadable/unstable snapshots before mutation, and restores after verified insertion or proved no-input refusal only while its own clipboard token/payload remains. Restoration is separately reported; an observed newer writer or unknown input skips restoration. NSPasteboard has no atomic compare-and-restore, so the last ownership-check/write can still race. delivery_mode:"background" (default) never fronts the target. delivery_mode:"foreground" briefly fronts the exact target for one physical HID Cmd+V chord, revalidates the AX target and clipboard immediately before that chord, then restores the prior frontmost app. After dispatch, any unverified result is reported as effect:"unknown" and must not be replayed automatically.
+
+Effect: destructive. Platforms: macOS.
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| <span id="native_paste--clipboard_policy"></span>`clipboard_policy` | `"leave" \| "restore"` | required | Required. leave retains the payload; restore privately snapshots supported prior item representations and restores after proved insertion/no-input while the own token/payload remains. Newer observed writers and unknown input skip restoration; final check/write is not atomic. |
+| <span id="native_paste--delivery_mode"></span>`delivery_mode` | `"background" \| "foreground"` |  | Best-effort-background ladder rung (default "background"). "background": posts one PID-routed Cmd+V without fronting the target. "foreground": briefly front the exact target, revalidate the retained AX target and clipboard immediately before one physical HID Cmd+V chord, then restore the prior frontmost app. Choose the delivery mode before dispatch; never replay an uncertain paste. |
+| <span id="native_paste--format"></span>`format` | `"text" \| "md" \| "html"` | `"text"` | text is plain; html is imported by AppKit; md is CommonMark rendered to HTML then imported. Rich clipboard data is RTF plus its exact plain string. |
+| <span id="native_paste--pid"></span>`pid` | `integer` | required | Exact target process ID. |
+| <span id="native_paste--session"></span>`session` | `string` |  | For multi-call work, prefer a short public session label and repeat it on every call that accepts it. Omit it to use the authenticated transport's implicit lifecycle session. |
+| <span id="native_paste--text"></span>`text` | `string` | required | Source to paste (at most 16 KiB UTF-8). |
+| <span id="native_paste--window_id"></span>`window_id` | `integer` | required | Exact target CGWindowID. |
+
+**Example arguments**
+
+```json
+{"pid":1,"window_id":1,"text":"<text>","clipboard_policy":"leave"}
 ```
 
 ## `clipboard_read`

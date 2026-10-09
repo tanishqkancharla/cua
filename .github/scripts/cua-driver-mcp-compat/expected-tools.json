@@ -1,15 +1,16 @@
 {
   "serverName": "cua-driver",
   "outputSchemaCountByPlatform": {
-    "darwin": 35,
-    "linux": 39,
-    "win32": 35
+    "darwin": 37,
+    "linux": 41,
+    "win32": 37
   },
   "baseTools": [
     "bring_to_front",
     "browser_click",
     "browser_dialog",
     "browser_download",
+    "browser_key",
     "browser_navigate",
     "browser_pointer",
     "browser_prepare",
@@ -20,6 +21,7 @@
     "click",
     "clipboard_read",
     "clipboard_write",
+    "close_window",
     "double_click",
     "drag",
     "end_session",
@@ -74,6 +76,10 @@
     ],
     "win32": [
       "debug_window_info"
+    ],
+    "darwin": [
+      "native_paste",
+      "select_text"
     ]
   }
 }
