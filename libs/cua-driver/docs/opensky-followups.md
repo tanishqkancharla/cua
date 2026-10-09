@@ -60,3 +60,12 @@ Exact candidate03b213fb Nix unit job113449151606/37817169142 fails compilation b
 ## Driver upgrade CI: existing tools missing reference categories
 
 Source03b213fb Linux reference job113454629383/37817169067 fails both checking and regeneration because mergeTools rejects browser_key and close_window. Categorize those existing exported tools as browser input and app/window operations respectively. Preserve the rejection for any genuinely uncategorized tool. This changes reference metadata only; tool schemas, authority, runtime and comparison driver stay unchanged. Existing generator/platform owners must pass; native reference regeneration and canonical documentation sync remain pending on the final candidate. Failed regeneration artifacts must not be treated as fresh native snapshots.
+
+
+## SET340: closing X11 popup can terminate the daemon
+
+OpenSky issue https://github.com/tanishqkancharla/opensky/issues/50 retains the original SDK1344/37874595367 failure on accepted driver03b213fb/ELF43bcbdd4. The named Green color is visible on slide1, but a subsequent pointer/observation cell loses the daemon and the saved file remains original. The driver log confirms fatal BadWindow on X_QueryTree. popup_info releases its attribute-query error handler before the PID fallback calls unguarded window_children; a closing transient can reach Xlib's default process-terminating handler. No failing native stack was captured.
+
+The new closing-popup keeper uses the existing public helper and runs in the whole canonical click_input_x11 binary alongside its four original owners. Its pre-repair canonical run37875782929 is terminal red: the keeper exits on fatal BadWindow/opcode15 X_QueryTree. The PR merge checkout95aff204 has identical input/helper and keeper blobs to head34a770812; broad units pass, while later input owners are skipped after the keeper fails. The repair uses a checked x11rb child query on the exact Xlib display, retaining empty-on-missing-window semantics without adding a process-global handler swap, input replay, test hooks or public protocol changes. Corrected keeper, original input owners, relevant public Writer E2Es and affected SDK rerun remain pending; installed Mac and accepted comparison driver are unchanged.
+
+Existing whole click/key binaries now run before the broad all-target and embedding steps, without removing or filtering any owner. Actionlint and all15 existing workflow/inventory CPU owners pass; actual faster hosted feedback is not yet verified.

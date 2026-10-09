@@ -2392,32 +2392,40 @@ fn window_title_for_report(display: *mut x11::xlib::Display, window: x11::xlib::
     title.unwrap_or_default()
 }
 
-/// Direct children of `window` (empty on error). Caller installs the error
-/// handler.
+/// Direct children of `window` (empty on error). A popup may disappear
+/// during its owner lookup, so use a checked protocol reply instead of Xlib's
+/// process-global error handler. Keep the query on the caller's exact display.
 fn window_children(
     display: *mut x11::xlib::Display,
     window: x11::xlib::Window,
 ) -> Vec<x11::xlib::Window> {
-    let mut root_ret: x11::xlib::Window = 0;
-    let mut parent: x11::xlib::Window = 0;
-    let mut children: *mut x11::xlib::Window = ptr::null_mut();
-    let mut count: std::os::raw::c_uint = 0;
-    let rc = unsafe {
-        x11::xlib::XQueryTree(
-            display,
-            window,
-            &mut root_ret,
-            &mut parent,
-            &mut children,
-            &mut count,
-        )
-    };
-    if rc == 0 || children.is_null() {
+    if display.is_null() {
         return Vec::new();
     }
-    let kids = unsafe { std::slice::from_raw_parts(children, count as usize) }.to_vec();
-    unsafe { x11::xlib::XFree(children as *mut _) };
-    kids
+    let display_name = unsafe { x11::xlib::XDisplayString(display) };
+    if display_name.is_null() {
+        return Vec::new();
+    }
+    let Ok(display_name) = unsafe { CStr::from_ptr(display_name) }.to_str() else {
+        return Vec::new();
+    };
+    let Ok(window) = u32::try_from(window) else {
+        return Vec::new();
+    };
+    let Ok((conn, _)) = RustConnection::connect(Some(display_name)) else {
+        return Vec::new();
+    };
+    conn.query_tree(window)
+        .ok()
+        .and_then(|cookie| cookie.reply().ok())
+        .map(|reply| {
+            reply
+                .children
+                .into_iter()
+                .map(x11::xlib::Window::from)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// The toplevel (root child) the virtual pointer would press on at `(x, y)`
