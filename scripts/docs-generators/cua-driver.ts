@@ -246,7 +246,7 @@ export const MCP_CATEGORIES: Array<McpCategory & { tools: string[] }> = [
     slug: 'apps-and-windows',
     title: 'App and window tools',
     summary: 'List, launch, quit, front and arrange apps and windows',
-    tools: ['list_apps', 'list_windows', 'launch_app', 'kill_app', 'bring_to_front', 'set_window_frame', 'invoke_menu', 'debug_window_info'],
+    tools: ['list_apps', 'list_windows', 'launch_app', 'kill_app', 'close_window', 'bring_to_front', 'set_window_frame', 'invoke_menu', 'debug_window_info'],
   },
   {
     slug: 'window-state',
@@ -306,7 +306,7 @@ export const MCP_CATEGORIES: Array<McpCategory & { tools: string[] }> = [
     slug: 'browser-input',
     title: 'Browser input tools',
     summary: 'Exact browser input over CDP: clicks, typing, pointer, dialogs, files and downloads',
-    tools: ['browser_click', 'browser_type', 'browser_pointer', 'browser_dialog', 'browser_set_input_files', 'browser_download'],
+    tools: ['browser_click', 'browser_type', 'browser_key', 'browser_pointer', 'browser_dialog', 'browser_set_input_files', 'browser_download'],
   },
   {
     slug: 'sessions',

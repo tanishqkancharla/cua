@@ -55,3 +55,8 @@ fixtures, live controlled probes and model evaluations separately labeled.
 ## Driver upgrade CI: Nix unit source metadata
 
 Exact candidate03b213fb Nix unit job113449151606/37817169142 fails compilation because the filtered rustTestSrc omits installer-distribution.json, which four existing Rust owner tests include. Add the metadata file only to the test source fileset; runtime/shipped source and test assertions stay unchanged. The accepted comparison ELF43bcbdd4/source03b213fb is still pinned and no daemon rebuild or restart is performed. Existing workflow path-filter owners and local compile-input resolution checks are required; actual Linux Nix compilation remains pending. Keep the upgrade PR draft until all affected canonical gates pass on its final candidate.
+
+
+## Driver upgrade CI: existing tools missing reference categories
+
+Source03b213fb Linux reference job113454629383/37817169067 fails both checking and regeneration because mergeTools rejects browser_key and close_window. Categorize those existing exported tools as browser input and app/window operations respectively. Preserve the rejection for any genuinely uncategorized tool. This changes reference metadata only; tool schemas, authority, runtime and comparison driver stay unchanged. Existing generator/platform owners must pass; native reference regeneration and canonical documentation sync remain pending on the final candidate. Failed regeneration artifacts must not be treated as fresh native snapshots.
