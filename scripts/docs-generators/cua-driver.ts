@@ -280,9 +280,9 @@ export const MCP_CATEGORIES: Array<McpCategory & { tools: string[] }> = [
   },
   {
     slug: 'keyboard',
-    title: 'Typing tools',
-    summary: 'Type text into a field or window',
-    tools: ['type_text', 'type_text_chars'],
+    title: 'Text input and selection tools',
+    summary: 'Type or select text in a field or window',
+    tools: ['type_text', 'type_text_chars', 'select_text'],
   },
   {
     slug: 'keys-and-shortcuts',
@@ -293,8 +293,8 @@ export const MCP_CATEGORIES: Array<McpCategory & { tools: string[] }> = [
   {
     slug: 'values-and-clipboard',
     title: 'Value and clipboard tools',
-    summary: 'Set element values and read or write the clipboard',
-    tools: ['set_value', 'clipboard_read', 'clipboard_write'],
+    summary: 'Set element values, paste, and read or write the clipboard',
+    tools: ['set_value', 'native_paste', 'clipboard_read', 'clipboard_write'],
   },
   {
     slug: 'page',
