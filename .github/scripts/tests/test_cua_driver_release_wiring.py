@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import textwrap
 import unittest
@@ -1164,8 +1165,41 @@ else:
         # Versions come from the repository the installers download from.
         self.assertIn("RELEASE_REPOSITORY: trycua/cua", workflow)
         self.assertIn("repos/$RELEASE_REPOSITORY/releases?per_page=100", workflow)
-        self.assertIn("libs/cua-driver/scripts/install.sh", workflow)
-        self.assertIn("libs/cua-driver/scripts/install.ps1", workflow)
+        for platform in ("unix", "windows"):
+            self.assertIn(
+                "RELEASE_INSTALLER: ${{ steps.installer-routes.outputs."
+                + platform + " }}", workflow,
+            )
+        self.assertIn('bash "$RELEASE_INSTALLER" --no-modify-path', workflow)
+        self.assertIn("& $env:RELEASE_INSTALLER", workflow)
+        # Execute the actual route-resolution step without installing anything.
+        step = workflow.split(
+            "      - name: Resolve published Cua installer routes\n", 1
+        )[1]
+        body = step.split("        run: |\n", 1)[1]
+        script = textwrap.dedent(body.split("\n      - name:", 1)[0])
+        with tempfile.TemporaryDirectory(prefix="installer-routes-") as directory:
+            output = Path(directory) / "github-output"
+            result = subprocess.run(
+                [sys.executable, "-c", script], cwd=REPO_ROOT,
+                env={**os.environ, "GITHUB_OUTPUT": str(output)},
+                capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            routes = dict(
+                line.split("=", 1) for line in output.read_text().splitlines()
+            )
+        expected_unix = (
+            "libs/cua-driver/scripts/_install-rust.sh" if SOURCE_BUILD
+            else "libs/cua-driver/scripts/install.sh"
+        )
+        self.assertEqual(routes, {
+            "unix": expected_unix,
+            "windows": RELEASE_POWERSHELL.relative_to(REPO_ROOT).as_posix(),
+        })
+        self.assertIn("validate_release_versions", workflow)
+        self.assertIn(r"_upstream-install\.ps1", workflow)
+        self.assertIn(r"installer-distribution\.json", workflow)
         self.assertIn("-NoAutoStart", workflow)
         self.assertIn('CUA_DRIVER_RS_TELEMETRY_ENABLED: "false"', workflow)
 

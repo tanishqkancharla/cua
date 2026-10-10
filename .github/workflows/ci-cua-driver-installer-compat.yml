@@ -50,7 +50,7 @@ jobs:
               "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files?per_page=100" \
               --jq '.[].filename')
             if ! grep -Eq \
-              '^(\.github/release-state/cua-driver-rs-(published-version|withdrawn-versions)|\.github/scripts/verify_cua_driver_release_archives\.py|\.github/scripts/tests/test_verify_cua_driver_release_archives\.py|\.github/workflows/(cd-rust-cua-driver|ci-cua-driver-installer-compat)\.yml|libs/cua-driver/scripts/(_install-common|_install-rust|install)\.sh|libs/cua-driver/scripts/(_install-common\.psm1|install\.ps1)|release-please-config\.json)$' \
+              '^(\.github/release-state/cua-driver-rs-(published-version|withdrawn-versions)|\.github/scripts/(verify_cua_driver_release_archives|validate_release_versions)\.py|\.github/scripts/tests/test_verify_cua_driver_release_archives\.py|\.github/workflows/(cd-rust-cua-driver|ci-cua-driver-installer-compat)\.yml|libs/cua-driver/scripts/(_install-common|_install-rust|install)\.sh|libs/cua-driver/scripts/(_install-common\.psm1|_upstream-install\.ps1|install\.ps1)|libs/cua-driver/installer-distribution\.json|release-please-config\.json)$' \
               <<< "$CHANGED_FILES"; then
               SHOULD_RUN=false
             fi
@@ -129,6 +129,31 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Resolve published Cua installer routes
+        id: installer-routes
+        shell: python
+        run: |
+          import os
+          from pathlib import Path
+          import sys
+
+          root = Path.cwd()
+          sys.path.insert(0, str(root / ".github/scripts"))
+          from validate_release_versions import driver_release_powershell_path
+
+          # Validate declared source wrappers before selecting preserved Cua
+          # downloaders. Repositories without a declaration keep public routes.
+          powershell = driver_release_powershell_path(root)
+          unix = root / "libs/cua-driver/scripts" / (
+              "_install-rust.sh" if powershell.name == "_upstream-install.ps1" else "install.sh"
+          )
+          for path in (unix, powershell):
+              if not path.is_file():
+                  raise SystemExit(f"Published Cua installer is missing: {path}")
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
+              output.write(f"unix={unix.relative_to(root).as_posix()}\n")
+              output.write(f"windows={powershell.relative_to(root).as_posix()}\n")
+
       - name: Install Linux runtime libraries
         if: runner.os == 'Linux'
         run: |
@@ -142,8 +167,9 @@ jobs:
           CUA_DRIVER_RS_HOME: ${{ runner.temp }}/cua-driver-home
           CUA_DRIVER_RS_INSTALL_DIR: ${{ runner.temp }}/cua-driver-bin
           CUA_DRIVER_RS_NO_MODIFY_PATH: "1"
+          RELEASE_INSTALLER: ${{ steps.installer-routes.outputs.unix }}
         run: |
-          bash libs/cua-driver/scripts/install.sh --no-modify-path
+          bash "$RELEASE_INSTALLER" --no-modify-path
           INSTALLED="$CUA_DRIVER_RS_INSTALL_DIR/cua-driver"
           test -x "$INSTALLED"
           VERSION_OUTPUT=$("$INSTALLED" --version)
@@ -159,11 +185,13 @@ jobs:
       - name: Run the current Windows installer against the release
         if: runner.os == 'Windows'
         shell: pwsh
+        env:
+          RELEASE_INSTALLER: ${{ steps.installer-routes.outputs.windows }}
         run: |
           $root = Join-Path $env:RUNNER_TEMP "cua-driver-installer"
           $env:CUA_DRIVER_RS_HOME = Join-Path $root "home"
           $env:CUA_DRIVER_RS_INSTALL_DIR = Join-Path $root "bin"
-          & ./libs/cua-driver/scripts/install.ps1 `
+          & $env:RELEASE_INSTALLER `
             -Release $env:CUA_DRIVER_RS_VERSION `
             -NoAutoStart `
             -NoPathUpdate
