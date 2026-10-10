@@ -45,6 +45,7 @@
             fileset = pkgs.lib.fileset.unions (
               driverSharedFiles
               ++ [
+                ./libs/cua-driver/installer-distribution.json
                 ./libs/cua-driver/compat-fixtures
                 ./libs/cua-driver/tests/fixtures/shared/web/index.html
                 ./libs/cua-driver/tests/perception-demo/evidence-manifest.schema.json

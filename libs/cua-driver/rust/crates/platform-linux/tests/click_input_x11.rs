@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Result};
 use platform_linux::input::{
-    send_button_down, send_button_up, send_click_with_modifiers,
+    popup_window_info, send_button_down, send_button_up, send_click_with_modifiers,
     send_click_xtest_desktop_with_modifiers,
 };
 use x11rb::connection::Connection;
@@ -187,5 +187,41 @@ fn rejected_desktop_button_releases_preceding_modifiers() -> Result<()> {
     assert!(!pointer
         .mask
         .intersects(KeyButMask::BUTTON1 | KeyButMask::CONTROL));
+    Ok(())
+}
+
+/// Popup ownership may disappear after the attribute read but before the child
+/// query. A best-effort observation must never invoke Xlib's fatal handler.
+#[test]
+#[ignore = "requires an isolated X11 display"]
+fn popup_lookups_survive_closing_transients() -> Result<()> {
+    let (conn, screen) = x11rb::connect(None)?;
+    let root = conn.setup().roots[screen].root;
+    let sentinel = input_window(&conn, root, 300)?;
+    conn.set_input_focus(InputFocus::PARENT, sentinel, x11rb::CURRENT_TIME)?
+        .check()?;
+
+    for _ in 0..20 {
+        for delay_us in [50, 100, 200, 400, 800, 1600, 3200, 6400] {
+            let transient = input_window(&conn, root, 0)?;
+            assert!(popup_window_info(u64::from(transient)).is_some());
+            std::thread::scope(|scope| -> Result<()> {
+                let destroy = scope.spawn(|| -> Result<()> {
+                    std::thread::sleep(Duration::from_micros(delay_us));
+                    conn.destroy_window(transient)?.check()?;
+                    Ok(())
+                });
+                // Both a live snapshot and a missing popup are valid here.
+                // Exiting the process on a missing XID is never valid.
+                let _ = popup_window_info(u64::from(transient));
+                destroy.join().expect("popup destroyer panicked")?;
+                Ok(())
+            })?;
+            assert!(popup_window_info(u64::from(transient)).is_none());
+            assert!(popup_window_info(u64::from(sentinel)).is_some());
+            assert_eq!(conn.get_input_focus()?.reply()?.focus, sentinel);
+        }
+    }
+    conn.destroy_window(sentinel)?.check()?;
     Ok(())
 }

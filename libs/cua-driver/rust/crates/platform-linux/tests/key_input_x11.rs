@@ -318,3 +318,109 @@ fn unicode_typing_restores_borrowed_keycodes_before_its_connection_closes() -> R
     }
     Ok(())
 }
+
+/// A client deliberately defers translating a borrowed key until after the
+/// old sender has already rebound/restored it. Reply to the ordinary EWMH ping
+/// only after translating earlier keys; no driver/test-only hook is involved.
+#[test]
+#[ignore = "requires an isolated X11 display"]
+fn unicode_xtest_keeps_each_borrowed_mapping_until_the_client_processes_its_key() -> Result<()> {
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+    use x11rb::wrapper::ConnectionExt as _;
+    for respond in [true, false] {
+        let (conn, screen) = connect()?;
+        let root = conn.setup().roots[screen].root;
+        let target = input_window(&conn, root, 20, 20)?;
+        let protocols = conn.intern_atom(false, b"WM_PROTOCOLS")?.reply()?.atom;
+        let ping = conn.intern_atom(false, b"_NET_WM_PING")?.reply()?.atom;
+        conn.change_property32(
+            PropMode::REPLACE,
+            target,
+            protocols,
+            AtomEnum::ATOM,
+            &[ping],
+        )?
+        .check()?;
+        conn.set_input_focus(InputFocus::PARENT, target, x11rb::CURRENT_TIME)?
+            .check()?;
+        let before = conn.get_keyboard_mapping(8, 248)?.reply()?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let client_stop = Arc::clone(&stop);
+        let client = std::thread::spawn(move || -> Result<(String, usize)> {
+            let deadline = Instant::now() + Duration::from_secs(8);
+            let mut text = String::new();
+            let mut replies = 0;
+            let mut stalled = false;
+            while !client_stop.load(Ordering::SeqCst) && Instant::now() < deadline {
+                match conn.poll_for_event()? {
+                    Some(Event::KeyPress(event)) => {
+                        if !stalled {
+                            stalled = true;
+                            std::thread::sleep(Duration::from_millis(650));
+                        }
+                        let mapping = conn.get_keyboard_mapping(event.detail, 1)?.reply()?;
+                        let keysym = mapping.keysyms[0];
+                        let cp = if keysym >= 0x01000000 {
+                            keysym - 0x01000000
+                        } else {
+                            keysym
+                        };
+                        text.push(char::from_u32(cp).unwrap_or(char::REPLACEMENT_CHARACTER));
+                    }
+                    Some(Event::ClientMessage(mut event))
+                        if event.type_ == protocols
+                            && event.format == 32
+                            && event.data.as_data32()[0] == ping
+                            && respond =>
+                    {
+                        event.window = root;
+                        conn.send_event(
+                            false,
+                            root,
+                            EventMask::SUBSTRUCTURE_NOTIFY | EventMask::SUBSTRUCTURE_REDIRECT,
+                            event,
+                        )?
+                        .check()?;
+                        conn.flush()?;
+                        replies += 1;
+                    }
+                    Some(_) => {}
+                    None => std::thread::sleep(Duration::from_millis(2)),
+                }
+            }
+            Ok((text, replies))
+        });
+        let expected = "é—中文😀é";
+        let outcome = send_type_text_xtest(expected);
+        stop.store(true, Ordering::SeqCst);
+        let (received, replies) = client.join().expect("X11 client thread panicked")?;
+        if respond {
+            outcome?;
+            assert_eq!(
+                received, expected,
+                "borrowed glyphs must remain valid until client translation"
+            );
+            assert!(replies > 0, "the client acknowledged its input queue");
+        } else {
+            let error = outcome
+                .expect_err("a nonresponding advertised client must not permit further input");
+            assert_eq!(error.to_string(), "X11 application did not acknowledge borrowed-key input within two seconds; delivery is unknown, inspect before retrying");
+            assert_eq!(
+                received, "é",
+                "timeout never replays the prefix or types the remaining glyphs"
+            );
+            assert_eq!(replies, 0);
+        }
+        let (check, _) = connect()?;
+        let after = check.get_keyboard_mapping(8, 248)?.reply()?;
+        assert_eq!(after.keysyms_per_keycode, before.keysyms_per_keycode);
+        assert_eq!(
+            after.keysyms, before.keysyms,
+            "restore the original map after acknowledged delivery"
+        );
+    }
+    Ok(())
+}

@@ -246,7 +246,7 @@ export const MCP_CATEGORIES: Array<McpCategory & { tools: string[] }> = [
     slug: 'apps-and-windows',
     title: 'App and window tools',
     summary: 'List, launch, quit, front and arrange apps and windows',
-    tools: ['list_apps', 'list_windows', 'launch_app', 'kill_app', 'bring_to_front', 'set_window_frame', 'invoke_menu', 'debug_window_info'],
+    tools: ['list_apps', 'list_windows', 'launch_app', 'kill_app', 'close_window', 'bring_to_front', 'set_window_frame', 'invoke_menu', 'debug_window_info'],
   },
   {
     slug: 'window-state',
@@ -280,9 +280,9 @@ export const MCP_CATEGORIES: Array<McpCategory & { tools: string[] }> = [
   },
   {
     slug: 'keyboard',
-    title: 'Typing tools',
-    summary: 'Type text into a field or window',
-    tools: ['type_text', 'type_text_chars'],
+    title: 'Text input and selection tools',
+    summary: 'Type or select text in a field or window',
+    tools: ['type_text', 'type_text_chars', 'select_text'],
   },
   {
     slug: 'keys-and-shortcuts',
@@ -293,8 +293,8 @@ export const MCP_CATEGORIES: Array<McpCategory & { tools: string[] }> = [
   {
     slug: 'values-and-clipboard',
     title: 'Value and clipboard tools',
-    summary: 'Set element values and read or write the clipboard',
-    tools: ['set_value', 'clipboard_read', 'clipboard_write'],
+    summary: 'Set element values, paste, and read or write the clipboard',
+    tools: ['set_value', 'native_paste', 'clipboard_read', 'clipboard_write'],
   },
   {
     slug: 'page',
@@ -306,7 +306,7 @@ export const MCP_CATEGORIES: Array<McpCategory & { tools: string[] }> = [
     slug: 'browser-input',
     title: 'Browser input tools',
     summary: 'Exact browser input over CDP: clicks, typing, pointer, dialogs, files and downloads',
-    tools: ['browser_click', 'browser_type', 'browser_pointer', 'browser_dialog', 'browser_set_input_files', 'browser_download'],
+    tools: ['browser_click', 'browser_type', 'browser_key', 'browser_pointer', 'browser_dialog', 'browser_set_input_files', 'browser_download'],
   },
   {
     slug: 'sessions',

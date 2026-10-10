@@ -128,8 +128,8 @@ def simple_commands(line: str) -> list[list[str]]:
     return [c for c in cmds if c]
 
 
-def invocation(cmd: list[str]) -> tuple[str, list[str]] | None:
-    """(cli, args) when this simple command runs cua, cua-driver, lume or cb."""
+def invocation(cmd: list[str], specs: dict[str, dict]) -> tuple[str, list[str]] | None:
+    """(component, args) for a canonical CLI or its declared program name."""
     i = 0
     while i < len(cmd) and (re.match(r"^[A-Za-z_]\w*=", cmd[i]) or cmd[i] in PREFIXES):
         i += 1
@@ -138,6 +138,9 @@ def invocation(cmd: list[str]) -> tuple[str, list[str]] | None:
     word = cmd[i].replace("\\", "/").rsplit("/", 1)[-1].removesuffix(".exe")
     if word in CLIS:
         return word, cmd[i + 1 :]
+    for component, spec in specs.items():
+        if component in CLIS and spec.get("name") == word:
+            return component, cmd[i + 1 :]
     return None
 
 
@@ -358,7 +361,7 @@ def check_block(code: str, lang: str, specs: dict[str, dict]) -> tuple[int, list
             problems.append(f"{line!r}: {e}")
             continue
         for cmd in cmds:
-            inv = invocation(cmd)
+            inv = invocation(cmd, specs)
             if inv is None:
                 continue
             cli, args = inv
@@ -390,7 +393,7 @@ def _block_id(f: extract.Fence, taken: set[str], specs: dict[str, dict]) -> str:
     words = []
     for line in logical_lines(f.code, f.lang):
         for cmd in simple_commands(line):
-            inv = invocation(cmd)
+            inv = invocation(cmd, specs)
             if inv:
                 words = [inv[0]] + [a for a in inv[1][:3] if re.fullmatch(r"[a-z][a-z0-9-]*", a)]
                 break

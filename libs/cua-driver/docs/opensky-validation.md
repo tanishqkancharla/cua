@@ -1,4 +1,4 @@
-# OpenSky Driver rename validation — 2026-09-06
+# OpenSky Driver rename validation : 2026-09-06
 
 Source baseline: fork `14452f2e64c114e99e4bad3c6c8cec744c5e74ee`, which includes the previously installed query-context candidate. OpenSky baseline: `f190248ebf9198fd223578e150020d53f6c495f8`. Validation below applies to this rename/integration change, not to the deferred parity capabilities.
 

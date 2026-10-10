@@ -23,6 +23,7 @@ mod mpx_owner;
 /// One-shot targeted pointer/keyboard delivery with explicit
 /// auto/background/foreground semantics (embedders).
 pub mod targeted;
+mod x11_app_events;
 
 pub use focus_guard::{FocusGuardReport, FocusSnapshot, SameAppWindow};
 pub use foreground::{with_x11_foreground_opts, FocusAfter, ForegroundOptions, ForegroundReport};
@@ -2391,32 +2392,40 @@ fn window_title_for_report(display: *mut x11::xlib::Display, window: x11::xlib::
     title.unwrap_or_default()
 }
 
-/// Direct children of `window` (empty on error). Caller installs the error
-/// handler.
+/// Direct children of `window` (empty on error). A popup may disappear
+/// during its owner lookup, so use a checked protocol reply instead of Xlib's
+/// process-global error handler. Keep the query on the caller's exact display.
 fn window_children(
     display: *mut x11::xlib::Display,
     window: x11::xlib::Window,
 ) -> Vec<x11::xlib::Window> {
-    let mut root_ret: x11::xlib::Window = 0;
-    let mut parent: x11::xlib::Window = 0;
-    let mut children: *mut x11::xlib::Window = ptr::null_mut();
-    let mut count: std::os::raw::c_uint = 0;
-    let rc = unsafe {
-        x11::xlib::XQueryTree(
-            display,
-            window,
-            &mut root_ret,
-            &mut parent,
-            &mut children,
-            &mut count,
-        )
-    };
-    if rc == 0 || children.is_null() {
+    if display.is_null() {
         return Vec::new();
     }
-    let kids = unsafe { std::slice::from_raw_parts(children, count as usize) }.to_vec();
-    unsafe { x11::xlib::XFree(children as *mut _) };
-    kids
+    let display_name = unsafe { x11::xlib::XDisplayString(display) };
+    if display_name.is_null() {
+        return Vec::new();
+    }
+    let Ok(display_name) = unsafe { CStr::from_ptr(display_name) }.to_str() else {
+        return Vec::new();
+    };
+    let Ok(window) = u32::try_from(window) else {
+        return Vec::new();
+    };
+    let Ok((conn, _)) = RustConnection::connect(Some(display_name)) else {
+        return Vec::new();
+    };
+    conn.query_tree(window)
+        .ok()
+        .and_then(|cookie| cookie.reply().ok())
+        .map(|reply| {
+            reply
+                .children
+                .into_iter()
+                .map(x11::xlib::Window::from)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// The toplevel (root child) the virtual pointer would press on at `(x, y)`
@@ -3483,15 +3492,24 @@ pub fn send_type_text_xtest(text: &str) -> Result<()> {
         .get(..kpm)
         .and_then(|s| s.iter().copied().find(|&k| k != 0))
         .unwrap_or(50);
-    // Remap guards live until the function returns — see send_type_text_with_delay.
+    // Unsupported clients retain end-of-call guards. A participating client
+    // releases each borrowed mapping only after its input-queue response.
     let mut remap_guards = Vec::new();
+    let mut app_events: Option<Option<x11_app_events::AppEventBarrier<'_>>> = None;
     for ch in text.chars() {
         let cp = mpx_keyboard::keysym_for_char(ch);
+        let mut borrowed = None;
         let (keycode, needs_shift) = match char_to_keycode_shift(&mapping, cp) {
             Some(found) => found,
             None => match keycode_for_keysym(&conn, &mapping, cp, &ch.to_string()) {
                 Ok((keycode, guard)) => {
-                    remap_guards.extend(guard);
+                    borrowed = guard;
+                    if borrowed.is_some() && app_events.is_none() {
+                        app_events = Some(x11_app_events::AppEventBarrier::focused(&conn)?);
+                        if matches!(app_events, Some(None)) {
+                            tracing::warn!("Focused X11 client does not advertise _NET_WM_PING; borrowed-key application delivery remains unverified");
+                        }
+                    }
                     (keycode, false)
                 }
                 Err(_) => continue,
@@ -3507,6 +3525,19 @@ pub fn send_type_text_xtest(text: &str) -> Result<()> {
         }
         conn.flush()?;
         sleep(Duration::from_millis(KEY_DELAY_MS));
+        if let Some(guard) = borrowed {
+            if let Some(Some(barrier)) = &app_events {
+                // Translate this borrowed glyph before reusing its keycode for
+                // the next one. A stalled app keeps the mapping live; timeout
+                // reports unknown partial delivery and never replays input.
+                barrier.acknowledge()?;
+                drop(guard);
+            } else {
+                // Clients without the protocol retain the original unverified
+                // route, including its end-of-call keymap restoration.
+                remap_guards.push(guard);
+            }
+        }
     }
     // Round-trip so the server delivers the final character's key events before
     // this short-lived connection drops (see send_key_xtest — keyboard XTEST

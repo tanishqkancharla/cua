@@ -50,6 +50,12 @@ const expectedFiles = [
   'WORKFLOW.md',
 ];
 const sourcePack = resolve(HERE, '../../../libs/cua-driver/rust/Skills/cua-driver');
+// Modern response metadata preserves the protocol namespace owned by
+// mcp_wire.rs; the legacy initialize response uses the distribution product.
+const expectedServerName = JSON.parse(readFileSync(
+  join(HERE, 'expected-tools.json'), 'utf8'
+)).serverName;
+assert(typeof expectedServerName === 'string' && expectedServerName.trim());
 const driver = process.env.CUA_DRIVER_BINARY && resolve(process.env.CUA_DRIVER_BINARY);
 assert(driver, 'CUA_DRIVER_BINARY must name the source-built candidate');
 const args = process.env.CUA_DRIVER_MCP_ARGS
@@ -136,7 +142,7 @@ class ObservedTransport extends StdioClientTransport {
         assert.equal(message.result.resultType, 'complete');
         assert.equal(
           message.result._meta?.['io.modelcontextprotocol/serverInfo']?.name,
-          'cua-driver'
+          expectedServerName
         );
         if (method === 'server/discover' || method.endsWith('/list') || method.endsWith('/read')) {
           assert.equal(message.result.ttlMs, 0);
