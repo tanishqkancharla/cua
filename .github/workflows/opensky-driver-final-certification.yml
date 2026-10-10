@@ -13,6 +13,6 @@ jobs:
     name: Complete canonical Linux matrix
     uses: ./.github/workflows/e2e-rust-linux.yml
     with:
-      ref: "0ea22c6dcf527959d87b6261c3a3d0955e2dd11a"
+      ref: "77314231a4573b4b4e0522b30896a178a60c40e2"
       lane: all
       cell_filter: ""
