@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """Disposable Ubuntu X11 tutorial smoke; never run on a personal desktop.
 
-Tests the checked-out canonical installer and its published component release,
+Tests the checked-out Cua release installer and its published component release,
 not a source-built Driver. No LLM account or client registration is exercised.
 The tutorial's standard profile is overridden with the explicitly authorized
 test-only --dangerously-bypass-approvals on this disposable desktop.
 
-The source installer is unchanged. Audited Linux recursive deletion paths are:
+On an OpenSky source-build checkout, validate its declared public routes and
+select the preserved Cua release downloader used by this Cua tutorial. The
+OpenSky source installer is not exercised or certified.
+
+The installer is unchanged. Audited Linux recursive deletion paths are:
 its mktemp staging directory, package lock/current links, old release directories,
 and the fixed legacy ~/.cua-driver-rs. Fresh task directories and disabled GC
 confine the former; an absence precondition makes legacy/local cleanup dormant.
@@ -34,6 +38,8 @@ import tomllib
 
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / ".github/scripts"))
+from validate_release_versions import driver_release_powershell_path, validate
 
 
 def require(condition, message):
@@ -237,7 +243,22 @@ def main():
         save(evidence, "provenance.json", provenance)
         require(top == ROOT and sha == os.environ["CUA_DOCS_SOURCE_SHA"] and not dirty,
                 "Source preflight must match the exact clean checkout SHA")
-        require(source_version == baked, "Source and baked release differ; review the intended release before running")
+        # Source may advance before the published installer. Reuse the existing
+        # release policy: all source/binding versions agree; baked Unix/Windows
+        # and published-state versions agree, are not withdrawn, and never lead
+        # source. This is stricter than merely dropping the old equality check.
+        validate(ROOT, "driver")
+        reference = driver_release_powershell_path(ROOT)
+        source_build = reference.name == "_upstream-install.ps1"
+        installer = scripts / ("_install-rust.sh" if source_build else "install.sh")
+        require(installer.is_file(), "Validated Cua release installer is missing")
+        provenance.update(
+            installer_entrypoint=installer.relative_to(ROOT).as_posix(),
+            source_distribution="source-build" if source_build else "published-release",
+            coverage="checked-out Cua release downloader + published Linux Cua component binary",
+            opensky_source_installation_tested=False,
+        )
+        save(evidence, "provenance.json", provenance)
         # Fixed legacy cleanup is outside the overridden package home. Refuse
         # any existing installation, symlink or service rather than sweeping it.
         for relative in (".cua-driver-rs", ".cua-driver", ".local/bin/cua-driver",
@@ -267,7 +288,7 @@ def main():
             "legacy_cleanup": "absent, checked before install", "prior_local_cleanup": "fresh empty package home",
             "release_gc": "disabled", "macos_cleanup": "unreachable on Linux",
             "process_cleanup": "no matching Driver process or user service before install"})
-        installed = run(["bash", str(scripts / "install.sh"), "--no-modify-path"], env=env,
+        installed = run(["bash", str(installer), "--no-modify-path"], env=env,
                         timeout=300, check=False)
         save(evidence, "installer.log", installed.stdout + installed.stderr)
         require(installed.returncode == 0, "Canonical installer failed; see installer.log")
@@ -275,6 +296,7 @@ def main():
         resolved = binary.resolve(strict=True)
         require(resolved.is_relative_to(task / "package/packages/releases"), "Installed binary escaped task package home")
         version = run([str(binary), "--version"], env=env).stdout.strip()
+        require(version.startswith("cua-driver "), "Installed product is not the tutorial Cua Driver")
         require(re.search(rf"(?<![\d.]){re.escape(baked)}(?![\d.])", version), "Installed version differs from baked release")
         url = f"https://github.com/trycua/cua/releases/download/cua-driver-rs-v{baked}/cua-driver-rs-{baked}-linux-x86_64-binary.tar.gz"
         require(url in installed.stdout, "Installer did not report the expected exact component asset URL")

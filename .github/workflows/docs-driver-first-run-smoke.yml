@@ -8,9 +8,15 @@ on:
       - docs/scripts/verify-driver-first-run-linux.py
       - docs/scripts/tests/test_driver_first_run_smoke.py
       - .github/workflows/docs-driver-first-run-smoke.yml
-      - libs/cua-driver/scripts/install.sh
-      - libs/cua-driver/scripts/_install-rust.sh
-      - libs/cua-driver/scripts/_install-common.sh
+      - libs/cua-driver/scripts/**
+      - libs/cua-driver/installer-distribution.json
+      - libs/cua-driver/rust/VERSION
+      - libs/cua-driver/rust/Cargo.toml
+      - .github/scripts/validate_release_versions.py
+      - .github/scripts/sync_driver_release_docs.py
+      - .github/release-state/cua-driver-rs-*
+      - .release-please-manifest.json
+      - scripts/docs-generators/config.json
   workflow_dispatch:
 
 # Public PR code runs only on a disposable GitHub-hosted runner, without secrets.
