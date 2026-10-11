@@ -66,6 +66,32 @@ async fn rpc(
     Ok((value, session))
 }
 
+// Derive identity from the linked registry so branding cannot drift independently.
+// Keep exact matching; unrelated names remain refused.
+fn initialize_check(value: &Value) -> Check {
+    let name = value["result"]["serverInfo"]["name"]
+        .as_str()
+        .unwrap_or_default();
+    let version = value["result"]["serverInfo"]["version"]
+        .as_str()
+        .unwrap_or_default();
+    let expected = cua_driver_core::protocol::initialize_result();
+    Check::new(
+        "mcp.initialize",
+        super::verdict(
+            expected["serverInfo"]["name"]
+                .as_str()
+                .is_some_and(|expected| !expected.is_empty() && name == expected)
+                && value["result"]["capabilities"]["tools"].is_object(),
+        ),
+        format!(
+            "serverInfo {name} {version}, protocol {}",
+            value["result"]["protocolVersion"]
+        ),
+    )
+    .fact("server_version", version)
+}
+
 pub async fn run(ctx: &Ctx, rec: &mut Recorder<'_>) {
     if !rec.wants_group("mcp") {
         return;
@@ -94,27 +120,13 @@ pub async fn run(ctx: &Ctx, rec: &mut Recorder<'_>) {
         match rpc(ctx, None, body).await {
             Ok((value, sid)) => {
                 session = sid;
-                let name = value["result"]["serverInfo"]["name"]
-                    .as_str()
-                    .unwrap_or_default();
                 let version = value["result"]["serverInfo"]["version"]
                     .as_str()
                     .unwrap_or_default();
                 if ctx.driver_version.lock().unwrap().is_empty() {
                     *ctx.driver_version.lock().unwrap() = version.to_owned();
                 }
-                Check::new(
-                    "mcp.initialize",
-                    super::verdict(
-                        name == "cua-driver"
-                            && value["result"]["capabilities"]["tools"].is_object(),
-                    ),
-                    format!(
-                        "serverInfo {name} {version}, protocol {}",
-                        value["result"]["protocolVersion"]
-                    ),
-                )
-                .fact("server_version", version)
+                initialize_check(&value)
             }
             Err(error) => Check::new(
                 "mcp.initialize",
@@ -178,4 +190,45 @@ pub async fn run(ctx: &Ctx, rec: &mut Recorder<'_>) {
         )
     })
     .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn initialization_keeps_exact_identity_and_tool_capability_refusals() {
+        let result = cua_driver_core::protocol::initialize_result();
+        let valid = json!({"result": result});
+        let accepted = initialize_check(&valid);
+        assert_eq!(accepted.id, "mcp.initialize");
+        assert_eq!(accepted.status, Status::Pass);
+        assert_eq!(
+            accepted.facts["server_version"],
+            result["serverInfo"]["version"].as_str().unwrap()
+        );
+        let other_brand = if result["serverInfo"]["name"] == "opensky-driver" {
+            "cua-driver"
+        } else {
+            "opensky-driver"
+        };
+        for name in [
+            json!("unrelated-server"),
+            json!(other_brand),
+            json!(""),
+            json!(17),
+            Value::Null,
+        ] {
+            let mut invalid = valid.clone();
+            invalid["result"]["serverInfo"]["name"] = name;
+            let rejected = initialize_check(&invalid);
+            assert_eq!(rejected.id, "mcp.initialize");
+            assert_eq!(rejected.status, Status::Fail, "{invalid}");
+        }
+        for tools in [Value::Null, json!(true), json!([]), json!("tools")] {
+            let mut invalid = valid.clone();
+            invalid["result"]["capabilities"]["tools"] = tools;
+            assert_eq!(initialize_check(&invalid).status, Status::Fail, "{invalid}");
+        }
+    }
 }

@@ -17,6 +17,10 @@ use cua_spacesd_server::{ServerBuilder, ServerConfig, ServerContext};
 const TOKEN: &str = "doctor-test-token";
 
 async fn start(diagnoser: bool) -> (String, tempfile::TempDir) {
+    start_with_registry(diagnoser, false).await
+}
+
+async fn start_with_registry(diagnoser: bool, registry: bool) -> (String, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let config = ServerConfig {
         listen: "127.0.0.1:0".parse().unwrap(),
@@ -28,6 +32,9 @@ async fn start(diagnoser: bool) -> (String, tempfile::TempDir) {
     };
     let ctx = ServerContext::new(config, Some(TOKEN.into()));
     let mut builder = ServerBuilder::new(ctx);
+    if registry {
+        builder = builder.tools(Arc::new(ReadOnlyRegistry));
+    }
     if diagnoser {
         builder = builder.diagnoser(Arc::new(cua_spacesd_doctor::ServerDiagnoser {
             manifest_path: Some(dir.path().join("no-manifest.json")),
@@ -209,4 +216,52 @@ async fn diagnose_without_a_doctor_is_a_clear_precondition_failure() {
         "{error}"
     );
     assert!(error.to_string().contains("no doctor linked"), "{error}");
+}
+
+// Only registry discovery is exercised; no desktop service or host effects.
+struct ReadOnlyRegistry;
+
+#[async_trait::async_trait]
+impl cua_driver_core::server::ToolProvider for ReadOnlyRegistry {
+    fn tools_list(&self) -> serde_json::Value {
+        serde_json::json!({"tools": [{
+            "name": "get_screen_size", "description": "Discovery fixture",
+            "inputSchema": {"type": "object", "properties": {}},
+            "annotations": {"readOnlyHint": true}
+        }]})
+    }
+
+    async fn invoke_tool(
+        &self,
+        _: &str,
+        _: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        Err("discovery fixture must never invoke a tool".into())
+    }
+}
+
+#[tokio::test]
+async fn mcp_doctor_accepts_the_linked_registry_identity_and_matching_tools() {
+    let (url, dir) = start_with_registry(false, true).await;
+    let report = cua_spacesd_doctor::diagnose(
+        &url,
+        Some(TOKEN.into()),
+        cua_spacesd_doctor::Options {
+            only: vec!["mcp".into()],
+            manifest_path: Some(dir.path().join("none.json")),
+            ..Default::default()
+        },
+        None,
+    )
+    .await;
+    for id in ["mcp.initialize", "mcp.tools_list"] {
+        let c = check(&report, id);
+        assert_eq!(c.status, Status::Pass, "{id}: {}", c.message);
+    }
+    let expected = cua_driver_core::protocol::initialize_result();
+    assert_eq!(
+        check(&report, "mcp.initialize").facts["server_version"],
+        expected["serverInfo"]["version"].as_str().unwrap()
+    );
+    assert_eq!(report.exit_code(), 0, "{}", report.to_human());
 }

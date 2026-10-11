@@ -1672,7 +1672,9 @@ dependencies = [
 name = "cua-spacesd-doctor"
 version = "0.5.3"
 dependencies = [
+ "async-trait",
  "bytes",
+ "cua-driver-core",
  "cua-hotspot",
  "cua-media-codec",
  "cua-media-protocol",

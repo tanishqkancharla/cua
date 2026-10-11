@@ -14,6 +14,8 @@ publish = false
 cua-spacesd-client = { path = "../../../cua/crates/cua-spacesd-client" }
 cua-proto = { path = "../../../cua/crates/cua-proto" }
 cua-spacesd-server = { path = "../cua-spacesd-server" }
+# The /mcp endpoint and doctor use the same compiled Driver identity.
+cua-driver-core = { path = "../../../cua-driver/rust/crates/cua-driver-core" }
 # Teleport receive checks: the same importers cua-spacesd links, run into a
 # throwaway home with faked host effects; the shared bundle format.
 cua-spacesd-teleport = { path = "../cua-spacesd-teleport" }
@@ -46,6 +48,7 @@ tempfile.workspace = true
 libc = "0.2"
 
 [dev-dependencies]
+async-trait = "0.1"
 tempfile.workspace = true
 # The volume test prints the driver's mount log (which export answered, the
 # portmapper calls).
