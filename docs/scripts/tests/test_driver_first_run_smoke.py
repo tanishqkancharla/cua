@@ -6,7 +6,7 @@ import re
 import shutil
 import subprocess
 import tempfile
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 from pathlib import Path
 import unittest
 
@@ -132,6 +132,68 @@ class ReleasePreflightTests(unittest.TestCase):
             (root / "libs/cua-driver/scripts/install.sh").write_text("exit 0\n")
             with self.assertRaisesRegex(RuntimeError, "source-build installer route drift"):
                 self.boundary(root, temporary, root / "libs/cua-driver/scripts/_install-rust.sh")
+
+
+class OwnedCleanupTests(unittest.TestCase):
+    def test_launch_binding_refuses_adoption_or_identity_change_without_signalling(self):
+        identity = {"pid": 42, "start_time": "100", "executable": "/usr/bin/galculator"}
+        with patch.object(runner, "process_identity", return_value=identity), \
+                patch.object(runner.os, "pidfd_open", return_value=99, create=True) as opened, \
+                patch.object(runner.os, "close") as closed:
+            for launch in ({"pid": True, "launcher_pid": True}, {"pid": 42, "launcher_pid": 7}):
+                with self.subTest(launch=launch), self.assertRaisesRegex(RuntimeError, "exact newly launched process"):
+                    runner.bind_launched_process(launch)
+            opened.assert_not_called()
+            with patch.object(runner, "process_identity", side_effect=[identity, {**identity, "start_time": "101"}]):
+                with self.assertRaisesRegex(RuntimeError, "identity changed"):
+                    runner.bind_launched_process({"pid": 42, "launcher_pid": 42})
+            closed.assert_called_once_with(99)
+
+    def test_bound_exit_uses_only_the_descriptor_and_observes_exit(self):
+        ready = ([99], [], [])
+        pending = ([], [], [])
+        for observations, expected_signals, failure in (
+            ([ready], [], False),
+            ([pending, ready], [runner.signal.SIGTERM], False),
+            ([pending, pending, ready], [runner.signal.SIGTERM, runner.signal.SIGKILL], False),
+            ([pending, pending, pending], [runner.signal.SIGTERM, runner.signal.SIGKILL], True),
+        ):
+            with self.subTest(observations=observations), \
+                    patch.object(runner.select, "select", side_effect=observations), \
+                    patch.object(runner.signal, "pidfd_send_signal", create=True) as send, \
+                    patch.object(runner.os, "close") as close, \
+                    patch.object(runner.os, "kill") as numeric_kill:
+                if failure:
+                    with self.assertRaisesRegex(RuntimeError, "did not exit after owned cleanup"):
+                        runner.stop_bound_process(99)
+                else:
+                    self.assertTrue(runner.stop_bound_process(99)["exited"])
+                self.assertEqual([x.args for x in send.call_args_list], [(99, sig) for sig in expected_signals])
+                numeric_kill.assert_not_called()
+                close.assert_called_once_with(99)
+
+    def test_unknown_launch_is_not_successful_cleanup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = runner.cleanup_fixture(Path(directory), None, [], None, launch_attempted=True)
+            self.assertFalse(receipt["passed"])
+            self.assertEqual(receipt["errors"], ["Attempted Calculator launch lacks exact cleanup ownership"])
+
+    def test_cleanup_continues_after_error_and_records_all_owned_handles(self):
+        process1, process2 = Mock(pid=1), Mock(pid=2)
+        process1.poll.return_value = 0
+        process2.poll.return_value = None
+        mcp = Mock()
+        mcp.close.side_effect = RuntimeError("MCP stop refused")
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(runner, "stop", side_effect=[RuntimeError("process stop refused"), None]) as stop, \
+                patch.object(runner, "stop_bound_process", return_value={"exited": True}) as bound:
+            receipt = runner.cleanup_fixture(Path(directory), mcp, [process1, process2], (99, {"pid": 42}))
+            self.assertFalse(receipt["passed"])
+            self.assertEqual(len(receipt["errors"]), 2)
+            self.assertEqual([x.args for x in stop.call_args_list], [(process2,), (process1,)])
+            self.assertEqual(receipt["processes"], [{"pid": 1, "exit_code": 0}])
+            bound.assert_called_once_with(99)
+            self.assertTrue((Path(directory) / "cleanup.json").is_file())
 
 
 if __name__ == "__main__":

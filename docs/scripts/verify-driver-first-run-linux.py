@@ -28,6 +28,7 @@ from pathlib import Path
 import platform
 import queue
 import re
+import select
 import signal
 import subprocess
 import sys
@@ -70,6 +71,78 @@ def stop(process):
         except subprocess.TimeoutExpired:
             os.killpg(process.pid, signal.SIGKILL)
             process.wait(timeout=5)
+
+
+def process_identity(pid):
+    proc = Path(f"/proc/{pid}")
+    # Linux stat starts at state (field 3) after the final comm delimiter.
+    start_time = proc.joinpath("stat").read_text().rsplit(") ", 1)[1].split()[19]
+    return {"pid": pid, "start_time": start_time,
+            "executable": str(proc.joinpath("exe").resolve(strict=True))}
+
+
+def bind_launched_process(launch):
+    pid = launch.get("pid")
+    require(type(pid) is int and pid > 0 and launch.get("launcher_pid") == pid,
+            "Calculator cleanup requires the exact newly launched process")
+    before = process_identity(pid)
+    require(Path(before["executable"]).name == "galculator", "Launched Calculator executable mismatch")
+    fd = os.pidfd_open(pid)
+    try:
+        require(process_identity(pid) == before, "Calculator identity changed during cleanup binding")
+        return fd, before
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def stop_bound_process(fd):
+    """Stop the launch-bound Linux process; never fall back to a numeric PID."""
+    signals = []
+    try:
+        if not select.select([fd], [], [], 0)[0]:
+            for sig, wait in ((signal.SIGTERM, 8), (signal.SIGKILL, 5)):
+                try:
+                    signal.pidfd_send_signal(fd, sig)
+                    signals.append(sig.name)
+                except ProcessLookupError:
+                    pass  # The bound process may have just exited; observe it.
+                if select.select([fd], [], [], wait)[0]:
+                    break
+            else:
+                raise RuntimeError("Bound Calculator did not exit after owned cleanup")
+        return {"exited": True, "signals": signals, "numeric_pid_fallback": False}
+    finally:
+        os.close(fd)
+
+
+def cleanup_fixture(evidence, mcp, processes, launcher, *, launch_attempted=False):
+    receipt = {"passed": False, "launched_app": None, "mcp": None, "processes": [], "errors": []}
+    if launch_attempted and launcher is None:
+        receipt["errors"].append("Attempted Calculator launch lacks exact cleanup ownership")
+    if launcher is not None:
+        fd, identity = launcher
+        try:
+            receipt["launched_app"] = {**identity, **stop_bound_process(fd)}
+        except Exception as error:
+            receipt["errors"].append(f"Calculator cleanup: {error}")
+    if mcp is not None:
+        try:
+            mcp.close()
+            require(mcp.process.poll() is not None, "Owned MCP process still running")
+            receipt["mcp"] = {"pid": mcp.process.pid, "exit_code": mcp.process.poll()}
+        except Exception as error:
+            receipt["errors"].append(f"MCP cleanup: {error}")
+    for process in reversed(processes):
+        try:
+            stop(process)
+            require(process.poll() is not None, "Owned process still running")
+            receipt["processes"].append({"pid": process.pid, "exit_code": process.poll()})
+        except Exception as error:
+            receipt["errors"].append(f"Owned process {process.pid}: {error}")
+    receipt["passed"] = not receipt["errors"]
+    save(evidence, "cleanup.json", receipt)
+    return receipt
 
 
 class MCP:
@@ -223,6 +296,9 @@ def main():
     evidence.mkdir(exist_ok=False)
     processes = []
     mcp = None
+    launcher = None
+    launch_attempted = False
+    primary_error = None
     try:
         top = Path(run(["git", "rev-parse", "--show-toplevel"]).stdout.strip()).resolve()
         sha = run(["git", "rev-parse", "HEAD"]).stdout.strip()
@@ -347,7 +423,12 @@ def main():
             {tool["name"] for tool in listing["tools"]}), "MCP discovery lacks required tools")
         mcp.call("get_desktop_state", {}, "before-launch-desktop")
         before_launch = observe(evidence, "before-launch")
+        require(run(["pgrep", "-x", "galculator"], check=False).returncode == 1,
+                "A Calculator already exists; refusing to adopt it")
+        launch_attempted = True
         launch, _ = mcp.call("launch_app", {"name": "galculator"}, "launch-calculator")
+        launcher = bind_launched_process(launch)
+        save(evidence, "calculator-launch-ownership.json", launcher[1])
         pid = launch.get("pid")
         require(isinstance(pid, int) and pid > 0, "Calculator launch lacks a PID")
         windows = launch.get("windows", [])
@@ -408,13 +489,18 @@ def main():
                              "OCR evidence retained for human visual review"]})
         print("PASS: canonical release install, cold serve, readiness, MCP and native Calculator display 42")
     except Exception as error:
-        save(evidence, "result.json", {"status": "failed", "error": str(error)})
+        primary_error = str(error)
+        save(evidence, "result.json", {"status": "failed", "error": primary_error})
         raise
     finally:
-        if mcp is not None:
-            mcp.close()
-        for process in reversed(processes):
-            stop(process)
+        cleanup = cleanup_fixture(evidence, mcp, processes, launcher, launch_attempted=launch_attempted)
+        if not cleanup["passed"] and primary_error is None:
+            # Keep successful task proof separate from the cleanup failure.
+            result_path = evidence / "result.json"
+            if result_path.exists():
+                save(evidence, "task-result-before-cleanup-failure.json", result_path.read_text())
+            save(evidence, "result.json", {"status": "failed", "error": "Owned first-run cleanup failed"})
+            raise RuntimeError("Owned first-run cleanup failed; see cleanup.json")
 
 
 if __name__ == "__main__":
