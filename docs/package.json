@@ -2,6 +2,7 @@
   "name": "docs",
   "version": "0.0.0",
   "private": true,
+  "packageManager": "pnpm@9.0.4+sha1.b198ac6d38244fd829253720f9daafd6a606834d",
   "scripts": {
     "build": "next build",
     "dev": "python3 scripts/rss-budget.py --budget-mb 6144 -- next dev --turbo -p 8190",
@@ -40,7 +41,7 @@
     "docs:check-em-dash": "bash ../scripts/check-no-em-dash.sh",
     "docs:check-image-refs": "python3 ../scripts/images/check-image-refs.py && python3 ../scripts/images/gen-image-constants.py --check",
     "docs:check-structure": "tsx --test scripts/product-structure.test.ts scripts/page-budget.test.ts",
-    "build:budget": "python3 scripts/rss-budget.py --budget-mb 6144 -- next build",
+    "build:budget": "python3 scripts/rss-budget.py --budget-mb 6144 -- next build --webpack",
     "preview": "python3 scripts/rss-budget.py --budget-mb 6144 -- sh -c 'next build && next start -p ${PORT:-8190}'",
     "docs:check:cua-bench": "tsx ../scripts/docs-generators/runner.ts --library cua-bench --check",
     "docs:generate:cua-bench": "tsx ../scripts/docs-generators/cua-bench.ts"
