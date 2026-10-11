@@ -2,6 +2,7 @@
 
 import importlib.util
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -57,8 +58,19 @@ class ReleasePreflightTests(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy(root / relative, path)
         shutil.copytree(root / ".github/release-state", destination / ".github/release-state")
+        # Keep an explicit valid lag even after a future installer catches up.
+        # These are copied metadata fixtures; no release download is attempted.
+        base = destination / "libs/cua-driver"
+        unix = base / "scripts/_install-rust.sh"
+        unix.write_text(re.sub(r'^CUA_DRIVER_RS_BAKED_VERSION="[^"]+"',
+                              'CUA_DRIVER_RS_BAKED_VERSION="0.0.0"', unix.read_text(),
+                              count=1, flags=re.MULTILINE))
+        windows = base / "scripts/_upstream-install.ps1"
+        windows.write_text(re.sub(r'^\$Script:CuaDriverRsBakedVersion\s*=\s*"[^"]+"',
+                                 '$Script:CuaDriverRsBakedVersion = "0.0.0"',
+                                 windows.read_text(encoding="utf-8-sig"), count=1, flags=re.MULTILINE))
+        (destination / ".github/release-state/cua-driver-rs-published-version").write_text("0.0.0\n")
         if not source_build:
-            base = destination / "libs/cua-driver"
             (base / "installer-distribution.json").unlink()
             shutil.copy(base / "scripts/_upstream-install.ps1", base / "scripts/install.ps1")
             shutil.copy(base / "scripts/_install-rust.sh", base / "scripts/install.sh")
