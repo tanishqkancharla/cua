@@ -62,12 +62,25 @@ jobs:
       # logged-in, TCC-authorized desktop are #[ignore] and belong to the Lume
       # harness (libs/cua-driver/tests/runners/macos-lume/run-all.sh).
       - name: Run platform-macos unit tests
+        id: platform_macos_unit
         working-directory: libs/cua-driver/rust
         env:
           # The hosted runner's pasteboard is disposable; opt in to the native
           # clipboard round trip that would clobber a developer's clipboard.
           CUA_TEST_ALLOW_CLIPBOARD: "1"
-        run: cargo test --locked -p platform-macos --lib
+        run: |
+          touch "$RUNNER_TEMP/platform-macos-unit-start"
+          cargo test --locked -p platform-macos --lib -- --nocapture
+      - name: Retain platform-macos crash reports
+        if: failure() && steps.platform_macos_unit.outcome == 'failure'
+        run: python3 .github/scripts/collect-macos-unit-crashes.py
+      - name: Upload platform-macos diagnostics
+        if: failure() && steps.platform_macos_unit.outcome == 'failure'
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4
+        with:
+          name: platform-macos-unit-${{ github.run_id }}
+          path: ${{ runner.temp }}/macos-unit-diagnostics
+          if-no-files-found: warn
       - name: Run cua-driver-core unit tests on macOS
         working-directory: libs/cua-driver/rust
         run: cargo test --locked -p cua-driver-core --lib
