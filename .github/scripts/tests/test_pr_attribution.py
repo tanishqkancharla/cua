@@ -138,6 +138,49 @@ def test_distinct_resolvable_commit_author_requires_preserved_source():
     )
 
 
+
+@pytest.mark.parametrize("author_login", ["source-author", None])
+def test_unused_resolved_author_source_does_not_mask_missing_provenance(author_login):
+    inherited = commit(
+        sha="inherited",
+        login="maintainer",
+        message="fix: inherited work\n\nSalvaged from #4809",
+    )
+    external = commit(sha="external", login=author_login)
+    with pytest.raises(ReleaseError) as error:
+        validate(commits=[inherited, external])
+    expected = (
+        "commit external is authored by @source-author, distinct from landing "
+        "PR author @landing-author, but has no explicit source PR; add "
+        "`Salvaged from #<pr>` so release attribution preserves the author"
+        if author_login
+        else "contributor@example.com (unlinked commit author (would become a "
+        "squash coauthor); external) is unresolved and has no explicit "
+        "same-repository source PR; use a linked GitHub/noreply email or add "
+        "`Salvaged from #<pr>`"
+    )
+    assert str(error.value) == "contributor attribution is not merge-ready:\n- " + expected
+
+
+def test_preserved_author_verifies_own_source_without_fetching_unrelated_source():
+    validate(
+        commits=[
+            commit(
+                sha="inherited",
+                login="maintainer",
+                message="fix: inherited work\n\nSalvaged from #4809",
+            ),
+            commit(
+                sha="external",
+                login="source-author",
+                message="fix: preserve contribution\n\nSalvaged from #12",
+            ),
+        ],
+        authors={12: "source-author"},
+        source_emails={12: ["contributor@example.com"]},
+    )
+
+
 def test_credited_base_sync_merge_author_does_not_require_a_source_pr():
     validate(
         commits=[

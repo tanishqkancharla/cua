@@ -690,8 +690,9 @@ def validate_pr_attribution(
     source_evidence: dict[int, tuple[str, set[str]]] = {}
     all_references = sorted(
         {
-            *all_pr_sources,
+            *(all_pr_sources if new_overrides else set()),
             *{number for item in unresolved.values() for number in item["references"]},
+            *{number for author in preserved_authors for number in author["references"]},
         }
     )
     for number in all_references:
