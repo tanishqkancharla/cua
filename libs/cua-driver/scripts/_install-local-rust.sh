@@ -231,7 +231,12 @@ export CARGO_TARGET_DIR="$BUILD_TARGET_DIR"
 
 echo "${BOLD}Building cua-driver ($BUILD_CONFIG)...${NORMAL}"
 cd "$REPO_ROOT"
-if [ "$BUILD_CONFIG" = "release" ]; then
+if [ "$BUILD_CONFIG" = "release" ] && [ "$OS" = "Darwin" ]; then
+    # Rust stripping can misalign Mach-O compiler plugins on macOS 27.
+    # Keep host build artifacts loadable without changing driver optimization.
+    # https://github.com/rust-lang/rust/issues/157750
+    cargo --config 'profile.release.build-override.strip="none"' build --release -p cua-driver -p cursor-theme-cli
+elif [ "$BUILD_CONFIG" = "release" ]; then
     cargo build --release -p cua-driver -p cursor-theme-cli
 else
     cargo build -p cua-driver -p cursor-theme-cli
