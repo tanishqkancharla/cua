@@ -914,8 +914,12 @@ fn typed_progress(before: Option<&str>, after: Option<&str>, text: &str) -> Type
         .count()
         .saturating_sub(before.chars().count())
         .min(text.chars().count());
-    if delivered == 0 {
+    if after == before {
         TypedProgress::Unchanged
+    } else if delivered == 0 {
+        // Replacement or normalization can change an equal/shorter value after
+        // real input. A zero length delta does not prove zero delivery.
+        TypedProgress::Unverifiable
     } else {
         TypedProgress::Partial(delivered)
     }
@@ -1629,6 +1633,26 @@ mod tests {
                 typed_progress(before, after, text),
                 expected,
                 "before={before:?} after={after:?} text={text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn changed_normalized_readback_cannot_prove_zero_delivery() {
+        for (before, after, text) in [
+            ("old longer contents", "new\n\ncontents", "new\ncontents"),
+            ("long old", "new text", "new  text"),
+        ] {
+            assert_eq!(
+                typed_progress(Some(before), Some(after), text),
+                TypedProgress::Unverifiable
+            );
+            assert_eq!(
+                await_typed_delivery(Some(before), text, std::time::Instant::now(), || {
+                    Some(after.to_owned())
+                }),
+                (false, None),
+                "changed contents must not recommend retrying the whole input"
             );
         }
     }
