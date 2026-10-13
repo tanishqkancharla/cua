@@ -65,3 +65,17 @@ def test_import_cannot_remove_or_replace_trusted_identity(change):
     with pytest.raises(ReleaseError,match="removes or changes trusted identityOverrides"):
         validate_pr_attribution(repository="fork/repo",pull={"number":1},commits=[],
             base_config=policy,identity_changes={"trusted@example.com":change},github=api)
+
+
+def test_merged_pr_uses_recorded_base_instead_of_current_main():
+    api=API();original_base="d"*40
+    def compare(repo,base,head):
+        assert (repo,base,head)==("fork/repo",original_base,UPSTREAM)
+        return api.batch,api.total
+    api.compare_commits=compare
+    _,commits=verified_fork_import_policy(repository="fork/repo",
+        pull={"body":BODY,"base":{"sha":original_base}},head_sha=HEAD,
+        trusted_sha=TRUSTED,config_path=".github/release-attribution-config.json",
+        base_config={"identityOverrides":{}},identity_changes={},
+        commits=[{"sha":UPSTREAM},{"sha":HEAD}],github=api)
+    assert commits==[{"sha":HEAD}]

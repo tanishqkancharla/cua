@@ -1458,7 +1458,12 @@ def verified_fork_import_policy(
         for email, login in identity_changes.items():
             if email not in inherited and login is not None and mappings.get(email) == login:
                 inherited[email] = login
-        batch, total = github.compare_commits(repository, trusted_sha, source_sha)
+        # A merged PR retains its original base; current main may already
+        # include this entire upstream import and would compare zero commits.
+        import_base = str((pull.get("base") or {}).get("sha") or trusted_sha)
+        if not re.fullmatch(r"[0-9a-f]{40}", import_base):
+            raise ReleaseError("Upstream sync has no immutable pull-request base")
+        batch, total = github.compare_commits(repository, import_base, source_sha)
         if len(batch) != total or len({item.get("sha") for item in batch}) != total:
             raise ReleaseError("Upstream sync returned incomplete commit provenance")
         imported_commits.update(str(item.get("sha") or "") for item in batch)
