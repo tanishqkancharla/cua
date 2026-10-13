@@ -75,7 +75,8 @@ struct AttestedDrawable<'a> {
     conn: &'a x11rb::rust_connection::RustConnection,
     id: u32,
     visual: u32,
-    offset: i16,
+    offset_x: i16,
+    offset_y: i16,
     pixmap: bool,
 }
 impl Drop for AttestedDrawable<'_> {
@@ -242,40 +243,75 @@ fn attested_drawable<'a>(
         ));
     }
     let geom = conn.get_geometry(window)?.reply()?;
-    // Name only an already-redirected backing. Never redirect a window during
-    // observation: its initial covered contents would remain undefined.
+    // WMs redirect root subwindows (their frames), so an unredirected client
+    // can live inside an already-backed ancestor. Name existing backing only;
+    // never redirect or activate. Crop the exact client's interior under the
+    // same server grab, proving ancestry, clipping, depth and visual first.
     if conn
         .composite_query_version(0, 4)
         .ok()
         .and_then(|cookie| cookie.reply().ok())
         .is_some()
     {
-        let pixmap = conn.generate_id()?;
-        if conn
-            .composite_name_window_pixmap(window, pixmap)?
-            .check()
-            .is_ok()
-        {
-            let backing = AttestedDrawable {
-                conn,
-                id: pixmap,
-                visual: attrs.visual,
-                offset: i16::try_from(geom.border_width)?,
-                pixmap: true,
-            };
-            let pixels = conn.get_geometry(pixmap)?.reply()?;
-            if pixels.depth != geom.depth
-                || u32::from(pixels.width)
-                    < u32::from(geom.width) + 2 * u32::from(geom.border_width)
-                || u32::from(pixels.height)
-                    < u32::from(geom.height) + 2 * u32::from(geom.border_width)
+        let target = capture_rect(conn, window, geom.root)?;
+        let mut current = window;
+        for _ in 0..128 {
+            if current == geom.root {
+                break;
+            }
+            let source_geom = conn.get_geometry(current)?.reply()?;
+            let source_attrs = conn.get_window_attributes(current)?.reply()?;
+            let source = capture_rect(conn, current, geom.root)?;
+            if source_geom.root != geom.root
+                || !source.contains(target)
+                || source_attrs.map_state != MapState::VIEWABLE
             {
                 return Err(window_capture_unavailable(
                     u64::from(window),
-                    "Existing backing pixmap geometry does not match the exact target.",
+                    "Exact client pixels are clipped or not viewable in their backing ancestry.",
                 ));
             }
-            return Ok(backing);
+            attest_bounding_shape(conn, current, geom.root, target)?;
+            let pixmap = conn.generate_id()?;
+            if conn
+                .composite_name_window_pixmap(current, pixmap)?
+                .check()
+                .is_ok()
+            {
+                // Construct the guard before any validation can fail.
+                let mut backing = AttestedDrawable {
+                    conn,
+                    id: pixmap,
+                    visual: attrs.visual,
+                    offset_x: 0,
+                    offset_y: 0,
+                    pixmap: true,
+                };
+                let pixels = conn.get_geometry(pixmap)?.reply()?;
+                let x = target.x - source.x + i64::from(source_geom.border_width);
+                let y = target.y - source.y + i64::from(source_geom.border_width);
+                if pixels.depth != geom.depth
+                    || source_attrs.visual != attrs.visual
+                    || x < 0
+                    || y < 0
+                    || x + target.w > i64::from(pixels.width)
+                    || y + target.h > i64::from(pixels.height)
+                {
+                    return Err(window_capture_unavailable(u64::from(window),
+                        "Existing backing geometry, depth or visual cannot attest the exact client crop."));
+                }
+                backing.offset_x = i16::try_from(x)?;
+                backing.offset_y = i16::try_from(y)?;
+                return Ok(backing);
+            }
+            let parent = conn.query_tree(current)?.reply()?.parent;
+            if parent == 0 || parent == current {
+                return Err(window_capture_unavailable(
+                    u64::from(window),
+                    "Existing backing ancestry is unproven.",
+                ));
+            }
+            current = parent;
         }
     }
     attest_unbacked_window(conn, window, geom.root, &[])?;
@@ -283,7 +319,8 @@ fn attested_drawable<'a>(
         conn,
         id: window,
         visual: attrs.visual,
-        offset: 0,
+        offset_x: 0,
+        offset_y: 0,
         pixmap: false,
     })
 }
@@ -918,8 +955,8 @@ impl XShmSession {
             .conn
             .shm_get_image(
                 drawable.id,
-                drawable.offset,
-                drawable.offset,
+                drawable.offset_x,
+                drawable.offset_y,
                 geom.width,
                 geom.height,
                 !0u32,
@@ -1171,8 +1208,8 @@ impl XGetImageSession {
             .get_image(
                 ImageFormat::Z_PIXMAP,
                 drawable.id,
-                drawable.offset,
-                drawable.offset,
+                drawable.offset_x,
+                drawable.offset_y,
                 geom.width,
                 geom.height,
                 !0u32,
