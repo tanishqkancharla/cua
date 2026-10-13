@@ -41,6 +41,8 @@ concurrency:
 
 jobs:
   release-please:
+    # Upstream credentials and destinations do not belong to OpenSky.
+    if: github.repository == 'trycua/cua'
     runs-on: ubuntu-latest
     steps:
       - name: Generate release GitHub App token

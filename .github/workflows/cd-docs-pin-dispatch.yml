@@ -35,6 +35,8 @@ concurrency:
 
 jobs:
   dispatch:
+    # Upstream credentials and destinations do not belong to OpenSky.
+    if: github.repository == 'trycua/cua'
     name: Notify trycua/cloud
     runs-on: ubuntu-latest
     timeout-minutes: 5

@@ -49,6 +49,13 @@ def test_canary_runs_often_and_after_every_installer_change(workflow: dict) -> N
 
 def test_canary_uses_default_resolution_on_every_platform(workflow: dict) -> None:
     canary = workflow["jobs"]["canary"]
+    assert "github.repository == 'trycua/cua'" in canary["if"]
+    assert "github.repository == 'trycua/cua'" in workflow["jobs"]["check"]["if"]
+    source = workflow["jobs"]["opensky-source-installers"]
+    assert source["if"] == "github.repository == 'tanishqkancharla/cua'"
+    command = step(source, "Verify declared source routes and stable signing contracts")["run"]
+    for owner in ("test_validate_release_versions.py", "test_install_local.py", "test_install_local_signing.py"):
+        assert owner in command
     assert canary["strategy"]["matrix"]["os"] == ["ubuntu-latest", "macos-26", "windows-latest"]
     assert canary["env"]["INSTALLER_SOURCE"] == "${{ github.event_name == 'push' && 'checkout' || 'cua.ai' }}"
     assert canary["env"]["CUA_DRIVER_RS_TELEMETRY_ENABLED"] == "false"
