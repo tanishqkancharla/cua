@@ -478,21 +478,32 @@ async fn invoke_daemon_tool(
 
     if let Some(sid) = &effective_session {
         if !is_session_lifecycle_tool(&tool_name) && sdk.is_session_ended(sid) {
-            observe_daemon_error(observation, 1);
-            // An unnamed call's lifecycle id is the transport session, which
-            // is not a label the caller can pass back to start_session.
-            let recovery = if req.session_id.as_deref() == Some(sid.as_str()) {
-                "Call start_session without a session label to start a new unnamed session."
-                    .to_owned()
+            // This guard runs before authorization, registry dispatch and any
+            // platform action. Preserve the precise tool refusal over every
+            // transport; generic transport errors cannot authorize SDK revival.
+            let suspended = sdk.is_authorization_suspended();
+            let code = if suspended {
+                "authorization_suspended"
             } else {
-                format!(
-                    "Call start_session with session '{sid}' to start it again, or use a new session label."
-                )
+                "session_ended"
             };
-            return DaemonResponse::err(
-                format!("session has ended; tool call '{tool_name}' was rejected. {recovery}"),
-                1,
-            );
+            let message = if suspended {
+                "Runtime authorization has been revoked; starting a session cannot restore it. The trusted host must establish a new authorized runtime.".to_owned()
+            } else if req.session_id.as_deref() == Some(sid.as_str()) {
+                format!("session has ended; tool call '{tool_name}' was rejected. Call start_session without a session label to start a new unnamed session.")
+            } else {
+                format!("session has ended; tool call '{tool_name}' was rejected. Call start_session with session '{sid}' to start it again, or use a new session label.")
+            };
+            let refusal = cua_driver_core::protocol::ToolResult::error(message.clone())
+                .with_structured(serde_json::json!({
+                    "status": "refused",
+                    "refusal": { "code": code, "message": message }
+                }));
+            return DaemonResponse::ok(observe_daemon_result(
+                observation,
+                None,
+                serde_json::to_value(refusal).expect("admission refusal is serializable"),
+            ));
         }
     }
 
@@ -2748,14 +2759,29 @@ mod gate_tests {
                 .unwrap()
                 .expect("ended call response");
         assert!(
-            !resp.ok,
-            "ended-session call must be rejected loudly (not ok)"
+            resp.ok,
+            "admission refusal is a tool result, not a transport failure"
         );
-        assert!(
-            resp.error.as_deref().unwrap_or("").contains("has ended"),
-            "rejection must explain the session ended; got {:?}",
-            resp.error
+        let refusal = resp.result.expect("typed pre-dispatch refusal");
+        assert_eq!(refusal["isError"], true);
+        assert_eq!(refusal["structuredContent"]["status"], "refused");
+        assert_eq!(
+            refusal["structuredContent"]["refusal"]["code"],
+            "session_ended"
         );
+        assert!(refusal["structuredContent"]["refusal"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("has ended"));
+        for key in ["effect", "delivery"] {
+            assert!(
+                refusal["structuredContent"].get(key).is_none(),
+                "admission must not imply dispatch"
+            );
+        }
+        assert!(refusal["structuredContent"]["refusal"]
+            .get("detail")
+            .is_none());
         assert_eq!(
             PROBE_INVOCATIONS.load(Ordering::SeqCst),
             1,
@@ -2823,9 +2849,12 @@ mod gate_tests {
                 .await
                 .unwrap()
                 .expect("bulk-revoked call response");
-        assert!(
-            !resp.ok,
-            "bulk-revoked session call must preserve the loud legacy transport refusal"
+        assert!(resp.ok, "authorization refusal is a tool result");
+        let refusal = resp.result.expect("terminal authorization refusal");
+        assert_eq!(refusal["isError"], true);
+        assert_eq!(
+            refusal["structuredContent"]["refusal"]["code"], "authorization_suspended",
+            "revocation must never masquerade as a revivable session expiry"
         );
         assert_eq!(
             PROBE_INVOCATIONS.load(Ordering::SeqCst),
@@ -2858,6 +2887,29 @@ mod gate_tests {
             2,
             "runtime-wide revocation must stop anonymous dispatch"
         );
+
+        // A public lifecycle restart cannot restore revoked authorization.
+        let socket4b = socket.clone();
+        let restarted = DaemonRequest {
+            method: "call".into(),
+            name: Some("start_session".into()),
+            args: Some(serde_json::json!({"session": sid})),
+            session_id: Some(sid.to_owned()),
+            observation_origin: None,
+            client_kind: None,
+        };
+        let resp = tokio::task::spawn_blocking(move || send_request(&socket4b, &restarted))
+            .await
+            .unwrap()
+            .expect("revoked restart response");
+        assert!(resp.ok);
+        let refusal = resp.result.expect("revoked restart refusal");
+        assert_eq!(refusal["isError"], true);
+        assert_eq!(
+            refusal["structuredContent"]["refusal"]["code"],
+            "authorization_suspended"
+        );
+        assert_eq!(PROBE_INVOCATIONS.load(Ordering::SeqCst), 2);
 
         // Tear down the daemon.
         let socket5 = socket.clone();

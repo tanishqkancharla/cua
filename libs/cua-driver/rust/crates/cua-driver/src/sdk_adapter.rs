@@ -290,6 +290,11 @@ impl SdkAdapter {
         !cua_driver_core::session::recreates_on_next_call(&internal, &internal)
     }
 
+    /// Runtime revocation is terminal; it must not be offered as session revival.
+    pub fn is_authorization_suspended(&self) -> bool {
+        cua_driver_core::session::is_runtime_scope_suspended(&self.runtime_scope)
+    }
+
     pub fn mark_all_sessions_ended(&self) {
         let mut sessions = self.public_sessions.lock().unwrap();
         let known = sessions.scopes.keys().cloned().collect::<Vec<_>>();
