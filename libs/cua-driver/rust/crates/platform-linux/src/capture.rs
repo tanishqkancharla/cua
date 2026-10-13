@@ -75,6 +75,7 @@ struct AttestedDrawable<'a> {
     conn: &'a x11rb::rust_connection::RustConnection,
     id: u32,
     visual: u32,
+    depth: u8,
     offset_x: i16,
     offset_y: i16,
     pixmap: bool,
@@ -229,6 +230,32 @@ fn attest_unbacked_window(
         "Window ancestry exceeds the attestation bound.",
     ))
 }
+// IDs alone do not identify pixel encoding: compatible TrueColor visuals
+// may differ between the WM frame and its client (including depth24/32).
+fn compatible_capture_visuals(setup: &Setup, target: u32, source: u32) -> bool {
+    if target == source {
+        return true;
+    }
+    let find = |id| {
+        setup
+            .roots
+            .iter()
+            .flat_map(|screen| &screen.allowed_depths)
+            .flat_map(|depth| &depth.visuals)
+            .find(|visual| visual.visual_id == id)
+    };
+    match (find(target), find(source)) {
+        (Some(a), Some(b)) => {
+            a.class == VisualClass::TRUE_COLOR
+                && b.class == VisualClass::TRUE_COLOR
+                && a.red_mask == b.red_mask
+                && a.green_mask == b.green_mask
+                && a.blue_mask == b.blue_mask
+                && a.bits_per_rgb_value == b.bits_per_rgb_value
+        }
+        _ => false,
+    }
+}
 fn attested_drawable<'a>(
     conn: &'a x11rb::rust_connection::RustConnection,
     window: u32,
@@ -282,7 +309,8 @@ fn attested_drawable<'a>(
                 let mut backing = AttestedDrawable {
                     conn,
                     id: pixmap,
-                    visual: attrs.visual,
+                    visual: source_attrs.visual,
+                    depth: source_geom.depth,
                     offset_x: 0,
                     offset_y: 0,
                     pixmap: true,
@@ -290,15 +318,15 @@ fn attested_drawable<'a>(
                 let pixels = conn.get_geometry(pixmap)?.reply()?;
                 let x = target.x - source.x + i64::from(source_geom.border_width);
                 let y = target.y - source.y + i64::from(source_geom.border_width);
-                if pixels.depth != geom.depth
-                    || source_attrs.visual != attrs.visual
+                if pixels.depth != source_geom.depth
+                    || !compatible_capture_visuals(conn.setup(), attrs.visual, source_attrs.visual)
                     || x < 0
                     || y < 0
                     || x + target.w > i64::from(pixels.width)
                     || y + target.h > i64::from(pixels.height)
                 {
                     return Err(window_capture_unavailable(u64::from(window),
-                        "Existing backing geometry, depth or visual cannot attest the exact client crop."));
+                        format!("Existing backing cannot attest the exact client crop: backing depth {}, target depth {}, source visual {:#x}, target visual {:#x}, crop ({},{}) {}x{} in {}x{}.", pixels.depth, geom.depth, source_attrs.visual, attrs.visual, x, y, target.w, target.h, pixels.width, pixels.height)));
                 }
                 backing.offset_x = i16::try_from(x)?;
                 backing.offset_y = i16::try_from(y)?;
@@ -319,6 +347,7 @@ fn attested_drawable<'a>(
         conn,
         id: window,
         visual: attrs.visual,
+        depth: geom.depth,
         offset_x: 0,
         offset_y: 0,
         pixmap: false,
@@ -951,6 +980,13 @@ impl XShmSession {
             ));
         }
         let drawable = attested_drawable(&self.conn, window)?;
+        let actual_layout = self.pixels.packed_layout(w, h, drawable.depth)?;
+        if actual_layout.len != need {
+            bail!(
+                "Backing layout cannot reuse the prepared SHM buffer; plain GetImage is required"
+            );
+        }
+        let layout = actual_layout;
         let reply = self
             .conn
             .shm_get_image(
@@ -1200,7 +1236,7 @@ impl XGetImageSession {
             .map_err(|e| anyhow!("get_geometry reply: {e}"))?;
         let w = u32::from(geom.width);
         let h = u32::from(geom.height);
-        let layout = self.pixels.packed_layout(w, h, geom.depth)?;
+        let layout = self.pixels.packed_layout(w, h, drawable.depth)?;
         let need = layout.len;
 
         let img = self
