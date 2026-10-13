@@ -4,11 +4,35 @@ use cua_driver_core::{
     tool::{Tool, ToolDef},
 };
 use serde_json::Value;
-use std::path::PathBuf;
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, OnceLock,
+    },
+};
 
 pub struct LaunchAppTool;
 
 static DEF: std::sync::OnceLock<ToolDef> = std::sync::OnceLock::new();
+
+fn watchdogs() -> &'static Mutex<HashMap<i32, Vec<Arc<AtomicBool>>>> {
+    static WATCHDOGS: OnceLock<Mutex<HashMap<i32, Vec<Arc<AtomicBool>>>>> = OnceLock::new();
+    WATCHDOGS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// A caller's explicit foreground request supersedes late self-activation
+/// protection for that process, including the polling tail after the observer
+/// lease's five-second deadline.
+pub(super) fn cancel_watchdog(pid: i32) {
+    if let Some(tokens) = watchdogs().lock().unwrap().get(&pid) {
+        for token in tokens {
+            token.store(true, Ordering::Release);
+        }
+    }
+    crate::focus_steal::FocusStealPreventer::cancel_launch_watchdog(pid);
+}
 
 fn def() -> &'static ToolDef {
     DEF.get_or_init(|| ToolDef {
@@ -112,10 +136,10 @@ impl Tool for LaunchAppTool {
         }
         if additional_arguments
             .iter()
-            .any(|argument| contains_remote_debugging_flag(argument))
+            .any(|argument| cua_driver_core::launch_guard::contains_remote_debugging_flag(argument))
         {
             return ToolResult::error(
-                "Chromium remote-debugging flags moved to browser_prepare so DevTools is never enabled on an unproven user profile",
+                cua_driver_core::launch_guard::REMOTE_DEBUGGING_LAUNCH_REFUSAL,
             );
         }
 
@@ -406,16 +430,32 @@ impl Tool for LaunchAppTool {
                     if slow_launch_path {
                         let launched_pid = *pid;
                         let prior_pid = prior;
+                        let cancelled = Arc::new(AtomicBool::new(false));
+                        watchdogs()
+                            .lock()
+                            .unwrap()
+                            .entry(launched_pid)
+                            .or_default()
+                            .push(cancelled.clone());
+                        // Register before returning the launch receipt so an
+                        // immediate explicit bring_to_front can cancel it.
+                        let lease = crate::focus_steal::FocusStealPreventer::begin_suppression(
+                            Some(launched_pid),
+                            prior_pid,
+                            "LaunchAppTool.watchdog",
+                        );
                         tokio::spawn(async move {
-                            let _lease = crate::focus_steal::FocusStealPreventer::begin_suppression(
-                                Some(launched_pid),
-                                prior_pid,
-                                "LaunchAppTool.watchdog",
-                            );
+                            let _lease = lease;
                             let mut late_activations = 0u32;
                             for _ in 0..32 {
+                                if cancelled.load(Ordering::Acquire) {
+                                    break;
+                                }
                                 // 32 × 250ms = 8s
                                 tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                                if cancelled.load(Ordering::Acquire) {
+                                    break;
+                                }
                                 if crate::apps::frontmost_pid() == Some(launched_pid) {
                                     late_activations += 1;
                                     let _ = crate::apps::activate_pid(prior_pid);
@@ -430,6 +470,13 @@ impl Tool for LaunchAppTool {
                                     "watchdog demoted post-RPC late activations \
                                      — slow-path window may need tuning"
                                 );
+                            }
+                            let mut guard = watchdogs().lock().unwrap();
+                            if let Some(tokens) = guard.get_mut(&launched_pid) {
+                                tokens.retain(|token| !Arc::ptr_eq(token, &cancelled));
+                                if tokens.is_empty() {
+                                    guard.remove(&launched_pid);
+                                }
                             }
                         });
                     }
@@ -498,11 +545,6 @@ impl Tool for LaunchAppTool {
     }
 }
 
-fn contains_remote_debugging_flag(value: &str) -> bool {
-    let lower = value.to_ascii_lowercase();
-    lower.contains("--remote-debugging-port") || lower.contains("--remote-debugging-pipe")
-}
-
 fn is_cua_driver_bundle_id(bundle_id: &str) -> bool {
     matches!(bundle_id, "com.trycua.driver" | "com.opensky.driver")
 }
@@ -521,12 +563,13 @@ fn protected_host_launch_refusal() -> ToolResult {
 /// LaunchServices → WindowServer latency (mirrors the Swift reference).
 fn resolve_windows_for_pid(pid: i32) -> Vec<crate::windows::WindowInfo> {
     for attempt in 0..5 {
-        let found: Vec<_> = crate::windows::all_windows()
+        let mut found: Vec<_> = crate::windows::all_windows()
             .into_iter()
             .filter(|w| w.pid == pid && w.layer == 0)
             .filter(|w| w.bounds.width > 1.0 && w.bounds.height > 1.0)
             .collect();
         if !found.is_empty() {
+            rank_launch_windows(&mut found);
             return found;
         }
         if attempt < 4 {
@@ -534,6 +577,10 @@ fn resolve_windows_for_pid(pid: i32) -> Vec<crate::windows::WindowInfo> {
         }
     }
     vec![]
+}
+
+fn rank_launch_windows(windows: &mut [crate::windows::WindowInfo]) {
+    windows.sort_by_key(|window| std::cmp::Reverse(!window.title.trim().is_empty()));
 }
 
 fn structured_launch_error(code: &str, message: String, details: serde_json::Value) -> ToolResult {
@@ -718,13 +765,71 @@ fn hex_value(byte: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::{
-        contains_remote_debugging_flag, is_cua_driver_bundle_id, local_file_target,
-        normalize_launch_url, preflight_file_urls, response_identity, structured_launch_failure,
-        LaunchAppTool,
+        is_cua_driver_bundle_id, local_file_target, normalize_launch_url, preflight_file_urls,
+        rank_launch_windows, response_identity, structured_launch_failure, LaunchAppTool,
     };
     use cua_driver_core::tool::Tool;
     use serde_json::json;
     use std::path::PathBuf;
+
+    fn window(window_id: u32, title: &str, width: f64, height: f64) -> crate::windows::WindowInfo {
+        crate::windows::WindowInfo {
+            window_id,
+            pid: 42,
+            app_name: "Calculator".to_owned(),
+            title: title.to_owned(),
+            bounds: crate::windows::WindowBounds {
+                x: 0.0,
+                y: 0.0,
+                width,
+                height,
+            },
+            layer: 0,
+            z_index: window_id as usize,
+            is_on_screen: true,
+            current_space_id: None,
+            on_current_space: None,
+            space_ids: None,
+        }
+    }
+
+    #[test]
+    fn launch_windows_prefer_titled_document_windows_over_chrome_strips() {
+        let mut windows = vec![
+            window(10174, "", 1470.0, 33.0),
+            window(10169, "", 1920.0, 30.0),
+            window(10166, "Calculator", 674.0, 408.0),
+        ];
+
+        rank_launch_windows(&mut windows);
+
+        assert_eq!(
+            windows
+                .iter()
+                .map(|window| window.window_id)
+                .collect::<Vec<_>>(),
+            vec![10166, 10174, 10169]
+        );
+    }
+
+    #[test]
+    fn launch_window_ranking_preserves_window_server_order_within_groups() {
+        let mut windows = vec![
+            window(3, "New small document", 300.0, 200.0),
+            window(2, "Old large document", 1200.0, 900.0),
+            window(1, "", 1920.0, 30.0),
+        ];
+
+        rank_launch_windows(&mut windows);
+
+        assert_eq!(
+            windows
+                .iter()
+                .map(|window| window.window_id)
+                .collect::<Vec<_>>(),
+            vec![3, 2, 1]
+        );
+    }
 
     #[test]
     fn local_file_target_treats_plain_paths_as_files() {
@@ -783,15 +888,6 @@ mod tests {
             local_file_target("file://localhost/tmp/%E2%9C%93.txt"),
             Some(PathBuf::from("/tmp/✓.txt"))
         );
-    }
-
-    #[test]
-    fn rejects_all_chromium_remote_debugging_spellings() {
-        assert!(contains_remote_debugging_flag("--remote-debugging-port=0"));
-        assert!(contains_remote_debugging_flag("--REMOTE-DEBUGGING-PIPE"));
-        assert!(!contains_remote_debugging_flag(
-            "--user-data-dir=/tmp/profile"
-        ));
     }
 
     #[test]

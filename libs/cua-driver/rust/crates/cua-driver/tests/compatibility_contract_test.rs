@@ -8,6 +8,21 @@ use serde_json::{json, Value};
 
 const CLI_FIXTURE: &str = include_str!("../../../../compat-fixtures/cli.json");
 const MCP_FIXTURE: &str = include_str!("../../../../compat-fixtures/mcp.json");
+const SOURCE_DISTRIBUTION: &str = include_str!("../../../../installer-distribution.json");
+
+// The released Cua snapshots stay frozen. This source-built fork declares a
+// different product identity; every other compatibility field remains locked.
+fn declared_source_product() -> String {
+    let source: Value =
+        serde_json::from_str(SOURCE_DISTRIBUTION).expect("valid source distribution");
+    assert_eq!(source["schemaVersion"], 1);
+    assert_eq!(source["distribution"], "source-build");
+    assert_eq!(source["product"], "opensky-driver");
+    source["product"]
+        .as_str()
+        .expect("source product string")
+        .to_owned()
+}
 
 #[test]
 fn released_cli_help_and_manifest_fields_remain_compatible() {
@@ -22,7 +37,14 @@ fn released_cli_help_and_manifest_fields_remain_compatible() {
     let help = String::from_utf8(help.stdout).expect("UTF-8 help");
     for line in fixture["help_lines"].as_array().expect("help lines") {
         let line = line.as_str().expect("help line string");
-        assert!(help.contains(line), "CLI help no longer contains {line:?}");
+        let source_line = match line.strip_prefix("Usage: cua-driver ") {
+            Some(suffix) => format!("Usage: {} {suffix}", declared_source_product()),
+            None => line.to_owned(),
+        };
+        assert!(
+            help.contains(&source_line),
+            "CLI help no longer contains {source_line:?}"
+        );
     }
 
     let manifest = Command::new(executable)
@@ -193,9 +215,10 @@ fn assert_mcp_contract(driver: &mut RawDriver, fixture: &Value) {
         initialize["result"]["protocolVersion"],
         expected_initialize["protocol_version"]
     );
+    assert_eq!(expected_initialize["server_name"], "cua-driver");
     assert_eq!(
         initialize["result"]["serverInfo"]["name"],
-        expected_initialize["server_name"]
+        declared_source_product()
     );
     semver::Version::parse(
         initialize["result"]["serverInfo"]["version"]
@@ -216,8 +239,15 @@ fn assert_mcp_contract(driver: &mut RawDriver, fixture: &Value) {
         );
     }
 
+    // A notification gets no response: the next message read must answer the
+    // following request, not the notification.
+    driver.send(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
     driver.send(&json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}));
     let tools_list = driver.recv();
+    assert_eq!(
+        tools_list["id"], 2,
+        "notifications/initialized must not produce a response: {tools_list:?}"
+    );
     let expected_tools = &fixture["tools_list"];
     assert_eq!(
         tools_list["result"]["schema_version"],
@@ -285,6 +315,25 @@ fn assert_mcp_contract(driver: &mut RawDriver, fixture: &Value) {
         assert!(
             tool_call["result"].get(field).is_some(),
             "tools/call result no longer contains {field}"
+        );
+    }
+
+    // Clients and gateway watchdogs send `ping` as a liveness probe and treat
+    // an error answer as a dead child, so it must return an empty result with
+    // or without `params` (#4001).
+    for (id, ping) in [
+        (5, json!({"jsonrpc": "2.0", "id": 5, "method": "ping"})),
+        (
+            6,
+            json!({"jsonrpc": "2.0", "id": 6, "method": "ping", "params": {}}),
+        ),
+    ] {
+        driver.send(&ping);
+        let pong = driver.recv();
+        assert_eq!(
+            pong,
+            json!({"jsonrpc": "2.0", "id": id, "result": {}}),
+            "ping must answer with an empty result"
         );
     }
 }

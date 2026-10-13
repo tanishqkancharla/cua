@@ -7,7 +7,7 @@ import subprocess
 
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
-UNINSTALL_LOCAL = REPO_ROOT / "libs/cua-driver/scripts/uninstall-local.sh"
+UNINSTALL_LOCAL = REPO_ROOT / "libs/cua-driver/scripts/uninstall.sh"
 SCRIPTS = REPO_ROOT / "libs/cua-driver/scripts"
 
 

@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import signal
 import subprocess
 import sys
@@ -33,6 +34,46 @@ HELPER_TIMEOUTS = ShutdownTimeouts(
 
 
 class RunnerConfigurationTests(unittest.TestCase):
+    def test_mcp_server_name_matches_declared_product_and_refuses_other_names(self):
+        product = json.loads(
+            (RUNNER_PATH.parents[3] / "libs/cua-driver/installer-distribution.json")
+            .read_text(encoding="utf-8")
+        )["product"]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixtures = {
+                "config-before.json": {"platform": "linux", "max_image_dimension": 1280},
+                "config-after.json": {"max_image_dimension": 640},
+                "apps.json": {"apps": []},
+                "sessions-before.json": {"count": 0, "sessions": []},
+                "sessions-after.json": {"count": 0, "sessions": []},
+            }
+            for name, payload in fixtures.items():
+                (root / name).write_text(json.dumps(payload), encoding="utf-8")
+            responses = [
+                {"id": 1, "result": {"serverInfo": {"name": product}}},
+                {"id": 2, "result": {"tools": [{"name": name} for name in (
+                    "get_config", "set_config", "list_apps", "list_windows",
+                    "get_window_state", "click", "type_text", "press_key",
+                )]}},
+                {"id": 3, "result": {"structuredContent": {"max_image_dimension": 640}}},
+                {"id": 4, "error": {
+                    "code": -32601, "message": "Unknown method: compatibility/unknown",
+                }},
+            ]
+            output = root / "mcp-responses.jsonl"
+            output.write_text("\n".join(map(json.dumps, responses)), encoding="utf-8")
+            RUNNER.validate_results(root)
+            for incorrect_name in ("unrelated-server", product + "-unexpected"):
+                with self.subTest(incorrect_name=incorrect_name):
+                    responses[0]["result"]["serverInfo"]["name"] = incorrect_name
+                    output.write_text("\n".join(map(json.dumps, responses)), encoding="utf-8")
+                    with self.assertRaisesRegex(
+                        RUNNER.RunnerFailure,
+                        "^validation failed: unexpected MCP serverInfo:",
+                    ):
+                        RUNNER.validate_results(root)
+
     def test_runtime_environment_disables_glibc_thread_stack_cache(self):
         env = {"GLIBC_TUNABLES": "glibc.malloc.trim_threshold=0"}
 

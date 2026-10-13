@@ -3,20 +3,34 @@ name: "Docs: Driver first-run Linux smoke"
 on:
   pull_request:
     paths:
-      - docs/content/docs/tutorials/drive-your-first-app.mdx
-      - docs/content/docs/how-to-guides/driver/install.mdx
-      - docs/content/docs/how-to-guides/driver/update.mdx
+      - docs/content/docs/cua-driver/quickstart.mdx
+      - docs/content/docs/cua-driver/guides/operate.mdx
       - docs/scripts/verify-driver-first-run-linux.py
       - docs/scripts/tests/test_driver_first_run_smoke.py
       - .github/workflows/docs-driver-first-run-smoke.yml
-      - libs/cua-driver/scripts/install.sh
-      - libs/cua-driver/scripts/_install-rust.sh
-      - libs/cua-driver/scripts/_install-common.sh
+      - libs/cua-driver/scripts/**
+      - libs/cua-driver/installer-distribution.json
+      - libs/cua-driver/rust/VERSION
+      - libs/cua-driver/rust/Cargo.toml
+      - .github/scripts/validate_release_versions.py
+      - .github/scripts/sync_driver_release_docs.py
+      - .github/release-state/cua-driver-rs-*
+      - .release-please-manifest.json
+      - scripts/docs-generators/config.json
   workflow_dispatch:
 
 # Public PR code runs only on a disposable GitHub-hosted runner, without secrets.
 permissions:
   contents: read
+
+env:
+  # Cua programs and packages run here never send usage telemetry.
+  CUA_TELEMETRY: "0"
+  DO_NOT_TRACK: "1"
+
+concurrency:
+  group: docs-driver-first-run-smoke-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   first-run:

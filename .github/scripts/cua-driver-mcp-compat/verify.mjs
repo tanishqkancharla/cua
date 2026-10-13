@@ -14,6 +14,13 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const EXPECTED = JSON.parse(
   readFileSync(join(HERE, "expected-tools.json"), "utf8"),
 );
+// The historical portable fixture retains its original name; a fork's actual
+// wire identity must match the canonical source distribution product exactly.
+assert.equal(EXPECTED.serverName, "cua-driver");
+const EXPECTED_SERVER_NAME = JSON.parse(readFileSync(
+  resolve(HERE, "../../../libs/cua-driver/installer-distribution.json"), "utf8",
+)).product;
+assert(typeof EXPECTED_SERVER_NAME === "string" && EXPECTED_SERVER_NAME.trim());
 const DRIVER = process.env.CUA_DRIVER_BINARY
   ? resolve(process.env.CUA_DRIVER_BINARY)
   : null;
@@ -37,8 +44,14 @@ const PROBE_ENV = {
   DISABLE_AUTOUPDATER: "1",
   NO_COLOR: "1",
 };
-const BIN_DIR = join(HERE, "node_modules", ".bin");
-const CODEX = join(BIN_DIR, process.platform === "win32" ? "codex.cmd" : "codex");
+const CODEX_SCRIPT = join(
+  HERE,
+  "node_modules",
+  "@openai",
+  "codex",
+  "bin",
+  "codex.js",
+);
 
 function claudeBinary() {
   const platform = process.platform === "darwin" ? "darwin" : process.platform;
@@ -201,7 +214,7 @@ async function officialSdkProbe() {
   );
   try {
     await client.connect(transport);
-    assert.equal(client.getServerVersion()?.name, EXPECTED.serverName);
+    assert.equal(client.getServerVersion()?.name, EXPECTED_SERVER_NAME);
     assert.equal(client.getServerVersion()?.version, EXPECTED_VERSION);
     const result = await client.listTools();
     assertExactTools("official TypeScript MCP SDK", result.tools);
@@ -243,7 +256,7 @@ async function claudeCodeProbe() {
   assert.match(debug, /"hasTools":true/);
   assert.match(
     debug,
-    new RegExp(`"name":"${EXPECTED.serverName}","version":"${EXPECTED_VERSION.replaceAll(".", "\\.")}"`),
+    new RegExp(`"name":"${EXPECTED_SERVER_NAME}","version":"${EXPECTED_VERSION.replaceAll(".", "\\.")}"`),
   );
   console.log("Claude Code 2.1.224: connected and accepted the complete tool schema set");
 }
@@ -251,14 +264,15 @@ async function claudeCodeProbe() {
 async function codexProbe() {
   const codexHome = await mkdtemp(join(tmpdir(), "cua-codex-mcp-"));
   const env = { ...PROBE_ENV, CODEX_HOME: codexHome };
-  const version = run(CODEX, ["--version"], { env });
+  const version = run(process.execPath, [CODEX_SCRIPT, "--version"], { env });
   assert.match(version.stdout, /0\.146\.1/);
 
   const commandConfig = `mcp_servers.cua_driver.command=${JSON.stringify(DRIVER)}`;
   const argsConfig = `mcp_servers.cua_driver.args=${JSON.stringify(DRIVER_ARGS)}`;
   const child = spawn(
-    CODEX,
+    process.execPath,
     [
+      CODEX_SCRIPT,
       "app-server",
       "--listen",
       "stdio://",
@@ -322,7 +336,7 @@ async function codexProbe() {
     assert(!message.error, `Codex MCP discovery failed: ${JSON.stringify(message.error)}`);
     const server = message.result?.data?.find((item) => item.name === "cua_driver");
     assert(server, "Codex did not discover the configured cua_driver MCP server");
-    assert.equal(server.serverInfo?.name, EXPECTED.serverName);
+    assert.equal(server.serverInfo?.name, EXPECTED_SERVER_NAME);
     assert.equal(server.serverInfo?.version, EXPECTED_VERSION);
     const tools = Object.values(server.tools ?? {});
     assertExactTools("Codex", tools);

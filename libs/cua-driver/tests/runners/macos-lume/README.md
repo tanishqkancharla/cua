@@ -4,6 +4,10 @@ This is the maintainer-owned macOS GUI acceptance gate for `cua-driver`. It is
 not a GitHub Actions job. Run it on an Apple Silicon Mac with Lume, from a
 disposable clone of a stopped SIP-disabled golden image.
 
+Do not install or register a GitHub Actions runner inside the guest. GitHub may
+record the result afterward, but the canonical harness itself runs directly from
+Terminal in the logged-in VM session.
+
 The golden image supplies the logged-in Aqua session, stable local signing
 identity, and existing Accessibility and Screen Recording grants. Every run
 installs the requested source commit before testing. The preflight rejects a
@@ -31,7 +35,7 @@ that exact commit.
 - Put no repository credentials, signing secrets, or maintainer private SSH
   keys in the guest. A host public key is sufficient for source sync.
 - For reusable private seeds, request the app-owned Accessibility and Screen
-  Recording grants through `CuaDriverLocal.app`. For disposable SIP-off workers
+  Recording grants through `OpenSkyDriver.app`. For disposable SIP-off workers
   that are not cloned from a granted seed, use the checked-in `seed-tcc.sh`
   helper below. Do not hand-edit `TCC.db`.
 - Require a certificate-backed local signature. An ad-hoc signature invalidates
@@ -40,7 +44,7 @@ that exact commit.
 
 SIP-off alone does not grant Accessibility, Screen Recording, Automation, or
 direct-capture consent. The reusable private seed still carries grants approved
-through the normal `CuaDriverLocal.app` prompt flow. The helper below is only for
+through the normal `OpenSkyDriver.app` prompt flow. The helper below is only for
 disposable SIP-off workers that need the same app-owned Accessibility and Screen
 Recording grants without preserving a granted seed. The SIP-on check below proves
 the normal user-facing permission flow still works with platform protection.
@@ -109,7 +113,7 @@ printf '%s  %s\n' "$HOMEBREW_INSTALL_SHA256" "$HOMEBREW_INSTALLER" \
 /bin/bash "$HOMEBREW_INSTALLER"
 
 eval "$(/opt/homebrew/bin/brew shellenv)"
-brew install node ffmpeg jq rust
+brew install node ffmpeg jq rust python-tk
 
 printf '\n%s\n' 'eval "$(/opt/homebrew/bin/brew shellenv)"' \
   >> "$HOME/.zprofile"
@@ -129,7 +133,13 @@ npm --version
 ffmpeg -version | head -1
 ffprobe -version | head -1
 jq --version
+python3 -c 'import tkinter; print(tkinter.Tcl().eval("info patchlevel"))'
 ```
+
+`python3` must resolve to Homebrew's Python with Tk 8.6 or later. Apple's
+Command Line Tools Python ships Tk 8.5.9, which renders the Tk canvas fixture
+too poorly for its OCR row to read the labels. The runner refuses an older or
+missing Tk instead of skipping the Tk rows.
 
 Keep autologin, sleep prevention, and screen-lock prevention enabled. Add only
 the maintainer host's public SSH key to `~/.ssh/authorized_keys`; never copy a
@@ -161,16 +171,23 @@ the VM account so maintainers have only one local credential to enter:
 SIGNING_KEYCHAIN="$HOME/Library/Keychains/cua-driver-signing.keychain-db"
 security create-keychain "$SIGNING_KEYCHAIN"
 security set-keychain-settings "$SIGNING_KEYCHAIN"
-security list-keychains -d user -s "$SIGNING_KEYCHAIN"
+security list-keychains -d user -s "$SIGNING_KEYCHAIN" \
+  "$HOME/Library/Keychains/login.keychain-db"
 security unlock-keychain "$SIGNING_KEYCHAIN"
 export CUA_DRIVER_LOCAL_SIGNING_KEYCHAIN="$SIGNING_KEYCHAIN"
 ```
+
+Keep the login Keychain in the search list. Computer History adds its key to
+the default login Keychain and reads it back through the search list, so a list
+with only the signing keychain fails the history gate with
+`history_key_unavailable`. The acceptance runner refuses such a list before it
+builds.
 
 The first strict local install creates and imports the self-signed identity,
 then stops without replacing the app if the new certificate is not usable yet.
 Run it once, then open Keychain Access in the VM display, select the
 `cua-driver-signing` keychain, open
-`CuaDriver Local Signing (cua-driver-rs)`, and set Trust to Always Trust. Back
+`OpenSky Driver Signing`, and set Trust to Always Trust. Back
 in Terminal, give Apple tooling access to the private key without storing the
 keychain password in the image or repository:
 
@@ -193,7 +210,7 @@ identity` message before granting permissions through the app-owned flow:
 ```bash
 bash libs/cua-driver/scripts/install-local.sh \
   --release --autostart --require-stable-signing
-~/.local/bin/cua-driver-local permissions grant
+~/.local/bin/opensky-driver permissions grant
 ```
 
 Record the certificate hash after the successful install and keep that identity
@@ -201,8 +218,8 @@ for the life of the seed:
 
 ```bash
 security find-certificate \
-  -c 'CuaDriver Local Signing (cua-driver-rs)' -Z "$SIGNING_KEYCHAIN"
-codesign -d -r- /Applications/CuaDriverLocal.app 2>&1 \
+  -c 'OpenSky Driver Signing' -Z "$SIGNING_KEYCHAIN"
+codesign -d -r- /Applications/OpenSkyDriver.app 2>&1 \
   | grep 'certificate leaf'
 ```
 
@@ -220,15 +237,15 @@ osascript -e \
 
 # The installed app owns driver-side app enumeration. This uses NSWorkspace and
 # must not require Automation access to System Events.
-~/.local/bin/cua-driver-local list_apps '{}'
+~/.local/bin/opensky-driver list_apps '{}'
 
 # The app-owned grant flow probes a desktop capture and triggers Tahoe's
 # direct-capture/private-window prompt.
-~/.local/bin/cua-driver-local permissions grant
+~/.local/bin/opensky-driver permissions grant
 ```
 
-Choose Allow for `Terminal` -> `System Events` and on the CuaDriverLocal
-direct-capture prompt. CuaDriverLocal app enumeration must not ask for System
+Choose Allow for `Terminal` -> `System Events` and on the OpenSkyDriver
+direct-capture prompt. OpenSkyDriver app enumeration must not ask for System
 Events. Target-specific Automation prompts may still appear later when a user
 explicitly requests an Apple Events-backed browser or app operation; do not
 pre-grant those in the seed. These are normal macOS consent flows; do not edit
@@ -240,8 +257,8 @@ restart the app-owned daemon once before checking status so the live process
 observes the new grant:
 
 ```bash
-~/.local/bin/cua-driver-local stop
-open -a CuaDriverLocal
+~/.local/bin/opensky-driver stop
+open -a OpenSkyDriver
 ```
 
 Then verify the daemon's own identity and the read-only status contract before
@@ -250,24 +267,24 @@ LaunchServices-hosted grant flow. The first command must not raise a dialog;
 the second is intentionally prompt-capable and must be run by the human:
 
 ```bash
-~/.local/bin/cua-driver-local permissions status --json | jq -e '
+~/.local/bin/opensky-driver permissions status --json | jq -e '
   .accessibility == true
   and .screen_recording == true
   and .screen_recording_capturable == null
   and .direct_capture_status == "not_checked"
   and .source.attribution == "driver-daemon"
 '
-~/.local/bin/cua-driver-local permissions grant
-~/.local/bin/cua-driver-local permissions status --json | jq -e '
+~/.local/bin/opensky-driver permissions grant
+~/.local/bin/opensky-driver permissions status --json | jq -e '
   .accessibility == true
   and .screen_recording == true
   and .screen_recording_capturable == null
   and .direct_capture_status == "not_checked"
   and .direct_capture_verification.source == "permissions_grant"
   and (.direct_capture_verification.verified_at | endswith("Z"))
-  and .direct_capture_verification.bundle_id == "com.trycua.driver.local"
+  and .direct_capture_verification.bundle_id == "com.opensky.driver"
 '
-codesign -d -r- /Applications/CuaDriverLocal.app 2>&1 | grep 'certificate leaf'
+codesign -d -r- /Applications/OpenSkyDriver.app 2>&1 | grep 'certificate leaf'
 csrutil status
 ```
 
@@ -275,10 +292,10 @@ All five commands must succeed, and `csrutil status` must report disabled.
 
 ### Seed app-owned grants in disposable SIP-off workers
 
-The public [Run Cua Driver in a macOS Lume VM](https://cua.ai/docs/how-to-guides/driver/run-in-macos-lume-vm)
+The public [Run Cua Driver in a macOS Lume VM](https://cua.ai/docs/cua-driver/guides/vms-and-remote)
 guide grants macOS consent through the VM display. Keep using that prompt flow
 for reusable private seeds. For automated disposable workers that are not cloned
-from a granted seed, run the host helper after `CuaDriverLocal.app` is installed
+from a granted seed, run the host helper after `OpenSkyDriver.app` is installed
 in each running worker with a certificate-backed identity:
 
 ```bash
@@ -297,16 +314,25 @@ Use the default `lume` SSH password, set `LUME_SSH_PASSWORD`, or pass
 empty when the VM accepts host SSH keys.
 The guest helper refuses to write unless `sysctl -n hw.model` reports a
 `VirtualMac*` VM and `csrutil status` reports disabled SIP. It derives the
-permission identity from `/Applications/CuaDriverLocal.app`, writes only the
+permission identity from `/Applications/OpenSkyDriver.app`, writes only the
 Accessibility and Screen Recording entries for that app, restarts `tccd`, and
 verifies both entries.
+It accepts a designated requirement that pins a certificate leaf or root hash
+(local stable signing) or the exact Apple-anchored Developer ID requirement of a
+notarized release (`anchor apple generic` with a 10-character team ID). It
+rejects ad hoc `cdhash` requirements unless `--allow-adhoc` is passed. To seed
+the released app, pass `--app /Applications/CuaDriver.app --expected-client
+com.trycua.driver`. The host wrapper parses `lume get` with `jq`.
+Database rows or a successful helper exit alone do not certify the desktop:
+require both grants in `permissions status --json`, a fresh screenshot, and a
+reversible input action through the guest Driver before the matrix.
 
-After seeding, restart `CuaDriverLocal.app` before checking permission status if
+After seeding, restart `OpenSkyDriver.app` before checking permission status if
 `install-local --autostart` or an earlier probe may have started the daemon:
 
 ```bash
-~/.local/bin/cua-driver-local stop
-open -a CuaDriverLocal
+~/.local/bin/opensky-driver stop
+open -a OpenSkyDriver
 ```
 
 If the VM sudo password is not the default `lume`, pass it without putting it
@@ -341,9 +367,9 @@ Lume version, CLT version, Rust version, Node version, and signing-certificate
 hash in the maintainer log. Also record that the following consent paths were
 granted and then rerun without prompts:
 
-- `CuaDriverLocal.app`: Accessibility and Screen Recording
+- `OpenSkyDriver.app`: Accessibility and Screen Recording
 - Terminal controlling System Events
-- CuaDriverLocal direct screen capture without the system picker. macOS labels
+- OpenSkyDriver direct screen capture without the system picker. macOS labels
   this combined consent as screen and system-audio access even though Cua
   Driver's current ScreenCaptureKit recorder does not enable audio capture.
 
@@ -383,18 +409,33 @@ cd ~/cua
 libs/cua-driver/tests/runners/macos-lume/run-all.sh
 ```
 
-When Chrome or Edge is installed in the disposable worker, include the optional
-standalone browser-tool matrix in the same exact-source run:
+Every complete run also executes the standalone installed-browser matrix after
+the repo-local harness matrix, so the worker must have Chrome and Edge
+installed.
+
+After a successful run, `artifacts/cua-driver/macos/direct-result.json` records
+the exact source SHA and run ID. Preserve the private artifacts and register
+their digest without uploading them publicly:
 
 ```bash
-cd ~/cua
-libs/cua-driver/tests/runners/macos-lume/run-all.sh --standalone-browser
+SOURCE_SHA="$(jq -r .source_sha artifacts/cua-driver/macos/direct-result.json)"
+tar -czf "/tmp/cua-macos-lume-${SOURCE_SHA}.tgz" \
+  artifacts/cua-driver/macos artifacts/cua-driver/macos-standalone-browser
+shasum -a 256 "/tmp/cua-macos-lume-${SOURCE_SHA}.tgz"
+jq -r .run_id artifacts/cua-driver/macos/direct-result.json
+base64 < artifacts/cua-driver/macos/direct-result.json | tr -d '\n'
 ```
 
-This adds the declared adversarial installed-browser rows and writes their
-separate typed results and MP4 evidence under
+Dispatch `.github/workflows/e2e-rust-macos.yml` in `lume` mode at the same
+source SHA, passing the run ID printed by the harness and the lowercase digest.
+Also pass the one-line base64 value of `direct-result.json`. The protected
+GitHub-hosted job validates and records the result; it does not rerun the guest
+or require a self-hosted runner.
+
+The standalone browser matrix runs the declared adversarial installed-browser
+rows and writes their separate typed results and MP4 evidence under
 `artifacts/cua-driver/macos-standalone-browser/`. Missing external browsers are
-a hard failure for this option; they never shrink the reported matrix. On a
+a hard failure; they never shrink the reported matrix. On a
 repeat run, the entrypoint preserves the previous standalone-browser evidence
 in a temporary archive before creating a fresh artifact directory. The
 entrypoint temporarily restarts the disposable worker daemon in unrestricted
@@ -404,7 +445,7 @@ standard autostart daemon even when a browser row fails.
 On macOS Tahoe, first-use Chrome can present a native local-network discovery
 prompt over `chrome://inspect/#remote-debugging`. The standalone-browser lane
 uses loopback DevTools and does not need LAN discovery. Before freezing a seed
-that will run this optional lane, complete Chrome's welcome screen without
+that will run this lane, complete Chrome's welcome screen without
 signing in and leave the default-browser and usage-reporting choices disabled.
 Launch Chrome on that exact page in the VM display, choose **Don't Allow**, quit
 Chrome, then relaunch the page and require that the prompt does not return. Do
@@ -521,7 +562,7 @@ Pull evidence before deleting the worker, even after a failed run:
 REMOTE_ARTIFACT_DIR=artifacts/cua-driver/macos \
   libs/cua-driver/scripts/sync-vm-worktree.sh pull-artifacts \
   "lume@${VM_IP}" '~/cua'
-# Also retrieve this directory when --standalone-browser was used.
+# Standalone browser evidence.
 REMOTE_ARTIFACT_DIR=artifacts/cua-driver/macos-standalone-browser \
   libs/cua-driver/scripts/sync-vm-worktree.sh pull-artifacts \
   "lume@${VM_IP}" '~/cua'
@@ -573,9 +614,9 @@ golden image's inherited grants.
 4. In the VM display, reset only the disposable worker's grants:
 
    ```bash
-   tccutil reset Accessibility com.trycua.driver.local
-   tccutil reset ScreenCapture com.trycua.driver.local
-   ~/.local/bin/cua-driver-local permissions grant
+   tccutil reset Accessibility com.opensky.driver
+   tccutil reset ScreenCapture com.opensky.driver
+   ~/.local/bin/opensky-driver permissions grant
    ```
 
 5. Complete the prompts and require the same four-field

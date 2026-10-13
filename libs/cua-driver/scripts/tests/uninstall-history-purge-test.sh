@@ -2,8 +2,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-UNINSTALL="$SCRIPT_DIR/../uninstall.sh"
-FIXTURE="$(mktemp -d)"
+UNINSTALL="${1:-$SCRIPT_DIR/../uninstall.sh}"
+FIXTURE="$(mktemp -d "${TMPDIR:-/tmp}/cua-uninstall.XXXXXX")"
+trap 'rm -rf -- "$FIXTURE"' EXIT
 APP="$FIXTURE/CuaDriver.app"
 HELPER="$APP/Contents/MacOS/cua-driver"
 STATE="$FIXTURE/computer-history"
@@ -25,6 +26,16 @@ exit 0
 SH
 chmod +x "$FIXTURE/codesign"
 
+# System Bash can exit successfully when `source` cannot find its file.
+# Refuse before sourcing, and never execute a public source-product wrapper.
+if [[ ! -f "$UNINSTALL" || ! -r "$UNINSTALL" ]]; then
+    printf 'uninstall fixture source unavailable: %s\n' "$UNINSTALL" >&2
+    exit 1
+fi
+if ! grep -Fq 'CUA_DRIVER_UNINSTALL_TEST_SOURCE_ONLY' "$UNINSTALL"; then
+    printf 'uninstall fixture requires the source-only release seam: %s\n' "$UNINSTALL" >&2
+    exit 2
+fi
 CUA_DRIVER_UNINSTALL_TEST_SOURCE_ONLY=1 source "$UNINSTALL"
 export UNINSTALL_FIXTURE_LOG="$LOG"
 if reject_root_invocation 0 2> "$FIXTURE/root-error.log"; then
@@ -58,10 +69,10 @@ fi
 grep -Fq history_purge_incomplete "$FIXTURE/linux-error.log"
 
 purge_line="$(grep -n 'purge_macos_history \\' "$UNINSTALL" | tail -1 | cut -d: -f1)"
-remove_line="$(grep -n 'rm -rf "\$APP_BUNDLE"' "$UNINSTALL" | head -1 | cut -d: -f1)"
+remove_line="$(grep -n 'rm -rf -- "\$PAYLOAD"' "$UNINSTALL" | head -1 | cut -d: -f1)"
 [[ "$purge_line" -lt "$remove_line" ]]
 linux_purge_line="$(grep -n 'purge_linux_history "\$HISTORY_PURGE_HELPER"' "$UNINSTALL" | tail -1 | cut -d: -f1)"
-package_remove_line="$(grep -n 'rm -rf "\$HOME_DIR"' "$UNINSTALL" | head -1 | cut -d: -f1)"
+package_remove_line="$(grep -n 'rm -rf -- "\$HOME_PAYLOAD"' "$UNINSTALL" | head -1 | cut -d: -f1)"
 [[ "$linux_purge_line" -lt "$package_remove_line" ]]
 grep -Fq 'preserved encrypted Computer History' "$UNINSTALL"
 

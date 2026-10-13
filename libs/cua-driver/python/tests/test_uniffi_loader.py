@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
 import importlib.util
 import json
 import os
@@ -23,8 +24,98 @@ def _library_name() -> str:
 LIBRARY = Path(__file__).parents[1] / "src" / "cua_driver" / _library_name()
 
 
+@contextmanager
+def socket_fixture(listener, serve):
+    """Own the fixture thread even when a client assertion or negotiation fails."""
+    stop = threading.Event()
+    listener.settimeout(0.1)
+    server = threading.Thread(target=serve, args=(stop,))
+    server.start()
+    try:
+        yield server
+    finally:
+        stop.set()
+        listener.close()
+        server.join(timeout=3)
+        if server.is_alive():
+            raise RuntimeError("socket fixture did not terminate")
+
+
+@unittest.skipIf(os.name == "nt", "Unix socket fixture")
+class FixtureLifecycleTests(unittest.TestCase):
+    def test_failed_client_does_not_leave_accept_thread_running(self):
+        with tempfile.TemporaryDirectory() as directory:
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            listener.bind(str(Path(directory) / "failure.sock"))
+            listener.listen(1)
+            def serve(stop):
+                while not stop.is_set():
+                    try:
+                        connection, _ = listener.accept()
+                    except socket.timeout:
+                        continue
+                    except OSError:
+                        if stop.is_set():
+                            return
+                        raise
+                    connection.close()
+            with self.assertRaisesRegex(ValueError, "client refused fixture"):
+                with socket_fixture(listener, serve) as server:
+                    raise ValueError("client refused fixture")
+            self.assertFalse(server.is_alive())
+            self.assertEqual(listener.fileno(), -1)
+
+
 @unittest.skipUnless(LIBRARY.exists(), "host-native UniFFI library is not staged")
 class GeneratedOptionsTests(unittest.TestCase):
+    def test_public_constructors_keep_released_signatures(self) -> None:
+        import inspect
+
+        from cua_driver import CuaDriver
+
+        # Released callers pass these by keyword; the helpers behind them are private.
+        self.assertEqual(str(inspect.signature(CuaDriver.connect)), "(socket_path)")
+        self.assertEqual(str(inspect.signature(CuaDriver.create)), "(options=None)")
+
+    def test_action_target_is_public_and_uses_the_generated_contract(self) -> None:
+        import cua_driver
+        from cua_driver import (
+            ActionTarget, ClickButton, ClickInput, ClickPosition, InputDeliveryMode,
+        )
+        from cua_driver._native_contract import ActionTarget as GeneratedActionTarget
+
+        self.assertIn("ActionTarget", cua_driver.__all__)
+        self.assertIs(ActionTarget, GeneratedActionTarget)
+        target = ActionTarget.DESKTOP(display_id="primary")
+        click = ClickInput(
+            position=ClickPosition.COORDINATES(x=10.0, y=20.0), target=target,
+            delivery_mode=InputDeliveryMode.FOREGROUND, session=None,
+            button=ClickButton.LEFT, count=1,
+        )
+        self.assertIs(click.target, target)
+        captured = ClickInput(
+            position=ClickPosition.CAPTURED_COORDINATES(
+                x=10.0, y=20.0, capture_id="capture-1"
+            ),
+            target=target, delivery_mode=InputDeliveryMode.FOREGROUND,
+            session=None, button=ClickButton.LEFT, count=1,
+        )
+        self.assertEqual(captured.position.capture_id, "capture-1")
+        self.assertTrue(ActionTarget.WINDOW(pid=1, window_id=2).is_WINDOW())
+        with self.assertRaises(TypeError):
+            ClickInput(x=10.0, y=20.0)
+        for name in (
+            "AppInfo", "ClickPosition", "ElementFrame", "GetWindowStateInput",
+            "InputDeliveryMode", "ListAppsInput", "ListAppsOutput", "ListWindowsInput",
+            "ListWindowsOutput", "SnapshotImage", "WindowBounds", "WindowElement",
+            "WindowInfo", "WindowStateOutput",
+            "ParseVisualRegionsInput", "ParseVisualRegionsOptions",
+            "ParseVisualRegionsOutput", "VisualCaptureProvenance",
+            "VisualParseError", "VisualParseErrorCode", "VisualRegion",
+        ):
+            self.assertIn(name, cua_driver.__all__)
+            self.assertIsNotNone(getattr(cua_driver, name))
+
     def test_embedded_overlay_option_defaults_false_and_accepts_true(self) -> None:
         from cua_driver import EmbeddedDriverHostOptions
 
@@ -83,7 +174,7 @@ while True:
             if request["method"] == "metadata":
                 result = {
                     "driver_version": "0.10.0",
-                    "contract_version": "0.7.0",
+                    "contract_version": "0.8.0-opensky.1",
                     "tools_list_schema_version": "1",
                     "capability_version": "1",
                     "mcp_protocol_version": "2025-06-18",
@@ -110,17 +201,19 @@ except FileNotFoundError:
                 )
                 connection = await host.start()
                 driver = CuaDriver.connect(connection.socket_path)
-                metadata = await driver.metadata()
-                self.assertTrue(metadata.embedded)
-                self.assertEqual(metadata.pid, connection.pid)
-                self.assertEqual(
-                    metadata.host_bundle_id, "com.example.python-embedded"
-                )
-                self.assertEqual(
-                    json.loads(await driver.list_tools_json()),
-                    {"tools": [{"name": "embedded_fixture"}]},
-                )
-                await host.stop()
+                try:
+                    metadata = await driver.metadata()
+                    self.assertTrue(metadata.embedded)
+                    self.assertEqual(metadata.pid, connection.pid)
+                    self.assertEqual(
+                        metadata.host_bundle_id, "com.example.python-embedded"
+                    )
+                    self.assertEqual(
+                        json.loads(await driver.list_tools_json()),
+                        {"tools": [{"name": "embedded_fixture"}]},
+                    )
+                finally:
+                    await host.stop()
                 return connection.socket_path
 
             socket_path = asyncio.run(scenario())
@@ -131,13 +224,17 @@ except FileNotFoundError:
         from cua_driver import (
             ActionEffect,
             ActionRoute,
+            ActionTarget,
+            ClickPosition,
+            InputDeliveryMode,
             ClickButton,
             ClickInput,
             CuaDriver,
-            DesktopScope,
             EffectiveScope,
             StatePredicate,
             StartSessionOutput,
+            ParseVisualRegionsInput,
+            ParseVisualRegionsOptions,
             VerificationStatus,
             VerifyStateInput,
             WindowPredicate,
@@ -158,16 +255,24 @@ except FileNotFoundError:
             listener.listen(4)
             captured: list[dict[str, object]] = []
 
-            def serve() -> None:
-                while len(captured) < 2:
-                    connection, _ = listener.accept()
+            def serve(stop) -> None:
+                while not stop.is_set() and len(captured) < 3:
+                    try:
+                        connection, _ = listener.accept()
+                    except socket.timeout:
+                        continue
+                    except OSError:
+                        if stop.is_set():
+                            return
+                        raise
                     with connection:
+                        connection.settimeout(2)
                         line = connection.makefile("r", encoding="utf-8").readline()
                         request = json.loads(line)
                         if request["method"] == "metadata":
                             result = {
                                 "driver_version": "0.12.6",
-                                "contract_version": "0.7.0",
+                                "contract_version": "0.8.0-opensky.1",
                                 "tools_list_schema_version": "1",
                                 "capability_version": "1",
                                 "mcp_protocol_version": "2025-06-18",
@@ -183,6 +288,31 @@ except FileNotFoundError:
                                     "elapsed_ms": 12,
                                     "samples": 2,
                                     "predicates": [],
+                                }
+                            elif request["name"] == "parse_visual_regions":
+                                structured = {
+                                    "schema": "cua.visual_regions_v1",
+                                    "capture": {
+                                        "capture_id": "capture-123",
+                                        "source": {"kind": "primary_desktop", "display_id": "primary"},
+                                        "screenshot": {
+                                            "reference": "sha256:abc",
+                                            "width": 2,
+                                            "height": 2,
+                                            "mime_type": "image/png",
+                                            "sha256": "abc",
+                                        },
+                                        "action_coordinate_space": {"kind": "identity"},
+                                    },
+                                    "parser": {
+                                        "extension_id": "cua-perception",
+                                        "extension_version": "1.0.0",
+                                        "model_id": "fixture",
+                                        "model_version": "1",
+                                        "runtime": "fixture",
+                                    },
+                                    "regions": [],
+                                    "timing": {"duration_ms": 1},
                                 }
                             else:
                                 structured = {
@@ -205,62 +335,69 @@ except FileNotFoundError:
                         response = {"ok": True, "result": result}
                         connection.sendall((json.dumps(response) + "\n").encode())
 
-            server = threading.Thread(target=serve)
-            server.start()
-            driver = CuaDriver.connect(socket_path)
-            expected_methods = {
-                "start_session",
-                "escalate_session",
-                "get_session",
-                "list_sessions",
-                "get_session_state",
-                "end_session",
-                "get_desktop_state",
-                "get_screen_size",
-                "get_cursor_position",
-                "move_cursor",
-                "click",
-                "drag",
-                "scroll",
-                "type_text",
-                "press_key",
-                "hotkey",
-                "verify_state",
-            }
-            self.assertTrue(all(hasattr(driver, name) for name in expected_methods))
-            verification_result = asyncio.run(
-                driver.verify_state(
-                    VerifyStateInput(
-                        pid=123,
-                        window_id=456,
-                        expect=[
-                            StatePredicate(
-                                window=WindowPredicate(exists=True, bounds=None),
-                                element=None,
-                            )
-                        ],
-                        session="python-run",
-                        timeout_ms=0,
-                        stable_samples=1,
-                        include_screenshot=True,
+            with socket_fixture(listener, serve):
+                driver = CuaDriver.connect(socket_path)
+                expected_methods = {
+                    "start_session",
+                    "escalate_session",
+                    "get_session",
+                    "list_sessions",
+                    "get_session_state",
+                    "end_session",
+                    "get_desktop_state",
+                    "get_screen_size",
+                    "get_cursor_position",
+                    "move_cursor",
+                    "click",
+                    "drag",
+                    "scroll",
+                    "type_text",
+                    "press_key",
+                    "hotkey",
+                    "verify_state",
+                    "parse_visual_regions",
+                }
+                self.assertTrue(all(hasattr(driver, name) for name in expected_methods))
+                verification_result = asyncio.run(
+                    driver.verify_state(
+                        VerifyStateInput(
+                            pid=123,
+                            window_id=456,
+                            expect=[
+                                StatePredicate(
+                                    window=WindowPredicate(exists=True, bounds=None),
+                                    element=None,
+                                )
+                            ],
+                            session="python-run",
+                            timeout_ms=0,
+                            stable_samples=1,
+                            include_screenshot=True,
+                        )
                     )
                 )
-            )
-            action_result = asyncio.run(
-                driver.click(
-                    ClickInput(
-                        x=12.0,
-                        y=34.0,
-                        target=None,
-                        scope=DesktopScope.DESKTOP,
-                        session="python-run",
-                        button=ClickButton.LEFT,
-                        count=1,
+                action_result = asyncio.run(
+                    driver.click(
+                        ClickInput(
+                            position=ClickPosition.COORDINATES(x=12.0, y=34.0),
+                            target=ActionTarget.DESKTOP(display_id="primary"),
+                            delivery_mode=InputDeliveryMode.FOREGROUND,
+                            session="python-run",
+                            button=ClickButton.LEFT,
+                            count=1,
+                        )
                     )
                 )
-            )
-            server.join(timeout=5)
-            listener.close()
+                visual_result = asyncio.run(
+                    driver.parse_visual_regions(
+                        ParseVisualRegionsInput(
+                            capture_id="capture-123",
+                            options=ParseVisualRegionsOptions(
+                                kinds=None, min_confidence=None, max_regions=None
+                            ),
+                        )
+                    )
+                )
 
         self.assertEqual(verification_result.text, "python ffi")
         self.assertEqual(verification_result.images[0].mime_type, "image/png")
@@ -268,10 +405,13 @@ except FileNotFoundError:
         self.assertEqual(
             verification_result.verification.status, VerificationStatus.SATISFIED
         )
-        self.assertIsNone(action_result.verification)
-        self.assertEqual(action_result.action.effect, ActionEffect.UNVERIFIABLE)
-        self.assertEqual(action_result.action.route, ActionRoute.GLOBAL_INPUT)
+        self.assertEqual(action_result.effect, ActionEffect.UNVERIFIABLE)
+        self.assertEqual(action_result.route, ActionRoute.GLOBAL_INPUT)
         self.assertFalse(hasattr(action_result, "verified"))
+        self.assertEqual(
+            json.loads(visual_result.structured_json)["schema"],
+            "cua.visual_regions_v1",
+        )
         self.assertEqual(captured[0]["name"], "verify_state")
         self.assertEqual(
             captured[0]["args"],
@@ -292,11 +432,17 @@ except FileNotFoundError:
             {
                 "x": 12.0,
                 "y": 34.0,
-                "scope": "desktop",
+                "target": {"kind": "desktop", "display_id": "primary"},
+                "delivery_mode": "foreground",
                 "session": "python-run",
                 "button": "left",
                 "count": 1,
             },
+        )
+        self.assertEqual(captured[2]["name"], "parse_visual_regions")
+        self.assertEqual(
+            captured[2]["args"],
+            {"capture_id": "capture-123", "options": {}},
         )
 
     def test_generated_python_sdk_can_own_the_runtime_in_process(self) -> None:

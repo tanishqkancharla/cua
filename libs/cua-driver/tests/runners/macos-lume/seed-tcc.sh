@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# Host-side helper: seed CuaDriverLocal.app Accessibility + Screen Recording
+# Host-side helper: seed OpenSkyDriver.app Accessibility + Screen Recording
 # in one or more running, SIP-disabled Lume macOS VMs.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GUEST_HELPER="${SCRIPT_DIR}/seed-tcc-guest.sh"
 REMOTE_HELPER="/tmp/cua-driver-seed-tcc-guest.sh"
-APP_PATH="/Applications/CuaDriverLocal.app"
+APP_PATH="/Applications/OpenSkyDriver.app"
 BINARY_PATH=""
-EXPECTED_CLIENT="com.trycua.driver.local"
+EXPECTED_CLIENT="com.opensky.driver"
 SSH_USER="${LUME_SSH_USER:-lume}"
 SSH_PASSWORD="${LUME_SSH_PASSWORD-${VM_PASSWORD:-lume}}"
 SSH_TIMEOUT="${CUA_TCC_LUME_SSH_TIMEOUT:-120}"
@@ -32,18 +32,18 @@ usage() {
   cat <<'USAGE'
 Usage: seed-tcc.sh [options] <vm-name> [<vm-name> ...]
 
-Seed macOS Accessibility and Screen Recording TCC rows for CuaDriverLocal.app
+Seed macOS Accessibility and Screen Recording TCC rows for OpenSkyDriver.app
 inside running, SSH-reachable, SIP-disabled Lume macOS VMs. This does not
 install the app. Run install-local first, then run this from the host.
 
 Options:
   --app PATH                 App bundle to grant inside the guest
-                             (default: /Applications/CuaDriverLocal.app)
+                             (default: /Applications/OpenSkyDriver.app)
   --binary PATH              Executable to derive the code requirement from.
                              Defaults to CFBundleExecutable inside --app.
                              Only valid when --app names an app bundle.
   --expected-client ID       Expected TCC client identifier
-                             (default: com.trycua.driver.local)
+                             (default: com.opensky.driver)
   --allow-adhoc              Allow cdhash-only ad-hoc signatures. The default
                              requires a certificate-backed local/release identity.
   --ssh-user USER            Lume SSH user (default: lume)
@@ -140,8 +140,8 @@ command -v scp >/dev/null 2>&1 || {
   echo "scp is not on PATH" >&2
   exit 2
 }
-command -v python3 >/dev/null 2>&1 || {
-  echo "python3 is not on PATH" >&2
+command -v jq >/dev/null 2>&1 || {
+  echo "jq is not on PATH" >&2
   exit 2
 }
 if [[ "${SSH_TIMEOUT}" != 0 && ! -x /usr/bin/perl ]]; then
@@ -171,24 +171,20 @@ resolve_lume_ip() {
     args+=(--storage "${STORAGE}")
   fi
   info="$(lume "${args[@]}")"
-  python3 -c '
-import json
-import sys
-
-name = sys.argv[1]
-payload = json.load(sys.stdin)
-vm = payload[0] if isinstance(payload, list) and payload else payload
-status = vm.get("status")
-ip = vm.get("ipAddress")
-ssh_available = vm.get("sshAvailable")
-if status != "running" or not ip:
-    print(f"{name}: expected running VM with an IP, got status={status!r} ip={ip!r}", file=sys.stderr)
-    sys.exit(1)
-if ssh_available is False:
-    print(f"{name}: SSH is not available yet", file=sys.stderr)
-    sys.exit(1)
-print(ip)
-' "${vm}" <<< "${info}"
+  # jq (a documented host requirement) avoids host python3, which can be the
+  # Command Line Tools stub that opens an install prompt.
+  jq -r --arg name "${vm}" '
+    (if type == "array" then .[0] else . end) as $vm
+    | if ($vm | type) != "object" then
+        error("\($name): lume get returned no VM record")
+      elif $vm.status != "running" or (($vm.ipAddress // "") == "") then
+        error("\($name): expected running VM with an IP, got status=\($vm.status | tojson) ip=\($vm.ipAddress | tojson)")
+      elif $vm.sshAvailable == false then
+        error("\($name): SSH is not available yet")
+      else
+        $vm.ipAddress
+      end
+  ' <<< "${info}"
 }
 
 ssh_base_opts() {

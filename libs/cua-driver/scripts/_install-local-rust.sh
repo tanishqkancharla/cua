@@ -231,7 +231,12 @@ export CARGO_TARGET_DIR="$BUILD_TARGET_DIR"
 
 echo "${BOLD}Building cua-driver ($BUILD_CONFIG)...${NORMAL}"
 cd "$REPO_ROOT"
-if [ "$BUILD_CONFIG" = "release" ]; then
+if [ "$BUILD_CONFIG" = "release" ] && [ "$OS" = "Darwin" ]; then
+    # Rust stripping can misalign Mach-O compiler plugins on macOS 27.
+    # Keep host build artifacts loadable without changing driver optimization.
+    # https://github.com/rust-lang/rust/issues/157750
+    cargo --config 'profile.release.build-override.strip="none"' build --release -p cua-driver -p cursor-theme-cli
+elif [ "$BUILD_CONFIG" = "release" ]; then
     cargo build --release -p cua-driver -p cursor-theme-cli
 else
     cargo build -p cua-driver -p cursor-theme-cli
@@ -314,6 +319,11 @@ if [ -d "$SOURCE_SKILLS" ]; then
     echo "${GREEN}staged skill pack at $STAGED_SKILLS${NORMAL}"
 fi
 
+# The integer "version" of a GNOME helper metadata.json, or nothing.
+helper_metadata_version() {
+    sed -n 's/.*"version"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$1" 2>/dev/null | head -n 1 || true
+}
+
 # Keep an already-installed GNOME helper aligned with the source-built driver.
 # Installing the helper is still opt-in. Once present, however, leaving old
 # compositor artwork behind after install-local creates a misleading
@@ -327,10 +337,18 @@ if [ "$OS" = "Linux" ]; then
 
         INSTALLED_WAYLAND_HELPER="${XDG_DATA_HOME:-$HOME/.local/share}/gnome-shell/extensions/winrects@cua"
         if [ -d "$INSTALLED_WAYLAND_HELPER" ]; then
-            cp "$SOURCE_WAYLAND_HELPER/winrects@cua/metadata.json" \
-                "$SOURCE_WAYLAND_HELPER/winrects@cua/extension.js" \
-                "$INSTALLED_WAYLAND_HELPER/"
-            echo "${GREEN}updated installed GNOME helper; reload the GNOME session to activate it${NORMAL}"
+            # The helper's API is additive and shared with other apps that
+            # bundle it, so never replace a newer installed helper.
+            BUNDLED_HELPER_VERSION=$(helper_metadata_version "$SOURCE_WAYLAND_HELPER/winrects@cua/metadata.json")
+            INSTALLED_HELPER_VERSION=$(helper_metadata_version "$INSTALLED_WAYLAND_HELPER/metadata.json")
+            if [ "${INSTALLED_HELPER_VERSION:-0}" -gt "${BUNDLED_HELPER_VERSION:-0}" ]; then
+                echo "kept installed GNOME helper v$INSTALLED_HELPER_VERSION (newer than bundled v${BUNDLED_HELPER_VERSION:-?})"
+            else
+                cp "$SOURCE_WAYLAND_HELPER/winrects@cua/metadata.json" \
+                    "$SOURCE_WAYLAND_HELPER/winrects@cua/extension.js" \
+                    "$INSTALLED_WAYLAND_HELPER/"
+                echo "${GREEN}updated installed GNOME helper; reload the GNOME session to activate it${NORMAL}"
+            fi
         fi
     fi
 fi

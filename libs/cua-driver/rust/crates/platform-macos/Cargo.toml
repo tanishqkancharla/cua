@@ -2,6 +2,7 @@
 name = "platform-macos"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [dependencies]
 tokio = { workspace = true }
@@ -18,7 +19,6 @@ time = { workspace = true }
 # Insertion-ordered map for the keyed per-session cursor render collection.
 # IndexMap gives deterministic iteration order = stable cursor z-order frame
 # to frame (a plain HashMap would flicker overlapping cursors).
-indexmap = "2"
 cua-driver-core = { path = "../cua-driver-core" }
 cua-driver-contract = { path = "../cua-driver-contract" }
 cursor-overlay = { path = "../cursor-overlay" }
@@ -26,6 +26,7 @@ pip-preview = { path = "../pip-preview" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 clipboard-rs = "0.3.5"
+pulldown-cmark = { version = "0.13.4", default-features = false, features = ["html"] }
 # macOS system bindings
 core-foundation = "0.10"
 core-graphics = { version = "0.24", features = ["highsierra", "elcapitan"] }
@@ -38,18 +39,23 @@ objc2-foundation = { version = "0.2", features = [
     "NSArray", "NSString", "NSDictionary", "NSRunLoop",
     "NSThread", "NSObject", "NSValue",
     "NSAppleEventDescriptor", "NSNotification", "NSOperation",
+    "NSAttributedString", "NSData", "NSRange",
     "NSURL", "NSDate", "NSError",
+    # Cursor image bytes for system cursor shape classification.
+    "NSData",
     "block2", "libc",
 ] }
 objc2-app-kit = { version = "0.2", features = [
     "NSApplication", "NSWindow", "NSScreen", "NSColor",
-    "NSEvent", "NSRunningApplication", "NSWorkspace",
-    "NSView", "NSGraphicsContext", "NSResponder",
+    "NSEvent", "NSRunningApplication", "NSWorkspace", "NSPasteboard",
+    "NSView", "NSGraphicsContext", "NSResponder", "NSAttributedString", "NSPasteboardItem",
     # Picture-in-picture preview window (experimental) — NSImageView /
     # NSImage for the post-action screenshot, NSTextField for the
     # one-line action label, NSPanel/NSImageCell are reachable via
     # transitive deps.
     "NSImage", "NSImageView", "NSTextField", "NSControl", "NSCell",
+    # System cursor shape reporting (cursor_shape adapter).
+    "NSCursor",
     "block2", "libc",
 ] }
 
@@ -60,7 +66,7 @@ objc2-quartz-core = { version = "0.2", features = ["CALayer"] }
 # ffmpeg subprocess on macOS. `macos_15_0` enables the `SCRecordingOutput`
 # convenience that finalises an mp4 in-process, removing the per-binary
 # Screen Recording TCC prompt that subprocess capture would otherwise trip.
-screencapturekit = { version = "6", features = ["macos_15_0"] }
+screencapturekit = { version = "8.0.1", features = ["macos_15_0"] }
 security-framework = { version = "3.7.0", default-features = false, features = ["OSX_10_15"] }
 zeroize = { workspace = true }
 getrandom = { workspace = true }
@@ -74,3 +80,7 @@ futures-util = "0.3"
 
 [dev-dependencies]
 tempfile = "3"
+
+[[test]]
+name = "embedded_menu_restore"
+harness = false

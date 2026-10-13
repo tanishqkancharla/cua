@@ -5,7 +5,8 @@ use serde_json::Value;
 /// A tool-call result, normalized across the MCP and CLI transports.
 ///
 /// MCP returns `{"result":{"content":[{"text":…}],"structuredContent":{…},
-/// "isError":bool}}`; the CLI prints `structuredContent` (or the text) directly.
+/// "isError":bool}}`; the CLI prints a success DTO (or text) directly and
+/// preserves the full tool-error envelope on nonzero exit.
 /// Each transport builds a `ToolResponse` with the same accessors below, so test
 /// assertions never branch on transport.
 pub struct ToolResponse {
@@ -104,13 +105,25 @@ impl ToolResponse {
             .unwrap_or(false)
     }
 
-    /// Snapshot handle paired with numeric element indices. Element-targeted
-    /// calls in the 0.17 contract must send this value with `element_index`.
     pub fn snapshot_id(&self) -> &str {
         self.structured
             .get("snapshot_id")
             .and_then(Value::as_str)
             .expect("get_window_state response must carry snapshot_id")
+    }
+
+    pub fn element_token(&self, element_index: u64) -> &str {
+        self.structured["elements"]
+            .as_array()
+            .and_then(|elements| {
+                elements
+                    .iter()
+                    .find(|element| element["element_index"] == element_index)
+            })
+            .and_then(|element| element["element_token"].as_str())
+            .unwrap_or_else(|| {
+                panic!("get_window_state reported no element_token for {element_index}")
+            })
     }
 }
 
