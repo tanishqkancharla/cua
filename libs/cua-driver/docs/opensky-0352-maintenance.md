@@ -1,4 +1,4 @@
-# OpenSky Driver 0.35.2 integration candidate
+# OpenSky Driver 0.35.2 integration maintenance record
 
 Imports immutable upstream `ad694f82aaaa12e67257e4510837fc1f6cfc9484` with original commit ancestry and retains OpenSky branding, source-only installers, custom advertised Mac actions, exact window/document identity, native paste, viewport observations, input uncertainty and X11 Unicode delivery corrections.
 
@@ -49,3 +49,25 @@ The compositor-off candidate passes actual run38463756849: typed covered-window 
 
 
 The proper two-scenario matrix38471244617 passes noncomposited behavior but refuses the initial composited frame at the backing format/geometry guard. The next candidate proves compatible TrueColor RGB masks instead of demanding identical visual IDs, and decodes using the backing drawable's actual depth/visual. Depth24/32 layouts can share the same prepared SHM bytes; incompatible layouts fall through to the existing plain in-process reader. Crop, shape, ancestry and viewability checks remain mandatory. The private fixture records visual encodings before first capture. Actual composited acceptance remains pending, and the original green matrix with missing on artifacts is explicitly incomplete.
+
+
+## Final capture acceptance — 2026-10-13
+
+The earlier candidate/pending paragraphs above are historical evidence, not
+current issue status. Runtime source34f3d150ea7ef86ce171ed7bb3724ce218448e64
+passes the final bounded Bookworm/Node22/TigerVNC/shared-bus matrix38476505768.
+Compositor-off covered pixels refuse precisely while real AX and focus remain;
+compositor-on covered client pixels and text are preserved. Independent root
+foreground/dark text crops verify actual application content. Both owned
+occluders and14 supervisor processes exit without forced shutdown. Matching
+TrueColor encodings accept distinct client/frame visual IDs; geometry and
+unbacked exposure/shape guards remain. No darkness heuristic or activation.
+
+[SDK0.2.5](https://github.com/tanishqkancharla/opensky/releases/tag/v0.2.5)
+ships precise public partial screenshot errors at SDK
+02a9331c03227f17176ffba1650703bd157763e6.
+[Before/after application evidence](https://github.com/tanishqkancharla/opensky/blob/02a9331c03227f17176ffba1650703bd157763e6/docs/linux-covered-capture-53-fixed.json).
+SDK issue53 is closed. The later driver change here is documentation only;
+use the explicit34f3 runtime pin for reproduction. Mac installed runtime01d4
+remains unchanged with stable signing/TCC and26 relevant local contracts passed.
+Canonical Mac/Windows/Wayland acceptance and sandboxed Chrome remain separate.
