@@ -312,22 +312,34 @@ pub fn perform_ax_action(element_ptr: usize, action: &str) -> anyhow::Result<()>
     }
 }
 
+pub fn map_action(action: &str) -> anyhow::Result<&'static str> {
+    let key: String = action
+        .chars()
+        .filter(|c| *c != '_' && *c != '-' && !c.is_whitespace())
+        .collect::<String>()
+        .to_lowercase();
+    let key = key.strip_prefix("ax").unwrap_or(&key);
+    Ok(match key {
+        "press" | "click" => "AXPress",
+        "showmenu" | "rightclick" => "AXShowMenu",
+        "pick" => "AXPick",
+        "confirm" => "AXConfirm",
+        "cancel" => "AXCancel",
+        "open" => "AXOpen",
+        "showalternateui" => "AXShowAlternateUI",
+        "showdefaultui" => "AXShowDefaultUI",
+        _ => anyhow::bail!(
+            "unknown action \"{action}\": use press, show_menu, pick, confirm, cancel, open, \
+             show_alternate_ui or show_default_ui"
+        ),
+    })
+}
+
 /// Resolve published AX actions without substituting a press for an unknown action.
 /// Custom action names are copied verbatim from this live element's inventory.
 pub fn resolve_action(action: &str, advertised: &[String]) -> anyhow::Result<String> {
     let normalized = action.trim().to_lowercase();
-    let canonical = match normalized.as_str() {
-        "press" | "click" | "axpress" => Some("AXPress"),
-        "show_menu" | "show menu" | "right_click" | "rightclick" | "axshowmenu" => {
-            Some("AXShowMenu")
-        }
-        "pick" | "axpick" => Some("AXPick"),
-        "confirm" | "axconfirm" => Some("AXConfirm"),
-        "cancel" | "axcancel" => Some("AXCancel"),
-        "open" | "axopen" => Some("AXOpen"),
-        _ => None,
-    };
-    if let Some(name) = canonical {
+    if let Ok(name) = map_action(action) {
         return Ok(name.to_owned());
     }
     let mut matches: Vec<_> = advertised
@@ -501,6 +513,22 @@ pub fn set_ax_value(element_ptr: usize, value: &str) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn action_names_accept_the_tree_spelling_and_refuse_unknown_ones() {
+        use super::map_action;
+        assert_eq!(map_action("press").unwrap(), "AXPress");
+        assert_eq!(map_action("show menu").unwrap(), "AXShowMenu");
+        assert_eq!(
+            map_action("show_alternate_ui").unwrap(),
+            "AXShowAlternateUI"
+        );
+        assert_eq!(map_action("showalternateui").unwrap(), "AXShowAlternateUI");
+        assert_eq!(map_action("AXShowDefaultUI").unwrap(), "AXShowDefaultUI");
+        assert_eq!(map_action("right_click").unwrap(), "AXShowMenu");
+        // An unknown name must not fall back to pressing the control.
+        assert!(map_action("hover").is_err());
+    }
+
     use super::*;
 
     #[test]

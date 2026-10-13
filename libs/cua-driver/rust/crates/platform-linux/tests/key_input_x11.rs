@@ -115,6 +115,27 @@ fn assert_no_button_events(conn: &RustConnection, label: &str) -> Result<()> {
     Ok(())
 }
 
+fn spare_keycodes(conn: &RustConnection) -> Result<Vec<u8>> {
+    let setup = conn.setup();
+    let (min, max) = (setup.min_keycode, setup.max_keycode);
+    let mapping = conn.get_keyboard_mapping(min, max - min + 1)?.reply()?;
+    let per = usize::from(mapping.keysyms_per_keycode);
+    Ok(mapping
+        .keysyms
+        .chunks(per)
+        .enumerate()
+        .filter(|(_, keysyms)| keysyms.iter().all(|&keysym| keysym == 0))
+        .map(|(index, _)| min + index as u8)
+        .collect())
+}
+
+fn focused_input_window(conn: &RustConnection, screen: usize) -> Result<Window> {
+    let window = input_window(conn, conn.setup().roots[screen].root, 0, 0)?;
+    conn.set_input_focus(InputFocus::PARENT, window, x11rb::CURRENT_TIME)?;
+    assert_eq!(conn.get_input_focus()?.reply()?.focus, window);
+    Ok(window)
+}
+
 #[test]
 #[ignore = "requires an isolated X11 display"]
 fn background_click_delivers_complete_sequence_to_press_recipient_without_focus_change(

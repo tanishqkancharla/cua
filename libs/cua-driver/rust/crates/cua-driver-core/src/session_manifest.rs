@@ -1005,6 +1005,8 @@ pub fn load_manifest(path: &Path) -> Result<SessionManifest, String> {
                 "hotkey",
                 "set_value",
                 "native_paste",
+                "run_steps",
+                "run_script",
                 "mouse_button_down",
                 "mouse_button_up",
                 "mouse_drag",
@@ -1085,7 +1087,7 @@ fn validate_tools(section: &str, tools: Vec<String>) -> Result<HashSet<String>, 
 fn canonical_tool_name(tool: &str) -> &str {
     match tool {
         "type_text_chars" => "type_text",
-        other => other,
+        other => crate::tool::renamed_tool(other).unwrap_or(other),
     }
 }
 

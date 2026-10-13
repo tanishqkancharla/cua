@@ -32,6 +32,7 @@ mod perception_cli;
 mod private_worker;
 mod proxy;
 mod release_channel;
+mod release_source;
 mod responsibility;
 mod sdk_adapter;
 mod serve;
@@ -53,6 +54,7 @@ fn print_opensky_identity_if_requested() -> bool {
             "product": "opensky-driver",
             "protocolVersion": 1,
             "inputCompatibility": "token-only-v1",
+            "windowStateViewCompatibility": "compact-v1",
             "version": env!("CARGO_PKG_VERSION"),
             "source": option_env!("CUA_DRIVER_SOURCE_SHA"),
         })

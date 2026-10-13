@@ -17,8 +17,10 @@ pub enum DocumentIdentity {
 
 fn classify(error: AXError, observed: Option<String>) -> DocumentIdentity {
     match (error, observed) {
-        (kAXErrorNoValue, _) => DocumentIdentity::Absent,
-        (kAXErrorSuccess, Some(url)) if !url.is_empty() => DocumentIdentity::Url(url),
+        (code, _) if code == kAXErrorNoValue => DocumentIdentity::Absent,
+        (code, Some(url)) if code == kAXErrorSuccess && !url.is_empty() => {
+            DocumentIdentity::Url(url)
+        }
         _ => DocumentIdentity::Unknown,
     }
 }
