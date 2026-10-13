@@ -45,6 +45,17 @@ pub fn accessibility_granted() -> bool {
     unsafe { crate::ax::bindings::AXIsProcessTrusted() }
 }
 
+/// Read-only Core Graphics event-posting preflight for this process.
+/// AX trust alone is not a live observation of this separate posting API.
+/// This does not request a grant, send an event, or prove event consumption.
+pub fn event_posting_granted() -> bool {
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGPreflightPostEventAccess() -> bool;
+    }
+    unsafe { CGPreflightPostEventAccess() }
+}
+
 /// Live Screen Recording grant state — `CGPreflightScreenCaptureAccess()`.
 ///
 /// This is the only probe.  Earlier versions fell back to

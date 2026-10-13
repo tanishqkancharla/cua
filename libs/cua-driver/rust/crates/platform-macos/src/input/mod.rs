@@ -12,6 +12,8 @@ pub mod ax_actions;
 pub mod interactive;
 pub mod keyboard;
 pub mod mouse;
+pub mod pointer_toolkit;
+pub mod semantic_menu;
 pub mod skylight;
 
 pub use ax_actions::perform_ax_action;

@@ -45,6 +45,15 @@ const fn fourcc(s: &[u8; 4]) -> u32 {
 
 const K_CORE_EVENT_CLASS: u32 = fourcc(b"aevt"); // kCoreEventClass
 const K_AE_OPEN_APPLICATION: u32 = fourcc(b"oapp"); // kAEOpenApplication
+const K_AE_REOPEN_APPLICATION: u32 = fourcc(b"rapp"); // kAEReopenApplication
+
+fn application_event_id(already_running: bool, creates_new_instance: bool) -> u32 {
+    if already_running && !creates_new_instance {
+        K_AE_REOPEN_APPLICATION
+    } else {
+        K_AE_OPEN_APPLICATION
+    }
+}
 const K_AUTO_GENERATE_RETURN_ID: i16 = -1; // kAutoGenerateReturnID
 const K_ANY_TRANSACTION_ID: i32 = 0; // kAnyTransactionID
 
@@ -63,7 +72,8 @@ pub struct OpenConfig {
     pub environment: std::collections::HashMap<String, String>,
     /// Force a fresh application instance even if one is already running.
     pub creates_new_instance: bool,
-    /// Attach a synthetic `aevt/oapp` AppleEvent addressed to this bundle id.
+    /// Attach a lifecycle AppleEvent addressed to this bundle id: `oapp` for
+    /// a cold/new instance, `rapp` for an already running application.
     /// Set this whenever the bundle id is known — see Swift `AppLauncher`
     /// comment for the reasoning (cold-launch window-creation reliability).
     pub apple_event_bundle_id: Option<String>,
@@ -230,7 +240,14 @@ fn build_configuration(cfg: &OpenConfig) -> Retained<NSWorkspaceOpenConfiguratio
 
         if let Some(bid) = &cfg.apple_event_bundle_id {
             if !bid.is_empty() {
-                let event = apple_event::open_application_event(bid);
+                // A running app receives the standard reopen event. Sending the
+                // cold-launch event again leaves closed windows hidden in apps
+                // such as Notes. New-instance requests retain cold-launch semantics.
+                let event_id = application_event_id(
+                    !running_pids_for_bundle(bid).is_empty(),
+                    cfg.creates_new_instance,
+                );
+                let event = apple_event::open_application_event(bid, event_id);
                 config.setAppleEvent(Some(&event));
             }
         }
@@ -460,7 +477,18 @@ fn wait_for_launch_signal<T>(
 
 #[cfg(test)]
 mod tests {
-    use super::{reconciliation_pid, wait_for_launch_signal, LaunchError};
+    use super::{
+        application_event_id, reconciliation_pid, wait_for_launch_signal, LaunchError,
+        K_AE_OPEN_APPLICATION, K_AE_REOPEN_APPLICATION,
+    };
+
+    #[test]
+    fn lifecycle_event_matches_existing_or_new_application() {
+        assert_eq!(application_event_id(false, false), K_AE_OPEN_APPLICATION);
+        assert_eq!(application_event_id(true, false), K_AE_REOPEN_APPLICATION);
+        assert_eq!(application_event_id(true, true), K_AE_OPEN_APPLICATION);
+        assert_eq!(application_event_id(false, true), K_AE_OPEN_APPLICATION);
+    }
     use std::collections::HashSet;
     use std::sync::mpsc;
     use std::time::Duration;
@@ -535,15 +563,15 @@ mod tests {
 /// is not exposed by `objc2-foundation 0.2.2`.
 mod apple_event {
     use super::{
-        NSAppleEventDescriptor, NSString, Retained, K_AE_OPEN_APPLICATION, K_ANY_TRANSACTION_ID,
+        NSAppleEventDescriptor, NSString, Retained, K_ANY_TRANSACTION_ID,
         K_AUTO_GENERATE_RETURN_ID, K_CORE_EVENT_CLASS,
     };
     use objc2::msg_send_id;
     use objc2::rc::Allocated;
     use objc2::ClassType;
 
-    /// Build an `aevt/oapp` AppleEvent addressed to the bundle id `bid`.
-    pub fn open_application_event(bid: &str) -> Retained<NSAppleEventDescriptor> {
+    /// Build the requested application lifecycle AppleEvent addressed to `bid`.
+    pub fn open_application_event(bid: &str, event_id: u32) -> Retained<NSAppleEventDescriptor> {
         let target_string = NSString::from_str(bid);
         let target: Retained<NSAppleEventDescriptor> =
             unsafe { NSAppleEventDescriptor::descriptorWithBundleIdentifier(&target_string) };
@@ -554,7 +582,7 @@ mod apple_event {
             let event: Retained<NSAppleEventDescriptor> = msg_send_id![
                 alloc,
                 initWithEventClass: K_CORE_EVENT_CLASS,
-                eventID: K_AE_OPEN_APPLICATION,
+                eventID: event_id,
                 targetDescriptor: &*target,
                 returnID: K_AUTO_GENERATE_RETURN_ID,
                 transactionID: K_ANY_TRANSACTION_ID,

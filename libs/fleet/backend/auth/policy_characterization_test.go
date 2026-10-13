@@ -145,8 +145,9 @@ type routeCase struct {
 	// path is the request URL. Only /api/k8s reads it (through
 	// pool_admission's own params.path), but PolicyMiddleware builds an
 	// input.path for every leaf, so every case sets one.
-	path string
-	body string
+	path              string
+	body              string
+	additionalMethods []string
 }
 
 // characterizationCases lists the parameter cases for every route. A route with
@@ -179,6 +180,8 @@ func characterizationCases() map[string][]routeCase {
 	simple("/api/usage/overview", "/api/usage/overview")
 	simple("/api/usage/pool", "/api/usage/pool")
 	simple("/api/usage/browser-timings", "/api/usage/browser-timings")
+	simple("/api/image-uploads/presign", "/api/image-uploads/presign")
+	simple("/api/images/resolve", "/api/images/resolve")
 	simple("/api/chat/conversations", "/api/chat/conversations")
 	simple("/api/billing/summary", "/api/billing/summary")
 	simple("/api/billing/usage", "/api/billing/usage")
@@ -282,9 +285,10 @@ func characterizationCases() map[string][]routeCase {
 	// list, the admin escape hatch over it, the GitHub namespace grant, and the
 	// pool-admission leaf reading the body.
 	k8sPaths := []struct {
-		name string
-		path string
-		body string
+		name              string
+		path              string
+		body              string
+		additionalMethods []string
 	}{
 		{name: "namespaced-pods", path: "api/v1/namespaces/ns-a/pods"},
 		{name: "cluster-nodes", path: "api/v1/nodes"},
@@ -295,6 +299,11 @@ func characterizationCases() map[string][]routeCase {
 		{name: "granted-ns-pools", path: "apis/cua.ai/v1/namespaces/ns-a/osgymworkspacepools"},
 		{name: "ungranted-ns-pools", path: "apis/cua.ai/v1/namespaces/ns-b/osgymworkspacepools"},
 		{name: "granted-ns-claims", path: "apis/osgym.cua.ai/v1alpha1/namespaces/ns-a/osgymsandboxclaims"},
+		{name: "image-collection", path: "apis/images.cua.ai/v1alpha1/namespaces/ns-a/images"},
+		{name: "image-item", path: "apis/images.cua.ai/v1alpha1/namespaces/ns-a/images/image-demo", additionalMethods: []string{http.MethodPut}},
+		{name: "image-status", path: "apis/images.cua.ai/v1alpha1/namespaces/ns-a/images/image-demo/status"},
+		{name: "cluster-images", path: "apis/images.cua.ai/v1alpha1/images"},
+		{name: "image-group-builders", path: "apis/images.cua.ai/v1alpha1/namespaces/ns-a/builders"},
 		// The event feed, in each of the four addressing forms the apiserver
 		// serves it under, crossed with the two API groups that serve it. These
 		// are the only k8s paths every principal shape is denied on — including
@@ -339,6 +348,31 @@ func characterizationCases() map[string][]routeCase {
 			path: "apis/cua.ai/v1/namespaces/ns-a/osgymworkspacepools",
 			body: `{"spec":{"template":{"containerDiskImage":"evil.example/workspace:latest","imagePullSecret":"ecr-credentials"}}}`,
 		},
+
+		// Bound-sandbox service exposure. PATCH on a Sandbox item is the one
+		// Sandbox write on the allowlist, and only with a body that touches
+		// nothing but spec.vmTemplate.services — the two bodies record the
+		// sandbox-services admission conjunct's answer alongside the
+		// allowlist's. Every other verb on the item, and every write on the
+		// collection, stays denied.
+		{
+			name: "sandbox-item-services-patch",
+			path: "apis/osgym.cua.ai/v1alpha1/namespaces/ns-a/osgymsandboxes/sandbox-1",
+			body: `{"spec":{"vmTemplate":{"services":[{"name":"source-mcp","targetPort":3100}]}}}`,
+		},
+		{
+			name: "sandbox-item-image-patch",
+			path: "apis/osgym.cua.ai/v1alpha1/namespaces/ns-a/osgymsandboxes/sandbox-1",
+			body: `{"spec":{"vmTemplate":{"containerDiskImage":"evil.example/workspace:latest"}}}`,
+		},
+		// The field report's exact attempt: writing a core Service directly.
+		// Denied on every write verb (with a guidance message this table does
+		// not record); the read stays open.
+		{
+			name: "namespaced-services",
+			path: "api/v1/namespaces/ns-a/services",
+			body: `{"apiVersion":"v1","kind":"Service","spec":{"selector":{"app":"sandbox-1"},"ports":[{"port":80,"targetPort":3100}]}}`,
+		},
 	}
 	k8s := make([]routeCase, 0, len(k8sPaths))
 	for _, k8sPath := range k8sPaths {
@@ -347,10 +381,11 @@ func characterizationCases() map[string][]routeCase {
 			body = "{}"
 		}
 		k8s = append(k8s, routeCase{
-			name:   k8sPath.name,
-			params: map[string]string{"path": k8sPath.path},
-			path:   "/api/k8s/" + k8sPath.path,
-			body:   body,
+			name:              k8sPath.name,
+			params:            map[string]string{"path": k8sPath.path},
+			path:              "/api/k8s/" + k8sPath.path,
+			body:              body,
+			additionalMethods: k8sPath.additionalMethods,
 		})
 	}
 	cases["/api/k8s/{path...}"] = k8s
@@ -440,7 +475,11 @@ recorded. Add at least one parameter case for it.`, route)
 		surface, _ := RouteSurface(route)
 		plan := plans[surface]
 		for _, testCase := range cases[route] {
-			for _, method := range characterizationMethods {
+			methods := characterizationMethods
+			if len(testCase.additionalMethods) > 0 {
+				methods = append(append([]string{}, characterizationMethods...), testCase.additionalMethods...)
+			}
+			for _, method := range methods {
 				for _, principal := range principals {
 					request := characterizationRequest(route, testCase, method, principal.user)
 					result := plan.eval(request.Context(), newRequestPolicyInput(request, plan.bodyBudget))

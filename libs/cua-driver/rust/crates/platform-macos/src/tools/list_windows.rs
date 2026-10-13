@@ -14,7 +14,9 @@ fn def() -> &'static ToolDef {
         name: "list_windows".into(),
         description: "List all layer-0 top-level windows currently known to WindowServer. \
             Includes off-screen windows (minimized, on another Space, hidden-launched). \
-            Use this to find a window_id before calling get_window_state.\n\n\
+            Use this to find a window_id before calling get_window_state. \
+            AppKit-internal helper windows (off screen, untitled, in no Space, and absent \
+            from the app's AXWindows) are omitted: no tool can read, move, or focus them.\n\n\
             Per-record fields: window_id, pid, app_name, title, bounds \
             (x/y/width/height, top-left origin), z_index (integer or null; higher values are \
             closer to the front; null means stacking order is unavailable and callers must not \
@@ -75,6 +77,48 @@ impl Tool for ListWindowsTool {
         if let Some(pid) = pid_filter {
             windows.retain(|w| w.pid == pid);
         }
+        crate::windows::retain_ax_reachable(&mut windows, current_space_id);
+
+        // App scope follows the exact AX-focused window even when a newly
+        // created background window has not reached the top of CG stacking.
+        let focused_window_id = pid_filter
+            .and_then(crate::ax::bindings::focused_window_id_of_pid)
+            .filter(|id| {
+                windows.iter().any(|window| {
+                    window.window_id == *id
+                        && Some(window.pid) == pid_filter
+                        && window.is_on_screen
+                        && window.on_current_space != Some(false)
+                })
+            });
+
+        // A child panel can own the focused control while AXFocusedWindow still
+        // names its main document (Chrome Find). This is observation metadata,
+        // never authority to send input to the document on the panel's behalf.
+        let focused_element_window_id = pid_filter
+            .and_then(focused_element_window_id_of_pid)
+            .filter(|id| {
+                windows.iter().any(|window| {
+                    window.window_id == *id
+                        && Some(window.pid) == pid_filter
+                        && window.is_on_screen
+                        && window.on_current_space != Some(false)
+                })
+            });
+
+        // A focused AXSheet has its own CG surface, but its controls are walked
+        // within the exact parent AXWindow. Keep both identities; never infer a
+        // parent from title, size, stacking, or merely sharing a process.
+        let focused_sheet_parent_window_id = pid_filter
+            .and_then(|pid| focused_sheet_parent_window_id_of_pid(pid, focused_window_id))
+            .filter(|id| {
+                windows.iter().any(|window| {
+                    window.window_id == *id
+                        && Some(window.pid) == pid_filter
+                        && window.is_on_screen
+                        && window.on_current_space != Some(false)
+                })
+            });
 
         let mut windows_json: Vec<Value> = windows.iter().map(window_record_json).collect();
         if include_documents {
@@ -87,15 +131,84 @@ impl Tool for ListWindowsTool {
         ToolResult::text(format!("Found {} window(s).", windows_json.len())).with_structured(
             serde_json::json!({
                 "windows": windows_json,
-                "current_space_id": current_space_id
+                "current_space_id": current_space_id,
+                "focused_window_id": focused_window_id,
+                "focused_element_window_id": focused_element_window_id,
+                "focused_sheet_parent_window_id": focused_sheet_parent_window_id
             }),
         )
     }
 }
 
+/// Resolve only the actual focused element's own window. Foreign AX proxy
+/// elements are not app-scope focus evidence for the requested process.
+fn focused_element_window_id_of_pid(pid: i32) -> Option<u32> {
+    use crate::ax::bindings::*;
+    use core_foundation::base::{CFRelease, CFTypeRef};
+    unsafe {
+        let focused = focused_element_of_pid(pid)?;
+        let mut owner = 0;
+        let id = if AXUIElementGetPid(focused, &mut owner) == kAXErrorSuccess && owner == pid {
+            crate::ax::exact_target::element_window_id(focused)
+        } else {
+            None
+        };
+        CFRelease(focused as CFTypeRef);
+        id
+    }
+}
+
+/// Observe the parent only through the actual focused sheet's same-process
+/// AXParent chain. The expected surface check rejects a focus change between
+/// the two reads. This metadata grants no input or handle-close authority.
+fn focused_sheet_parent_window_id_of_pid(pid: i32, expected_sheet: Option<u32>) -> Option<u32> {
+    use crate::ax::bindings::*;
+    use core_foundation::base::{CFRelease, CFTypeRef};
+    let expected_sheet = expected_sheet?;
+    unsafe {
+        let app = AXUIElementCreateApplication(pid);
+        if app.is_null() {
+            return None;
+        }
+        AXUIElementSetMessagingTimeout(app, 0.5);
+        let focused = copy_element_attr(app, "AXFocusedWindow");
+        CFRelease(app as CFTypeRef);
+        let mut current = focused?;
+        let mut result = None;
+        for depth in 0..=8 {
+            let mut owner = 0;
+            if AXUIElementGetPid(current, &mut owner) != kAXErrorSuccess || owner != pid {
+                break;
+            }
+            let role = copy_string_attr(current, "AXRole");
+            if depth == 0
+                && (role.as_deref() != Some("AXSheet")
+                    || ax_get_window_id(current) != Some(expected_sheet))
+            {
+                break;
+            }
+            match role.as_deref() {
+                Some("AXWindow") if depth > 0 => {
+                    result = ax_get_window_id(current).filter(|id| *id != expected_sheet);
+                    break;
+                }
+                Some("AXSheet") => {}
+                _ => break,
+            }
+            let Some(parent) = copy_element_attr(current, "AXParent") else {
+                break;
+            };
+            CFRelease(current as CFTypeRef);
+            current = parent;
+        }
+        CFRelease(current as CFTypeRef);
+        result
+    }
+}
+
 /// AXDocument is evidence about a specific window, not a process-wide active
 /// document. Join AX and WindowServer only by exact CGWindowID and owner PID.
-fn document_urls(
+pub(super) fn document_urls(
     pid: i32,
     windows: &[crate::windows::WindowInfo],
 ) -> std::collections::HashMap<u32, String> {
@@ -119,7 +232,7 @@ fn document_urls(
                         .iter()
                         .any(|row| row.pid == pid && row.window_id == id)
                     {
-                        if let Some(url) = copy_string_attr(window, "AXDocument") {
+                        if let Some(url) = copy_resource_url_attr(window, "AXDocument") {
                             if !url.is_empty() {
                                 documents.insert(id, url);
                             }

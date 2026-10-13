@@ -281,8 +281,13 @@ def validate_results(artifact_dir: Path) -> None:
         for line in (artifact_dir / "mcp-responses.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     by_id = {response.get("id"): response for response in responses}
+    # Keep fork identity strict without duplicating its canonical distribution name.
+    product = load_json(
+        Path(__file__).resolve().parents[3] / "libs/cua-driver/installer-distribution.json"
+    )["product"]
+    expect(isinstance(product, str) and bool(product.strip()), "invalid declared product name")
     expect(
-        by_id[1]["result"]["serverInfo"]["name"] == "cua-driver",
+        by_id[1]["result"]["serverInfo"]["name"] == product,
         f"unexpected MCP serverInfo: {by_id[1].get('result')!r}",
     )
     tools = by_id[2]["result"]["tools"]

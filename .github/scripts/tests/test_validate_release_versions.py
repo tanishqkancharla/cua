@@ -1,20 +1,35 @@
+import json
 from pathlib import Path
 import re
 import shutil
 
 import pytest
 
-from validate_release_versions import VersionError, validate
+from validate_release_versions import (
+    VersionError,
+    driver_installer_withdrawn_versions,
+    driver_release_powershell_path,
+    driver_release_uninstaller_path,
+    driver_withdrawn_versions,
+    main,
+    validate,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
-def copy_release_sources(destination: Path) -> None:
+def copy_release_sources(destination: Path, *, source_build: bool = True) -> None:
+    config = "scripts/docs-generators/config.json"
+    (destination / config).parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy(REPO_ROOT / config, destination / config)
     shutil.copy(REPO_ROOT / ".release-please-manifest.json", destination)
-    release_state = ".github/release-state/cua-driver-rs-published-version"
-    (destination / release_state).parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy(REPO_ROOT / release_state, destination / release_state)
+    for filename in ("VERSION", "pyproject.toml", "uv.lock", "cua_sandbox/__init__.py"):
+        relative = Path("libs/python/cua-sandbox") / filename
+        (destination / relative).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(REPO_ROOT / relative, destination / relative)
+    release_state = ".github/release-state"
+    shutil.copytree(REPO_ROOT / release_state, destination / release_state)
     for relative in ("libs/cua-driver", "libs/lume"):
         source = REPO_ROOT / relative
         target = destination / relative
@@ -24,13 +39,167 @@ def copy_release_sources(destination: Path) -> None:
             target,
             ignore=shutil.ignore_patterns(".build", ".swiftpm", "target", "node_modules"),
         )
+    for relative in (
+        "libs/cua/VERSION",
+        "libs/cua/python/pyproject.toml",
+        "libs/cua/python/src/cua/__init__.py",
+        "libs/cua/typescript/package.json",
+        "libs/cua/typescript/package-lock.json",
+        "apps/cua-spaces-macos/VERSION",
+        "apps/cua-spaces-macos/Support/Info.plist",
+        "apps/cua-spaces/package.json",
+        "apps/cua-spaces/src-tauri/tauri.conf.json",
+        "apps/cua-spaces/src-tauri/Cargo.toml",
+        "apps/cua-spaces/src-tauri/Cargo.lock",
+    ):
+        (destination / relative).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(REPO_ROOT / relative, destination / relative)
+    spacesd = REPO_ROOT / "libs/cua-spacesd"
+    for source in (
+        spacesd / "VERSION",
+        spacesd / "Cargo.toml",
+        spacesd / "Cargo.lock",
+        *spacesd.glob("crates/*/Cargo.toml"),
+        *spacesd.glob("tests/*/Cargo.lock"),
+    ):
+        target = destination / source.relative_to(REPO_ROOT)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(source, target)
     for product in ("cua-driver", "lume"):
-        docs = f"docs/content/docs/reference/{product}"
+        docs = f"docs/content/docs/{product}/reference"
         shutil.copytree(REPO_ROOT / docs, destination / docs)
+
+    if not source_build:
+        # The actual retained upstream script is the metadata authority in a
+        # default Cua release fixture. Never add fake sentinels to source routes.
+        base = destination / "libs/cua-driver"
+        (base / "installer-distribution.json").unlink()
+        shutil.copy(base / "scripts/_upstream-install.ps1", base / "scripts/install.ps1")
+        for suffix in ("sh", "ps1"):
+            shutil.copy(base / f"scripts/_upstream-uninstall.{suffix}", base / f"scripts/uninstall.{suffix}")
 
 
 def test_current_release_versions_agree():
     validate(REPO_ROOT, "all")
+
+
+def test_sandbox_product_cli_accepts_current_versions():
+    assert main(["--repo-root", str(REPO_ROOT), "--product", "sandbox"]) == 0
+
+
+def test_perception_product_cli_accepts_current_versions():
+    assert main(["--repo-root", str(REPO_ROOT), "--product", "perception"]) == 0
+
+
+@pytest.mark.parametrize("product", ["perception", "all"])
+def test_perception_versions_use_independent_authority(tmp_path: Path, product: str):
+    copy_release_sources(tmp_path)
+    validate(tmp_path, product)
+
+
+@pytest.mark.parametrize("product", ["perception", "all"])
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("VERSION", "Cua Perception expects 9.9.9"),
+        ("Cargo.toml", "Cargo.toml=9.9.9"),
+        ("Cargo.lock", "Cargo.lock:cua-perception=9.9.9"),
+        (".release-please-manifest.json", ".release-please-manifest.json=9.9.9"),
+    ],
+)
+def test_perception_version_drift_fails(
+    tmp_path: Path, product: str, source: str, expected: str
+):
+    copy_release_sources(tmp_path)
+    base = tmp_path / "libs/cua-driver/rust/crates/cua-perception"
+    current = (base / "VERSION").read_text().strip()
+    if source == ".release-please-manifest.json":
+        path = tmp_path / source
+        manifest = json.loads(path.read_text())
+        manifest["libs/cua-driver/rust/crates/cua-perception"] = "9.9.9"
+        path.write_text(json.dumps(manifest))
+    elif source == "Cargo.lock":
+        path = tmp_path / "libs/cua-driver/rust/Cargo.lock"
+        path.write_text(
+            re.sub(
+                rf'(\[\[package\]\]\nname = "cua-perception"\nversion = "){re.escape(current)}("\n)',
+                r"\g<1>9.9.9\2",
+                path.read_text(),
+                count=1,
+            )
+        )
+    else:
+        path = base / source
+        path.write_text(path.read_text().replace(current, "9.9.9", 1))
+
+    with pytest.raises(VersionError, match=re.escape(expected)):
+        validate(tmp_path, product)
+
+
+@pytest.mark.parametrize("product", ["sandbox", "all"])
+@pytest.mark.parametrize(
+    "source",
+    ["VERSION", "pyproject.toml", "uv.lock", "cua_sandbox/__init__.py", ".release-please-manifest.json"],
+)
+def test_sandbox_version_drift_fails(tmp_path: Path, product: str, source: str):
+    copy_release_sources(tmp_path)
+    base = tmp_path / "libs/python/cua-sandbox"
+    current = (base / "VERSION").read_text().strip()
+    if source == ".release-please-manifest.json":
+        path = tmp_path / source
+        manifest = json.loads(path.read_text())
+        manifest["libs/python/cua-sandbox"] = "9.9.9"
+        path.write_text(json.dumps(manifest))
+    else:
+        path = base / source
+        path.write_text(path.read_text().replace(current, "9.9.9"))
+
+    expected = "Sandbox expects 9.9.9" if source == "VERSION" else f"{source}=9.9.9"
+    with pytest.raises(VersionError, match=re.escape(expected)):
+        validate(tmp_path, product)
+
+
+def test_spacesd_product_cli_accepts_current_versions():
+    assert main(["--repo-root", str(REPO_ROOT), "--product", "spacesd"]) == 0
+
+
+@pytest.mark.parametrize("product", ["spacesd", "all"])
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("VERSION", "cua-spacesd expects 9.9.9"),
+        ("Cargo.toml", "Cargo.toml=9.9.9"),
+        ("Cargo.lock", "Cargo.lock:cua-spacesd=9.9.9"),
+        ("tests/teleport-e2e/Cargo.lock", "tests/teleport-e2e/Cargo.lock:cua-spacesd-server=9.9.9"),
+        (".release-please-manifest.json", ".release-please-manifest.json=9.9.9"),
+    ],
+)
+def test_spacesd_version_drift_fails(
+    tmp_path: Path, product: str, source: str, expected: str
+):
+    copy_release_sources(tmp_path)
+    base = tmp_path / "libs/cua-spacesd"
+    current = (base / "VERSION").read_text().strip()
+    if source == ".release-please-manifest.json":
+        path = tmp_path / source
+        manifest = json.loads(path.read_text())
+        manifest["libs/cua-spacesd"] = "9.9.9"
+        path.write_text(json.dumps(manifest))
+    elif source == "Cargo.toml":
+        path = base / source
+        path.write_text(path.read_text().replace(f'version = "{current}"', 'version = "9.9.9"', 1))
+    elif source == "VERSION":
+        (base / source).write_text("9.9.9\n")
+    else:
+        name = "cua-spacesd" if source == "Cargo.lock" else "cua-spacesd-server"
+        path = base / source
+        path.write_text(
+            path.read_text().replace(
+                f'name = "{name}"\nversion = "{current}"', f'name = "{name}"\nversion = "9.9.9"'
+            )
+        )
+    with pytest.raises(VersionError, match=re.escape(expected)):
+        validate(tmp_path, product)
 
 
 def test_version_drift_fails_with_the_source_name(tmp_path: Path):
@@ -58,7 +227,7 @@ def set_driver_installer_versions(
             flags=re.MULTILINE,
         )
     )
-    powershell = root / "libs/cua-driver/scripts/install.ps1"
+    powershell = driver_release_powershell_path(root)
     powershell_source = powershell.read_text()
     powershell.write_text(
         re.sub(
@@ -71,8 +240,9 @@ def set_driver_installer_versions(
     )
 
 
-def test_driver_validation_allows_installer_to_lag_until_publication(tmp_path: Path):
-    copy_release_sources(tmp_path)
+@pytest.mark.parametrize("source_build", [True, False])
+def test_driver_validation_allows_installer_to_lag_until_publication(tmp_path: Path, source_build: bool):
+    copy_release_sources(tmp_path, source_build=source_build)
     set_driver_installer_versions(
         tmp_path, shell_version="0.0.0", powershell_version="0.0.0"
     )
@@ -80,8 +250,9 @@ def test_driver_validation_allows_installer_to_lag_until_publication(tmp_path: P
     validate(tmp_path, "driver")
 
 
-def test_driver_validation_rejects_disagreeing_installer_versions(tmp_path: Path):
-    copy_release_sources(tmp_path)
+@pytest.mark.parametrize("source_build", [True, False])
+def test_driver_validation_rejects_disagreeing_installer_versions(tmp_path: Path, source_build: bool):
+    copy_release_sources(tmp_path, source_build=source_build)
     set_driver_installer_versions(
         tmp_path, shell_version="0.0.0", powershell_version="0.0.1"
     )
@@ -90,11 +261,255 @@ def test_driver_validation_rejects_disagreeing_installer_versions(tmp_path: Path
         validate(tmp_path, "driver")
 
 
-def test_driver_validation_rejects_installer_version_ahead_of_source(tmp_path: Path):
-    copy_release_sources(tmp_path)
+@pytest.mark.parametrize("source_build", [True, False])
+def test_driver_validation_rejects_installer_version_ahead_of_source(tmp_path: Path, source_build: bool):
+    copy_release_sources(tmp_path, source_build=source_build)
     set_driver_installer_versions(
         tmp_path, shell_version="9.9.9", powershell_version="9.9.9"
     )
 
     with pytest.raises(VersionError, match="ahead of source release"):
         validate(tmp_path, "driver")
+
+
+@pytest.mark.parametrize("source_build", [True, False])
+def test_withdrawn_release_can_never_be_baked(tmp_path: Path, source_build: bool):
+    copy_release_sources(tmp_path, source_build=source_build)
+    published = (
+        tmp_path / ".github/release-state/cua-driver-rs-published-version"
+    ).read_text().strip()
+    withdrawn = tmp_path / ".github/release-state/cua-driver-rs-withdrawn-versions"
+    validate(tmp_path, "driver")
+    withdrawn.write_text(f"{published} # unsigned macOS app\n", encoding="utf-8")
+    with pytest.raises(VersionError, match=rf"withdrawn release {re.escape(published)}: unsigned macOS app"):
+        validate(tmp_path, "driver")
+
+
+def test_checked_in_withdrawn_versions_are_exact_and_explained():
+    path = REPO_ROOT / ".github/release-state/cua-driver-rs-withdrawn-versions"
+    entries = [
+        line for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    assert entries
+    for line in entries:
+        version, _, reason = line.partition("#")
+        assert re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version.strip())
+        assert reason.strip(), f"withdrawn {version.strip()} needs a reason"
+
+
+def test_installer_withdrawn_lists_mirror_release_state():
+    listed = sorted(driver_withdrawn_versions(REPO_ROOT))
+    baked = driver_installer_withdrawn_versions(REPO_ROOT)
+    assert "0.28.3" in listed
+    assert baked == {
+        "scripts/_install-rust.sh": listed,
+        "scripts/_upstream-install.ps1": listed,
+    }
+
+
+@pytest.mark.parametrize(
+    ("relative", "old", "new"),
+    [
+        (
+            "libs/cua-driver/scripts/_install-rust.sh",
+            'CUA_DRIVER_RS_WITHDRAWN_VERSIONS="0.28.3"',
+            'CUA_DRIVER_RS_WITHDRAWN_VERSIONS=""',
+        ),
+        (
+            "libs/cua-driver/scripts/_upstream-install.ps1",
+            "$Script:CuaDriverRsWithdrawnVersions = @('0.28.3')",
+            "$Script:CuaDriverRsWithdrawnVersions = @('0.28.3', '0.28.1')",
+        ),
+    ],
+)
+def test_installer_withdrawn_list_drift_fails(tmp_path: Path, relative: str, old: str, new: str):
+    copy_release_sources(tmp_path)
+    path = tmp_path / relative
+    source = path.read_text(encoding="utf-8-sig")
+    assert old in source
+    path.write_text(source.replace(old, new), encoding="utf-8")
+    with pytest.raises(VersionError, match="withdraws"):
+        validate(tmp_path, "driver")
+
+
+def test_release_state_withdrawal_without_installer_update_fails(tmp_path: Path):
+    copy_release_sources(tmp_path)
+    withdrawn = tmp_path / ".github/release-state/cua-driver-rs-withdrawn-versions"
+    withdrawn.write_text(
+        withdrawn.read_text(encoding="utf-8") + "0.1.0 # test withdrawal\n", encoding="utf-8"
+    )
+    with pytest.raises(VersionError, match=r"withdraws \['0.28.3'\], but"):
+        validate(tmp_path, "driver")
+
+
+def test_malformed_withdrawn_version_fails(tmp_path: Path):
+    copy_release_sources(tmp_path)
+    withdrawn = tmp_path / ".github/release-state/cua-driver-rs-withdrawn-versions"
+    withdrawn.write_text("v0.28.3 # prefixed\n", encoding="utf-8")
+    with pytest.raises(VersionError, match="exact stable"):
+        validate(tmp_path, "driver")
+
+
+SDK_AND_SPACES_SOURCES = (
+    ".release-please-manifest.json",
+    "libs/cua/VERSION",
+    "libs/cua/python/pyproject.toml",
+    "libs/cua/python/src/cua/__init__.py",
+    "libs/cua/typescript/package.json",
+    "libs/cua/typescript/package-lock.json",
+    "apps/cua-spaces-macos/VERSION",
+    "apps/cua-spaces-macos/Support/Info.plist",
+    "apps/cua-spaces/package.json",
+    "apps/cua-spaces/src-tauri/tauri.conf.json",
+    "apps/cua-spaces/src-tauri/Cargo.toml",
+    "apps/cua-spaces/src-tauri/Cargo.lock",
+)
+
+
+def test_sdk_and_spaces_products_accept_current_versions():
+    assert main(["--repo-root", str(REPO_ROOT), "--product", "sdk"]) == 0
+    assert main(["--repo-root", str(REPO_ROOT), "--product", "spaces"]) == 0
+
+
+@pytest.mark.parametrize(
+    ("product", "relative"),
+    [
+        ("sdk", "libs/cua/typescript/package.json"),
+        ("sdk", "libs/cua/python/pyproject.toml"),
+        ("spaces", "apps/cua-spaces/src-tauri/tauri.conf.json"),
+        ("spaces", "apps/cua-spaces/package.json"),
+    ],
+)
+def test_sdk_and_spaces_version_drift_fails(tmp_path: Path, product: str, relative: str):
+    for source in SDK_AND_SPACES_SOURCES:
+        target = tmp_path / source
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(REPO_ROOT / source, target)
+    path = tmp_path / relative
+    text = path.read_text()
+    marker = 'version = "' if relative.endswith(".toml") else '"version": "'
+    assert marker in text
+    path.write_text(text.replace(marker, marker + "9.9.9-drift", 1))
+    assert main(["--repo-root", str(tmp_path), "--product", product]) == 1
+
+
+def test_spaces_macos_info_plist_drift_fails(tmp_path: Path):
+    for source in SDK_AND_SPACES_SOURCES:
+        target = tmp_path / source
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(REPO_ROOT / source, target)
+    plist = tmp_path / "apps/cua-spaces-macos/Support/Info.plist"
+    text = plist.read_text()
+    marker = "<key>CFBundleShortVersionString</key>\n\t<string>"
+    assert marker in text
+    plist.write_text(text.replace(marker, marker + "9.9.9-drift", 1))
+    with pytest.raises(VersionError, match="Info.plist"):
+        validate(tmp_path, "spaces")
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("VERSION", "cua SDK expects 9.9.9"),
+        ("python/pyproject.toml", "python/pyproject.toml=9.9.9"),
+        ("typescript/package-lock.json", "typescript/package-lock.json=9.9.9"),
+    ],
+)
+def test_sdk_version_drift_fails(tmp_path: Path, source: str, expected: str):
+    copy_release_sources(tmp_path)
+    path = tmp_path / "libs/cua" / source
+    current = (tmp_path / "libs/cua/VERSION").read_text().strip()
+    if source == "VERSION":
+        path.write_text("9.9.9\n")
+    elif source.endswith(".json"):
+        data = json.loads(path.read_text())
+        data["version"] = "9.9.9"
+        path.write_text(json.dumps(data))
+    else:
+        path.write_text(path.read_text().replace(f'version = "{current}"', 'version = "9.9.9"', 1))
+    with pytest.raises(VersionError, match=re.escape(expected)):
+        validate(tmp_path, "sdk")
+
+
+def test_default_cua_release_installer_remains_strict(tmp_path: Path):
+    copy_release_sources(tmp_path)
+    base = tmp_path / "libs/cua-driver"
+    (base / "installer-distribution.json").unlink()
+    public = base / "scripts/install.ps1"
+    shutil.copy(base / "scripts/_upstream-install.ps1", public)
+    assert driver_release_powershell_path(tmp_path) == public
+    validate(tmp_path, "all")
+    set_driver_installer_versions(tmp_path, shell_version="0.0.0", powershell_version="0.0.1")
+    with pytest.raises(VersionError, match="baked installers"):
+        validate(tmp_path, "driver")
+
+
+def test_missing_source_declaration_cannot_bypass_release_metadata(tmp_path: Path):
+    copy_release_sources(tmp_path)
+    (tmp_path / "libs/cua-driver/installer-distribution.json").unlink()
+    with pytest.raises(VersionError, match="could not read a release version.*install.ps1"):
+        validate(tmp_path, "driver")
+
+
+@pytest.mark.parametrize("relative,old,new", [
+    ("scripts/install.sh", None, "exit 0"),
+    ("scripts/install.ps1", None, "exit 0"),
+    ("scripts/install.sh", "install-local.sh", "_install-rust.sh"),
+    ("scripts/install.sh", ' "$@"', ""),
+    ("scripts/install.ps1", "install-local.ps1", "_upstream-install.ps1"),
+    ("scripts/install.ps1", " @PSBoundParameters", ""),
+    ("scripts/install.ps1", "exit $LASTEXITCODE", "exit 0"),
+    ("scripts/uninstall.sh", "uninstall-local.sh", "_upstream-uninstall.sh"),
+    ("scripts/uninstall.sh", ' "$@"', ""),
+    ("scripts/uninstall.ps1", "uninstall-local.ps1", "_upstream-uninstall.ps1"),
+    ("scripts/uninstall.ps1", " @PSBoundParameters", ""),
+    ("scripts/uninstall.ps1", "exit $LASTEXITCODE", "exit 0"),
+])
+def test_source_build_route_drift_refused_before_release_validation(tmp_path: Path, relative: str, old: str | None, new: str):
+    copy_release_sources(tmp_path)
+    path = tmp_path / "libs/cua-driver" / relative
+    original = path.read_text()
+    if old is not None:
+        assert old in original
+        changed = original.replace(old, new)
+    else:
+        changed = original + "\n" + new + " # undeclared route\n"
+    path.write_text(changed)
+    with pytest.raises(VersionError, match=f"source-build installer route drift: {re.escape(relative)}"):
+        validate(tmp_path, "driver")
+
+
+@pytest.mark.parametrize("field,value", [("schemaVersion",2),("schemaVersion",True),("product","cua-driver"),("distribution","release"),("preservedReleasePowerShell","scripts/install.ps1"),("undeclared",True)])
+def test_unknown_source_distribution_refused(tmp_path: Path, field: str, value):
+    copy_release_sources(tmp_path)
+    path=tmp_path / "libs/cua-driver/installer-distribution.json"
+    data=json.loads(path.read_text());data[field]=value;path.write_text(json.dumps(data))
+    with pytest.raises(VersionError, match="unsupported driver installer distribution declaration"):
+        validate(tmp_path,"driver")
+
+
+@pytest.mark.parametrize("delegate", ["install-local.sh","install-local.ps1","uninstall-local.sh","uninstall-local.ps1"])
+def test_source_build_requires_both_real_delegates(tmp_path: Path, delegate: str):
+    copy_release_sources(tmp_path)
+    (tmp_path / "libs/cua-driver/scripts" / delegate).unlink()
+    with pytest.raises(VersionError, match=f"missing source-build installer delegate: {re.escape(delegate)}"):
+        validate(tmp_path,"driver")
+
+
+@pytest.mark.parametrize("source_build", [True, False])
+@pytest.mark.parametrize("platform,suffix", [("unix", "sh"), ("windows", "ps1")])
+def test_uninstaller_cli_selects_the_validated_product_reference(tmp_path, capsys, source_build, platform, suffix):
+    copy_release_sources(tmp_path, source_build=source_build)
+    prefix = "_upstream-" if source_build else ""
+    expected = tmp_path / "libs/cua-driver/scripts" / f"{prefix}uninstall.{suffix}"
+    assert main(["--repo-root", str(tmp_path), "--print-driver-release-uninstaller", platform]) == 0
+    assert capsys.readouterr().out == str(expected) + "\n"
+
+
+@pytest.mark.parametrize("platform,suffix", [("unix", "sh"), ("windows", "ps1")])
+def test_missing_preserved_uninstaller_refused(tmp_path, platform, suffix):
+    copy_release_sources(tmp_path)
+    (tmp_path / "libs/cua-driver/scripts" / f"_upstream-uninstall.{suffix}").unlink()
+    with pytest.raises(VersionError, match=f"missing driver release uninstaller reference: _upstream-uninstall.{suffix}"):
+        driver_release_uninstaller_path(tmp_path, platform)

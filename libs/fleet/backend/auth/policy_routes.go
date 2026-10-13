@@ -185,17 +185,42 @@ func AccountLookupRoutePolicy() Node {
 	return All(BasePolicy(), surfaceLeaf("authz-account-lookup", "data.authz_account_lookup.allow"))
 }
 
+// ImageUploadsRoutePolicy guards bounded image upload signing. Namespace ownership
+// is evaluated by the handler because the namespace is carried in the JSON body.
+func ImageUploadsRoutePolicy() Node {
+	return All(BasePolicy(), surfaceLeaf("authz-image-uploads", "data.authz_image_uploads.allow"), ImageRolloutPolicy())
+}
+
+// ImagesResolveRoutePolicy guards GET /api/images/resolve: a read of public
+// registry metadata, open to every principal family that can hold a tenant
+// grant. Not behind the image rollout gate: it builds and stores nothing.
+func ImagesResolveRoutePolicy() Node {
+	return All(BasePolicy(), surfaceLeaf("authz-images-resolve", "data.authz_images_resolve.allow"))
+}
+
+func ImageRolloutPolicy() Node {
+	return Policy(
+		Modules(Registered("authz"), Registered("image-rollout")),
+		Query("data.image_rollout.allow"),
+	)
+}
+
 // K8sRoutePolicy guards /api/k8s/{path...}. It is the same base + surface shape
-// as every other route, with two admission conjuncts: card-or-admin admission
-// for custom-resource creation, and pool admission over the request body.
+// as every other route, with Image namespace ownership and six admission conjuncts: card-or-admin admission
+// for custom-resource creation, pool admission over the request body,
+// sandbox-services admission over the body of the one Sandbox write the
+// allowlist admits, sandbox-process admission over a template's
+// env/args/processMode, tenant-secret admission over the body of the one Secret
+// create it admits, plus Image admission excluding status and mismatched
+// identity.
 //
-// Every conjunct must pass. The pool-admission leaf reads the raw body (bounded at 1 MiB)
-// to inspect the object being created or patched, which is why it names
-// pool_admission.rego alongside authz.rego — pool_admission imports
-// data.authz.is_admin. It stays a separate leaf rather than rules inside
-// authz_k8s.rego because it is the only thing on this surface that needs the
-// body, and folding it in would put every k8s request's verdict behind a body
-// read.
+// Every conjunct must pass. The three body-reading leaves read the raw body
+// (bounded at 1 MiB) to inspect the object being created or patched, which is
+// why pool admission names pool_admission.rego alongside authz.rego —
+// pool_admission imports data.authz.is_admin. They stay separate leaves rather
+// than rules inside authz_k8s.rego because they are the only things on this
+// surface that need the body, and folding them in would put every k8s
+// request's verdict behind a body read.
 func CustomResourceCreationAdmissionPolicy() Node {
 	leaf := func(query string, options ...PolicyOption) Node {
 		return Policy(
@@ -217,11 +242,46 @@ func CustomResourceCreationAdmissionPolicy() Node {
 	)
 }
 
+// ServiceWriteNotSupportedMessage is the 403 body for a direct write to core
+// Services through /api/k8s — the obvious but unsupported way to expose a new
+// port on a sandbox. The allowlist denies these writes either way; this
+// message exists so the denial names the supported alternative instead of
+// reading as an unexplained policy defect.
+const ServiceWriteNotSupportedMessage = "creating or modifying Kubernetes Services directly is not supported. Declare the port under spec.vmTemplate.services on the pool template, or PATCH spec.vmTemplate.services on your bound OSGymSandbox to expose it on a running sandbox; the matching Service is created for you."
+
+// SandboxPatchRestrictedMessage is the 403 body when a Sandbox PATCH body
+// strays outside the one field clients may write.
+const SandboxPatchRestrictedMessage = "a sandbox PATCH may only modify spec.vmTemplate.services (an optional metadata.resourceVersion precondition is also accepted)"
+
+// SandboxProcessRestrictedMessage is the 403 body when a template's
+// command/args/env cannot run on its runtime.
+const SandboxProcessRestrictedMessage = "vmTemplate.env and args on runtime kubevirt (the default runtime) need vmTemplate.processMode: Run, which also needs a command for args and single-line values; state runtime and processMode on a PATCH; processMode is Legacy or Run; env names must match ^[A-Za-z_][A-Za-z0-9_]*$."
+
+// TenantSecretRestrictedMessage is the 403 body when a Secret create through
+// /api/k8s is not one of the tenant Secret kinds (tenant_secret_admission.rego).
+// A new kind appends its own "; <kind>: ..." clause.
+const TenantSecretRestrictedMessage = "only tenant Secrets may be created through this API, in the path's namespace, with no generateName, annotations or ownerReferences. Claim secrets: a plain Opaque Secret named cua-claim-<name>, referenced from OSGymSandboxClaim spec.secretRef; Registry pull secrets: type kubernetes.io/dockerconfigjson named cua-registry-<name>, labeled cua.ai/registry-secret: \"true\", holding only .dockerconfigjson, referenced from vmTemplate.imagePullSecret."
+
 func K8sRoutePolicy() Node {
 	return All(
 		BasePolicy(),
+		// Before the allow leaf on purpose: All's fold short-circuits on the
+		// first denying child and keeps ITS reason, so this Because only
+		// reaches the response when it is the first conjunct to deny — which,
+		// placed here, is every direct core-Services write and nothing else.
+		Because(
+			surfaceLeaf("authz-k8s", "data.authz_k8s.not_direct_service_write"),
+			ServiceWriteNotSupportedMessage,
+		),
 		surfaceLeaf("authz-k8s", "data.authz_k8s.allow"),
+		ImageRolloutPolicy(),
+		NamespaceOwnershipPolicy(),
 		Because(CustomResourceCreationAdmissionPolicy(), BillingSetupRequiredMessage),
+		Policy(
+			Registered("image-admission"),
+			Query("data.image_admission.allow"),
+			WithRawBody(1<<20),
+		),
 		Policy(
 			Modules(
 				Registered("authz"),
@@ -229,6 +289,30 @@ func K8sRoutePolicy() Node {
 			),
 			Query("data.pool_admission.allow"),
 			WithRawBody(1<<20),
+		),
+		Because(
+			Policy(
+				Registered("sandbox-services-admission"),
+				Query("data.sandbox_services_admission.allow"),
+				WithRawBody(1<<20),
+			),
+			SandboxPatchRestrictedMessage,
+		),
+		Because(
+			Policy(
+				Registered("sandbox-process-admission"),
+				Query("data.sandbox_process_admission.allow"),
+				WithRawBody(1<<20),
+			),
+			SandboxProcessRestrictedMessage,
+		),
+		Because(
+			Policy(
+				Registered("tenant-secret-admission"),
+				Query("data.tenant_secret_admission.allow"),
+				WithRawBody(1<<20),
+			),
+			TenantSecretRestrictedMessage,
 		),
 	)
 }
@@ -276,6 +360,8 @@ var surfacePolicies = map[string]surfacePolicy{
 	"signed-service-urls": {tree: SignedServiceURLsRoutePolicy},
 	"state-query":         {tree: StateQueryRoutePolicy},
 	"feature-flags":       {tree: FeatureFlagsRoutePolicy, options: []MiddlewareOption{WithDeniedAudit("feature_flag_admin", featureFlagAuditBodyLimit), WithAdminAPIErrorResponses(), WithFreshAdminAuthorization()}},
+	"image-uploads":       {tree: ImageUploadsRoutePolicy},
+	"images-resolve":      {tree: ImagesResolveRoutePolicy},
 	"k8s": {
 		tree:    K8sRoutePolicy,
 		options: []MiddlewareOption{WithDeniedMessage("k8s request is not allowed")},
@@ -298,6 +384,8 @@ var routeSurfaces = map[string]string{
 	"/api/usage/overview":         "usage",
 	"/api/usage/pool":             "usage",
 	"/api/usage/browser-timings":  "usage",
+	"/api/image-uploads/presign":  "image-uploads",
+	"/api/images/resolve":         "images-resolve",
 
 	"/api/chat/conversations":            "chat",
 	"/api/chat/conversations/{id}":       "chat",

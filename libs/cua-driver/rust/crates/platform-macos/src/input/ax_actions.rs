@@ -9,6 +9,96 @@ fn is_selectable_container_role(role: &str) -> bool {
     matches!(role, "AXRow" | "AXCell" | "AXListItem" | "AXImage")
 }
 
+/// File labels can expose AXSelected themselves while AXValue stays settable
+/// for renaming. Native resource/action evidence keeps ordinary editors out.
+fn is_collection_selection_role(role: &str, has_open: bool, resource: Option<&str>) -> bool {
+    is_selectable_container_role(role)
+        || (role == "AXTextField"
+            && has_open
+            && resource.is_some_and(|url| url.starts_with("file:")))
+}
+
+pub fn is_collection_selection_element(element: AXUIElementRef, role: &str) -> bool {
+    if is_selectable_container_role(role) {
+        return true;
+    }
+    if role != "AXTextField" {
+        return false;
+    }
+    // Existing collection rows keep priority over their rename-capable label.
+    // Clicking the label itself can start Finder's inline name editor.
+    let mut parent = unsafe { copy_element_attr(element, "AXParent") };
+    for _ in 0..MAX_SELECTION_ANCESTORS {
+        let Some(current) = parent else {
+            break;
+        };
+        let parent_role = unsafe { copy_string_attr(current, "AXRole") }.unwrap_or_default();
+        let selectable = is_selectable_container_role(&parent_role)
+            && unsafe { copy_bool_attr(current, "AXSelected") }.is_some();
+        let next = if selectable || matches!(parent_role.as_str(), "AXWindow" | "AXApplication") {
+            None
+        } else {
+            unsafe { copy_element_attr(current, "AXParent") }
+        };
+        unsafe { CFRelease(current as CFTypeRef) };
+        if selectable {
+            return false;
+        }
+        parent = next;
+    }
+    if let Some(remaining) = parent {
+        unsafe { CFRelease(remaining as CFTypeRef) };
+    }
+    let has_open = unsafe { copy_action_names(element) }
+        .iter()
+        .any(|action| action == "AXOpen");
+    let resource = if has_open {
+        unsafe { crate::ax::open_document::resource_url(element) }
+    } else {
+        None
+    };
+    is_collection_selection_role(role, has_open, resource.as_deref())
+}
+
+/// Sidebar selection writes can change AXSelected without activating the
+/// navigation destination. Identify only row/cell items in a reported sidebar;
+/// ordinary file collections retain their existing selection semantics.
+pub fn is_sidebar_navigation_item(element_ptr: usize) -> bool {
+    let mut current = element_ptr as AXUIElementRef;
+    let mut owns_current = false;
+    let mut saw_item = false;
+    for _ in 0..MAX_SELECTION_ANCESTORS {
+        let role = unsafe { copy_string_attr(current, "AXRole") }.unwrap_or_default();
+        saw_item |= matches!(role.as_str(), "AXRow" | "AXCell");
+        let sidebar = saw_item
+            && role == "AXOutline"
+            && unsafe { copy_string_attr(current, "AXDescription") }
+                .is_some_and(|description| description.eq_ignore_ascii_case("sidebar"));
+        if sidebar {
+            if owns_current {
+                unsafe { CFRelease(current as CFTypeRef) };
+            }
+            return true;
+        }
+        if matches!(role.as_str(), "AXWindow" | "AXApplication") {
+            break;
+        }
+        let parent = unsafe { copy_element_attr(current, "AXParent") };
+        if owns_current {
+            unsafe { CFRelease(current as CFTypeRef) };
+        }
+        let Some(parent) = parent else {
+            return false;
+        };
+        current = parent;
+        owns_current = true;
+    }
+    if owns_current {
+        unsafe { CFRelease(current as CFTypeRef) };
+    }
+    false
+}
+
 /// Select the nearest list-like element at or above `element_ptr` and confirm
 /// the write through `AXSelected` read-back.
 ///
@@ -30,7 +120,7 @@ pub fn select_nearest_container(element_ptr: usize) -> Option<String> {
 
     for _ in 0..MAX_SELECTION_ANCESTORS {
         let role = unsafe { copy_string_attr(current, "AXRole") }.unwrap_or_default();
-        if is_selectable_container_role(&role)
+        if is_collection_selection_element(current, &role)
             && unsafe { copy_bool_attr(current, "AXSelected") }.is_some()
         {
             let err = unsafe { set_bool_attr_true(current, "AXSelected") };
@@ -48,10 +138,7 @@ pub fn select_nearest_container(element_ptr: usize) -> Option<String> {
         if owns_current {
             unsafe { CFRelease(current as CFTypeRef) };
         }
-        let Some(parent) = parent else {
-            return None;
-        };
-        current = parent;
+        current = parent?;
         owns_current = true;
     }
 
@@ -71,7 +158,7 @@ pub fn nearest_container_selection_state(element_ptr: usize) -> Option<(String, 
 
     for _ in 0..MAX_SELECTION_ANCESTORS {
         let role = unsafe { copy_string_attr(current, "AXRole") }.unwrap_or_default();
-        if is_selectable_container_role(&role) {
+        if is_collection_selection_element(current, &role) {
             if let Some(selected) = unsafe { copy_bool_attr(current, "AXSelected") } {
                 if owns_current {
                     unsafe { CFRelease(current as CFTypeRef) };
@@ -84,10 +171,7 @@ pub fn nearest_container_selection_state(element_ptr: usize) -> Option<(String, 
         if owns_current {
             unsafe { CFRelease(current as CFTypeRef) };
         }
-        let Some(parent) = parent else {
-            return None;
-        };
-        current = parent;
+        current = parent?;
         owns_current = true;
     }
 
@@ -149,7 +233,7 @@ pub fn capture_nearest_container_selection(element_ptr: usize) -> Option<Selecti
 
     for _ in 0..MAX_SELECTION_ANCESTORS {
         let role = unsafe { copy_string_attr(current, "AXRole") }.unwrap_or_default();
-        if is_selectable_container_role(&role)
+        if is_collection_selection_element(current, &role)
             && unsafe { copy_bool_attr(current, "AXSelected") }.is_some()
         {
             if !owns_current {
@@ -184,10 +268,7 @@ pub fn capture_nearest_container_selection(element_ptr: usize) -> Option<Selecti
         if owns_current {
             unsafe { CFRelease(current as CFTypeRef) };
         }
-        let Some(parent) = parent else {
-            return None;
-        };
-        current = parent;
+        current = parent?;
         owns_current = true;
     }
 
@@ -219,9 +300,10 @@ pub fn ensure_ax_action_enabled(element_ptr: usize, action: &str) -> anyhow::Res
 
 /// Perform an AX action on a cached element.
 pub fn perform_ax_action(element_ptr: usize, action: &str) -> anyhow::Result<()> {
-    let ax_action = map_action(action);
-    ensure_ax_action_enabled(element_ptr, ax_action)?;
-    let err = unsafe { perform_action(element_ptr as AXUIElementRef, ax_action) };
+    let advertised = unsafe { copy_action_names(element_ptr as AXUIElementRef) };
+    let ax_action = resolve_action(action, &advertised)?;
+    ensure_ax_action_enabled(element_ptr, &ax_action)?;
+    let err = unsafe { perform_action(element_ptr as AXUIElementRef, &ax_action) };
 
     if err == kAXErrorSuccess {
         Ok(())
@@ -230,21 +312,91 @@ pub fn perform_ax_action(element_ptr: usize, action: &str) -> anyhow::Result<()>
     }
 }
 
-fn map_action(action: &str) -> &'static str {
-    match action.to_lowercase().as_str() {
-        "press" | "click" => "AXPress",
-        "show_menu" | "right_click" | "rightclick" => "AXShowMenu",
-        "pick" => "AXPick",
-        "confirm" => "AXConfirm",
-        "cancel" => "AXCancel",
-        "open" => "AXOpen",
-        _ => "AXPress",
+/// Resolve published AX actions without substituting a press for an unknown action.
+/// Custom action names are copied verbatim from this live element's inventory.
+pub fn resolve_action(action: &str, advertised: &[String]) -> anyhow::Result<String> {
+    let normalized = action.trim().to_lowercase();
+    let canonical = match normalized.as_str() {
+        "press" | "click" | "axpress" => Some("AXPress"),
+        "show_menu" | "show menu" | "right_click" | "rightclick" | "axshowmenu" => {
+            Some("AXShowMenu")
+        }
+        "pick" | "axpick" => Some("AXPick"),
+        "confirm" | "axconfirm" => Some("AXConfirm"),
+        "cancel" | "axcancel" => Some("AXCancel"),
+        "open" | "axopen" => Some("AXOpen"),
+        _ => None,
+    };
+    if let Some(name) = canonical {
+        return Ok(name.to_owned());
     }
+    let mut matches: Vec<_> = advertised
+        .iter()
+        .filter(|name| name.to_lowercase() == normalized || public_action_name(name) == normalized)
+        .collect();
+    // AppKit can repeat the exact same custom token in one element's action
+    // inventory. Repetition does not introduce a second action; distinct raw
+    // tokens with the same public name remain ambiguous and must be refused.
+    matches.dedup();
+    if matches.len() == 1 {
+        return Ok(matches[0].to_string());
+    }
+    anyhow::bail!(
+        "Action {action:?} is not uniquely advertised by this element (live actions: {advertised:?}); no action was sent"
+    )
+}
+
+// AppKit custom names encode their visible name plus opaque target/selector
+// lines. Match the published first-line name and dispatch the full live token.
+fn public_action_name(name: &str) -> String {
+    let first = name.lines().next().unwrap_or(name);
+    let visible = first.strip_prefix("Name:").unwrap_or(first).trim();
+    visible
+        .strip_prefix("AX")
+        .unwrap_or(visible)
+        .trim()
+        .to_lowercase()
 }
 
 #[cfg(test)]
-mod tests {
+mod advertised_action_tests {
     use super::*;
+
+    #[test]
+    fn repeated_exact_custom_token_is_unique_but_distinct_tokens_are_ambiguous() {
+        let action = "Name:Customize info\nTarget:0x0\nSelector:(null)".to_owned();
+        assert_eq!(
+            resolve_action(
+                "customize info",
+                &[action.clone(), "Pin List".into(), action.clone()]
+            )
+            .unwrap(),
+            action
+        );
+        let other = "Name:Customize info\nTarget:0x1\nSelector:(null)".to_owned();
+        assert!(resolve_action("customize info", &[action, other]).is_err());
+    }
+
+    #[test]
+    fn advertised_custom_actions_keep_their_exact_name() {
+        let actions = vec![
+            "AXPress".to_owned(),
+            "Close Tab".to_owned(),
+            "AXZoomWindow".to_owned(),
+        ];
+        assert_eq!(resolve_action("close tab", &actions).unwrap(), "Close Tab");
+        assert_eq!(
+            resolve_action("zoomwindow", &actions).unwrap(),
+            "AXZoomWindow"
+        );
+        assert_eq!(resolve_action("confirm", &actions).unwrap(), "AXConfirm");
+        assert!(resolve_action("unknown", &actions).is_err());
+        let opaque = "Name:close tab\nTarget:0x123\nSelector:_closeButtonClicked:".to_owned();
+        assert_eq!(
+            resolve_action("close tab", &[opaque.clone()]).unwrap(),
+            opaque
+        );
+    }
 
     #[test]
     fn disabled_elements_are_refused_before_dispatch() {
@@ -259,6 +411,36 @@ mod tests {
     fn enabled_or_unreported_state_is_allowed() {
         assert!(ensure_ax_enabled(Some(true), "AXPress").is_ok());
         assert!(ensure_ax_enabled(None, "AXPress").is_ok());
+    }
+
+    #[test]
+    fn filename_selection_requires_both_native_file_resource_and_open_action() {
+        assert!(is_collection_selection_role(
+            "AXTextField",
+            true,
+            Some("file:///owned/request.rtf")
+        ));
+        assert!(!is_collection_selection_role(
+            "AXTextField",
+            false,
+            Some("file:///owned/request.rtf")
+        ));
+        assert!(!is_collection_selection_role("AXTextField", true, None));
+        assert!(!is_collection_selection_role(
+            "AXTextField",
+            true,
+            Some("https://example.org")
+        ));
+        assert!(!is_collection_selection_role(
+            "AXTextArea",
+            true,
+            Some("file:///owned/request.rtf")
+        ));
+        assert!(!is_collection_selection_role(
+            "AXComboBox",
+            true,
+            Some("file:///owned/request.rtf")
+        ));
     }
 
     #[test]
@@ -314,5 +496,35 @@ pub fn set_ax_value(element_ptr: usize, value: &str) -> anyhow::Result<()> {
         Ok(())
     } else {
         anyhow::bail!("AXUIElementSetAttributeValue(AXValue) failed with error {err}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn disabled_elements_are_refused_before_dispatch() {
+        let error = ensure_ax_enabled(Some(false), "AXPick").unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("AXEnabled=false"));
+        assert!(message.contains("delivery_mode:\"foreground\""));
+        assert!(message.contains("bring_to_front"));
+    }
+
+    #[test]
+    fn enabled_or_unreported_state_is_allowed() {
+        assert!(ensure_ax_enabled(Some(true), "AXPress").is_ok());
+        assert!(ensure_ax_enabled(None, "AXPress").is_ok());
+    }
+
+    #[test]
+    fn selection_fallback_is_limited_to_collection_item_roles() {
+        for role in ["AXRow", "AXCell", "AXListItem", "AXImage"] {
+            assert!(is_selectable_container_role(role), "{role}");
+        }
+        for role in ["AXButton", "AXTextField", "AXWindow", "AXOutline"] {
+            assert!(!is_selectable_container_role(role), "{role}");
+        }
     }
 }

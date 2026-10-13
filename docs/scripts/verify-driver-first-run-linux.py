@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """Disposable Ubuntu X11 tutorial smoke; never run on a personal desktop.
 
-Tests the checked-out canonical installer and its published component release,
+Tests the checked-out Cua release installer and its published component release,
 not a source-built Driver. No LLM account or client registration is exercised.
 The tutorial's standard profile is overridden with the explicitly authorized
 test-only --dangerously-bypass-approvals on this disposable desktop.
 
-The source installer is unchanged. Audited Linux recursive deletion paths are:
+On an OpenSky source-build checkout, validate its declared public routes and
+select the preserved Cua release downloader used by this Cua tutorial. The
+OpenSky source installer is not exercised or certified.
+
+The installer is unchanged. Audited Linux recursive deletion paths are:
 its mktemp staging directory, package lock/current links, old release directories,
 and the fixed legacy ~/.cua-driver-rs. Fresh task directories and disabled GC
 confine the former; an absence precondition makes legacy/local cleanup dormant.
@@ -24,6 +28,7 @@ from pathlib import Path
 import platform
 import queue
 import re
+import select
 import signal
 import subprocess
 import sys
@@ -34,6 +39,8 @@ import tomllib
 
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / ".github/scripts"))
+from validate_release_versions import driver_release_powershell_path, validate
 
 
 def require(condition, message):
@@ -64,6 +71,78 @@ def stop(process):
         except subprocess.TimeoutExpired:
             os.killpg(process.pid, signal.SIGKILL)
             process.wait(timeout=5)
+
+
+def process_identity(pid):
+    proc = Path(f"/proc/{pid}")
+    # Linux stat starts at state (field 3) after the final comm delimiter.
+    start_time = proc.joinpath("stat").read_text().rsplit(") ", 1)[1].split()[19]
+    return {"pid": pid, "start_time": start_time,
+            "executable": str(proc.joinpath("exe").resolve(strict=True))}
+
+
+def bind_launched_process(launch):
+    pid = launch.get("pid")
+    require(type(pid) is int and pid > 0 and launch.get("launcher_pid") == pid,
+            "Calculator cleanup requires the exact newly launched process")
+    before = process_identity(pid)
+    require(Path(before["executable"]).name == "galculator", "Launched Calculator executable mismatch")
+    fd = os.pidfd_open(pid)
+    try:
+        require(process_identity(pid) == before, "Calculator identity changed during cleanup binding")
+        return fd, before
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def stop_bound_process(fd):
+    """Stop the launch-bound Linux process; never fall back to a numeric PID."""
+    signals = []
+    try:
+        if not select.select([fd], [], [], 0)[0]:
+            for sig, wait in ((signal.SIGTERM, 8), (signal.SIGKILL, 5)):
+                try:
+                    signal.pidfd_send_signal(fd, sig)
+                    signals.append(sig.name)
+                except ProcessLookupError:
+                    pass  # The bound process may have just exited; observe it.
+                if select.select([fd], [], [], wait)[0]:
+                    break
+            else:
+                raise RuntimeError("Bound Calculator did not exit after owned cleanup")
+        return {"exited": True, "signals": signals, "numeric_pid_fallback": False}
+    finally:
+        os.close(fd)
+
+
+def cleanup_fixture(evidence, mcp, processes, launcher, *, launch_attempted=False):
+    receipt = {"passed": False, "launched_app": None, "mcp": None, "processes": [], "errors": []}
+    if launch_attempted and launcher is None:
+        receipt["errors"].append("Attempted Calculator launch lacks exact cleanup ownership")
+    if launcher is not None:
+        fd, identity = launcher
+        try:
+            receipt["launched_app"] = {**identity, **stop_bound_process(fd)}
+        except Exception as error:
+            receipt["errors"].append(f"Calculator cleanup: {error}")
+    if mcp is not None:
+        try:
+            mcp.close()
+            require(mcp.process.poll() is not None, "Owned MCP process still running")
+            receipt["mcp"] = {"pid": mcp.process.pid, "exit_code": mcp.process.poll()}
+        except Exception as error:
+            receipt["errors"].append(f"MCP cleanup: {error}")
+    for process in reversed(processes):
+        try:
+            stop(process)
+            require(process.poll() is not None, "Owned process still running")
+            receipt["processes"].append({"pid": process.pid, "exit_code": process.poll()})
+        except Exception as error:
+            receipt["errors"].append(f"Owned process {process.pid}: {error}")
+    receipt["passed"] = not receipt["errors"]
+    save(evidence, "cleanup.json", receipt)
+    return receipt
 
 
 class MCP:
@@ -217,6 +296,9 @@ def main():
     evidence.mkdir(exist_ok=False)
     processes = []
     mcp = None
+    launcher = None
+    launch_attempted = False
+    primary_error = None
     try:
         top = Path(run(["git", "rev-parse", "--show-toplevel"]).stdout.strip()).resolve()
         sha = run(["git", "rev-parse", "HEAD"]).stdout.strip()
@@ -237,7 +319,22 @@ def main():
         save(evidence, "provenance.json", provenance)
         require(top == ROOT and sha == os.environ["CUA_DOCS_SOURCE_SHA"] and not dirty,
                 "Source preflight must match the exact clean checkout SHA")
-        require(source_version == baked, "Source and baked release differ; review the intended release before running")
+        # Source may advance before the published installer. Reuse the existing
+        # release policy: all source/binding versions agree; baked Unix/Windows
+        # and published-state versions agree, are not withdrawn, and never lead
+        # source. This is stricter than merely dropping the old equality check.
+        validate(ROOT, "driver")
+        reference = driver_release_powershell_path(ROOT)
+        source_build = reference.name == "_upstream-install.ps1"
+        installer = scripts / ("_install-rust.sh" if source_build else "install.sh")
+        require(installer.is_file(), "Validated Cua release installer is missing")
+        provenance.update(
+            installer_entrypoint=installer.relative_to(ROOT).as_posix(),
+            source_distribution="source-build" if source_build else "published-release",
+            coverage="checked-out Cua release downloader + published Linux Cua component binary",
+            opensky_source_installation_tested=False,
+        )
+        save(evidence, "provenance.json", provenance)
         # Fixed legacy cleanup is outside the overridden package home. Refuse
         # any existing installation, symlink or service rather than sweeping it.
         for relative in (".cua-driver-rs", ".cua-driver", ".local/bin/cua-driver",
@@ -267,7 +364,7 @@ def main():
             "legacy_cleanup": "absent, checked before install", "prior_local_cleanup": "fresh empty package home",
             "release_gc": "disabled", "macos_cleanup": "unreachable on Linux",
             "process_cleanup": "no matching Driver process or user service before install"})
-        installed = run(["bash", str(scripts / "install.sh"), "--no-modify-path"], env=env,
+        installed = run(["bash", str(installer), "--no-modify-path"], env=env,
                         timeout=300, check=False)
         save(evidence, "installer.log", installed.stdout + installed.stderr)
         require(installed.returncode == 0, "Canonical installer failed; see installer.log")
@@ -275,6 +372,7 @@ def main():
         resolved = binary.resolve(strict=True)
         require(resolved.is_relative_to(task / "package/packages/releases"), "Installed binary escaped task package home")
         version = run([str(binary), "--version"], env=env).stdout.strip()
+        require(version.startswith("cua-driver "), "Installed product is not the tutorial Cua Driver")
         require(re.search(rf"(?<![\d.]){re.escape(baked)}(?![\d.])", version), "Installed version differs from baked release")
         url = f"https://github.com/trycua/cua/releases/download/cua-driver-rs-v{baked}/cua-driver-rs-{baked}-linux-x86_64-binary.tar.gz"
         require(url in installed.stdout, "Installer did not report the expected exact component asset URL")
@@ -325,7 +423,12 @@ def main():
             {tool["name"] for tool in listing["tools"]}), "MCP discovery lacks required tools")
         mcp.call("get_desktop_state", {}, "before-launch-desktop")
         before_launch = observe(evidence, "before-launch")
+        require(run(["pgrep", "-x", "galculator"], check=False).returncode == 1,
+                "A Calculator already exists; refusing to adopt it")
+        launch_attempted = True
         launch, _ = mcp.call("launch_app", {"name": "galculator"}, "launch-calculator")
+        launcher = bind_launched_process(launch)
+        save(evidence, "calculator-launch-ownership.json", launcher[1])
         pid = launch.get("pid")
         require(isinstance(pid, int) and pid > 0, "Calculator launch lacks a PID")
         windows = launch.get("windows", [])
@@ -386,13 +489,18 @@ def main():
                              "OCR evidence retained for human visual review"]})
         print("PASS: canonical release install, cold serve, readiness, MCP and native Calculator display 42")
     except Exception as error:
-        save(evidence, "result.json", {"status": "failed", "error": str(error)})
+        primary_error = str(error)
+        save(evidence, "result.json", {"status": "failed", "error": primary_error})
         raise
     finally:
-        if mcp is not None:
-            mcp.close()
-        for process in reversed(processes):
-            stop(process)
+        cleanup = cleanup_fixture(evidence, mcp, processes, launcher, launch_attempted=launch_attempted)
+        if not cleanup["passed"] and primary_error is None:
+            # Keep successful task proof separate from the cleanup failure.
+            result_path = evidence / "result.json"
+            if result_path.exists():
+                save(evidence, "task-result-before-cleanup-failure.json", result_path.read_text())
+            save(evidence, "result.json", {"status": "failed", "error": "Owned first-run cleanup failed"})
+            raise RuntimeError("Owned first-run cleanup failed; see cleanup.json")
 
 
 if __name__ == "__main__":
