@@ -1390,14 +1390,11 @@ impl Tool for GetWindowStateTool {
                 let captured = if let Some((png, width, height)) = preview {
                     Ok((png, Some((width, height))))
                 } else if overlays.covers_window {
-                    overlays
-                        .window_rect
-                        .ok_or_else(|| anyhow::anyhow!("window geometry unavailable"))
-                        .and_then(|(x, y, w, h)| {
-                            crate::capture::screenshot_root_region_png(x, y, w, h)
-                        })
-                        .or_else(|_| crate::wayland::screenshot_dispatch_with_pid(xid, pid))
-                        .map(|png| (png, None))
+                    let allowed:Vec<_>=overlays.dialogs.iter().chain(overlays.popups.iter())
+                        .filter_map(|overlay|Some((overlay["window_id"].as_u64()?,
+                            overlay.get("owning_pid").and_then(Value::as_u64).map(|owner|owner as u32).unwrap_or(pid))))
+                        .collect();
+                    crate::capture::screenshot_window_scene(xid,pid,&allowed).map(|png|(png,None))
                 } else {
                     crate::wayland::screenshot_dispatch_with_pid(xid, pid).map(|png| (png, None))
                 };
@@ -1445,7 +1442,15 @@ impl Tool for GetWindowStateTool {
                         Some((b64, file_path, w, h, original_w, capture_id))
                     }
                     Err(error) if crate::wayland::is_surface_identity_unproven(&error) => {
-                        screenshot_error = Some(error.to_string());
+                        screenshot_error = Some(surface_identity_unproven_error(xid, error.to_string()));
+                        None
+                    }
+                    Err(error) if crate::capture::is_window_capture_unavailable(&error) => {
+                        screenshot_error = Some(json!({
+                            "code": "window_capture_unavailable", "window_id": xid,
+                            "reason": error.to_string(),
+                            "suggestion": "Explicitly authorize bring_to_front, or use existing compositor backing; then obtain a fresh screenshot. No activation was performed."
+                        }));
                         None
                     }
                     // The window passed the ownership check above and went
@@ -1770,8 +1775,7 @@ impl Tool for GetWindowStateTool {
                 }
                 if let Some(reason) = &screenshot_error {
                     structured["screenshot_frame_valid"] = json!(false);
-                    structured["screenshot_error"] =
-                        surface_identity_unproven_error(xid, reason.clone());
+                    structured["screenshot_error"] = reason.clone();
                 }
                 // Window identity metadata (additive): app + title + on-screen
                 // rectangle for the requested window_id, useful on the
@@ -1829,6 +1833,9 @@ impl Tool for GetWindowStateTool {
                         Some(reason) => format!(" and no screenshot could be captured ({reason})"),
                         None => " and no screenshot was returned".to_string(),
                     };
+                    if let Some(error) = &screenshot_error {
+                        structured["code"] = error["code"].clone();
+                    }
                     return ToolResult::error(format!(
                         "No content produced for window_id {xid}: the accessibility tree was \
                          skipped (include_accessibility_tree:false){reason_note}."

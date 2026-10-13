@@ -3,7 +3,9 @@
 //! Strategy (in order of preference) for per-window X11 capture:
 //! 1. Persistent MIT-SHM (`shm_get_image`) via x11rb — warm path, no subprocess
 //! 2. Persistent plain `XGetImage` via x11rb — still in-process
-//! 3. `import -window <xid> png:-` (ImageMagick compatibility fallback)
+//! Existing Composite backing pixmaps preserve covered pixels; otherwise capture
+//! requires an unobscured, fully on-screen window, attested atomically with read.
+//! An external ImageMagick window fallback cannot maintain this guarantee.
 //!
 //! Main-display capture keeps its own dispatch (Wayland cascade → ImageMagick →
 //! root `XGetImage`). Wayland-native per-window paths are not routed into XShm.
@@ -34,13 +36,268 @@ const MAX_CAPTURE_BYTES: usize = 1 << 30;
 /// after this backoff. Request/capture failures never use this path.
 const XSHM_INIT_RETRY_BACKOFF: Duration = Duration::from_secs(30);
 
+/// X11 cannot attest pixels from an unbacked, obscured drawable.
+#[derive(Debug, thiserror::Error)]
+#[error("window_capture_unavailable: X11 window {window_id}: {reason}")]
+pub struct WindowCaptureUnavailable {
+    window_id: u64,
+    reason: String,
+}
+fn window_capture_unavailable(xid: u64, reason: impl Into<String>) -> anyhow::Error {
+    WindowCaptureUnavailable {
+        window_id: xid,
+        reason: reason.into(),
+    }
+    .into()
+}
+pub fn is_window_capture_unavailable(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<WindowCaptureUnavailable>().is_some()
+}
+
+// Keep attestation and pixel read on one connection under a short server grab.
+// This guard releases even on early error/unwind, before PNG encoding.
+struct ServerGrab<'a>(&'a x11rb::rust_connection::RustConnection);
+impl<'a> ServerGrab<'a> {
+    fn new(conn: &'a x11rb::rust_connection::RustConnection) -> Result<Self> {
+        use x11rb::protocol::xproto::ConnectionExt as _;
+        conn.grab_server()?.check()?;
+        Ok(Self(conn))
+    }
+}
+impl Drop for ServerGrab<'_> {
+    fn drop(&mut self) {
+        use x11rb::protocol::xproto::ConnectionExt as _;
+        let _ = self.0.ungrab_server();
+        let _ = self.0.flush();
+    }
+}
+struct AttestedDrawable<'a> {
+    conn: &'a x11rb::rust_connection::RustConnection,
+    id: u32,
+    visual: u32,
+    offset: i16,
+    pixmap: bool,
+}
+impl Drop for AttestedDrawable<'_> {
+    fn drop(&mut self) {
+        use x11rb::protocol::xproto::ConnectionExt as _;
+        if self.pixmap {
+            let _ = self.conn.free_pixmap(self.id);
+        }
+    }
+}
+#[derive(Clone, Copy)]
+struct CaptureRect {
+    x: i64,
+    y: i64,
+    w: i64,
+    h: i64,
+}
+impl CaptureRect {
+    fn contains(self, other: Self) -> bool {
+        other.x >= self.x
+            && other.y >= self.y
+            && other.x + other.w <= self.x + self.w
+            && other.y + other.h <= self.y + self.h
+    }
+    fn overlaps(self, other: Self) -> bool {
+        self.x < other.x + other.w
+            && other.x < self.x + self.w
+            && self.y < other.y + other.h
+            && other.y < self.y + self.h
+    }
+}
+fn capture_rect(
+    conn: &x11rb::rust_connection::RustConnection,
+    window: u32,
+    root: u32,
+) -> Result<CaptureRect> {
+    use x11rb::protocol::xproto::ConnectionExt as _;
+    let geom = conn.get_geometry(window)?.reply()?;
+    let pos = conn.translate_coordinates(window, root, 0, 0)?.reply()?;
+    if !pos.same_screen {
+        bail!("drawable belongs to a different screen");
+    }
+    Ok(CaptureRect {
+        x: i64::from(pos.dst_x),
+        y: i64::from(pos.dst_y),
+        w: i64::from(geom.width),
+        h: i64::from(geom.height),
+    })
+}
+fn capture_border_rect(
+    conn: &x11rb::rust_connection::RustConnection,
+    window: u32,
+    root: u32,
+) -> Result<CaptureRect> {
+    use x11rb::protocol::xproto::ConnectionExt as _;
+    let mut rect = capture_rect(conn, window, root)?;
+    let border = i64::from(conn.get_geometry(window)?.reply()?.border_width);
+    rect.x -= border;
+    rect.y -= border;
+    rect.w += 2 * border;
+    rect.h += 2 * border;
+    Ok(rect)
+}
+fn attest_bounding_shape(
+    conn: &x11rb::rust_connection::RustConnection,
+    window: u32,
+    root: u32,
+    target: CaptureRect,
+) -> Result<()> {
+    use x11rb::protocol::shape::{ConnectionExt as _, SK};
+    // A server without SHAPE cannot clip this rectangle with a window shape.
+    let cookie = match conn.shape_query_extents(window) {
+        Ok(cookie) => cookie,
+        Err(x11rb::errors::ConnectionError::UnsupportedExtension) => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    if !cookie.reply()?.bounding_shaped {
+        return Ok(());
+    }
+    let origin = capture_rect(conn, window, root)?;
+    let rectangles = conn
+        .shape_get_rectangles(window, SK::BOUNDING)?
+        .reply()?
+        .rectangles;
+    if rectangles.iter().any(|r| {
+        CaptureRect {
+            x: origin.x + i64::from(r.x),
+            y: origin.y + i64::from(r.y),
+            w: i64::from(r.width),
+            h: i64::from(r.height),
+        }
+        .contains(target)
+    }) {
+        return Ok(());
+    }
+    Err(window_capture_unavailable(u64::from(window),"Target rectangle is not wholly contained in an attested bounding shape; unbacked pixels are unavailable."))
+}
+fn attest_unbacked_window(
+    conn: &x11rb::rust_connection::RustConnection,
+    window: u32,
+    root: u32,
+    allowed_above: &[u32],
+) -> Result<()> {
+    use x11rb::protocol::xproto::{ConnectionExt as _, MapState, WindowClass};
+    if conn.get_window_attributes(window)?.reply()?.map_state != MapState::VIEWABLE {
+        return Err(window_capture_unavailable(
+            u64::from(window),
+            "Target is not viewable; no current target pixels can be attested.",
+        ));
+    }
+    let target = capture_rect(conn, window, root)?;
+    let mut current = window;
+    for _ in 0..128 {
+        let tree = conn.query_tree(current)?.reply()?;
+        if current == root {
+            return Ok(());
+        }
+        if tree.parent == 0 || tree.parent == current {
+            bail!("window ancestry is unproven");
+        }
+        attest_bounding_shape(conn, current, root, target)?;
+        if !capture_rect(conn, tree.parent, root)?.contains(target) {
+            return Err(window_capture_unavailable(u64::from(window),
+                "Target pixels are clipped or off-screen and have no Composite backing; explicitly authorize foreground visibility before retrying."));
+        }
+        let siblings = conn.query_tree(tree.parent)?.reply()?.children;
+        let rank = siblings
+            .iter()
+            .position(|id| *id == current)
+            .ok_or_else(|| anyhow!("window ancestry changed"))?;
+        for &above in &siblings[rank + 1..] {
+            if allowed_above.contains(&above) {
+                continue;
+            }
+            let attrs = conn.get_window_attributes(above)?.reply()?;
+            if attrs.class == WindowClass::INPUT_OUTPUT
+                && attrs.map_state == MapState::VIEWABLE
+                && capture_border_rect(conn, above, root)?.overlaps(target)
+            {
+                // Conservative for shaped/transparent windows. Never inspect
+                // darkness or mutate redirection, stacking, focus or repaint.
+                return Err(window_capture_unavailable(u64::from(window),
+                    "Target pixels are occluded and have no existing Composite backing. Explicitly authorize bring_to_front, or enable a compositor that maintains backing pixels, then capture again."));
+            }
+        }
+        current = tree.parent;
+    }
+    Err(window_capture_unavailable(
+        u64::from(window),
+        "Window ancestry exceeds the attestation bound.",
+    ))
+}
+fn attested_drawable<'a>(
+    conn: &'a x11rb::rust_connection::RustConnection,
+    window: u32,
+) -> Result<AttestedDrawable<'a>> {
+    use x11rb::protocol::composite::ConnectionExt as _;
+    use x11rb::protocol::xproto::{ConnectionExt as _, MapState};
+    let attrs = conn.get_window_attributes(window)?.reply()?;
+    if attrs.map_state != MapState::VIEWABLE {
+        return Err(window_capture_unavailable(
+            u64::from(window),
+            "Target is not viewable; no current target pixels can be attested.",
+        ));
+    }
+    let geom = conn.get_geometry(window)?.reply()?;
+    // Name only an already-redirected backing. Never redirect a window during
+    // observation: its initial covered contents would remain undefined.
+    if conn
+        .composite_query_version(0, 4)
+        .ok()
+        .and_then(|cookie| cookie.reply().ok())
+        .is_some()
+    {
+        let pixmap = conn.generate_id()?;
+        if conn
+            .composite_name_window_pixmap(window, pixmap)?
+            .check()
+            .is_ok()
+        {
+            let backing = AttestedDrawable {
+                conn,
+                id: pixmap,
+                visual: attrs.visual,
+                offset: i16::try_from(geom.border_width)?,
+                pixmap: true,
+            };
+            let pixels = conn.get_geometry(pixmap)?.reply()?;
+            if pixels.depth != geom.depth
+                || u32::from(pixels.width)
+                    < u32::from(geom.width) + 2 * u32::from(geom.border_width)
+                || u32::from(pixels.height)
+                    < u32::from(geom.height) + 2 * u32::from(geom.border_width)
+            {
+                return Err(window_capture_unavailable(
+                    u64::from(window),
+                    "Existing backing pixmap geometry does not match the exact target.",
+                ));
+            }
+            return Ok(backing);
+        }
+    }
+    attest_unbacked_window(conn, window, geom.root, &[])?;
+    Ok(AttestedDrawable {
+        conn,
+        id: window,
+        visual: attrs.visual,
+        offset: 0,
+        pixmap: false,
+    })
+}
+
 /// Capture a window by X11 XID. Returns raw PNG bytes.
 pub fn screenshot_window_bytes(xid: u64) -> Result<Vec<u8>> {
     capture_window_with_backends(
         xid,
         capture_via_xshm,
         capture_via_persistent_xgetimage,
-        capture_via_import,
+        |xid| {
+            Err(window_capture_unavailable(xid,
+            "No attested in-process capture succeeded; external window capture cannot keep exposure and pixel reads atomic."))
+        },
     )
 }
 
@@ -66,12 +323,14 @@ fn capture_window_with_backends(
     let xshm_err = match xshm(xid) {
         Ok(bytes) if !bytes.is_empty() => return Ok(bytes),
         Ok(_) => "XShm returned empty image".to_string(),
+        Err(e) if is_window_capture_unavailable(&e) => return Err(e),
         Err(e) => format!("{e:#}"),
     };
 
     let xgetimage_err = match xgetimage(xid) {
         Ok(bytes) if !bytes.is_empty() => return Ok(bytes),
         Ok(_) => "XGetImage returned empty image".to_string(),
+        Err(e) if is_window_capture_unavailable(&e) => return Err(e),
         Err(e) => format!("{e:#}"),
     };
 
@@ -92,8 +351,10 @@ fn capture_window_with_backends(
 /// its interactive `XSelectWindow`: it grabs the X server and waits for a
 /// mouse click that never comes, and every other X client on the display
 /// hangs with it until the process dies. Killing it releases the grab.
+#[cfg(test)]
 const IMPORT_TIMEOUT: Duration = Duration::from_secs(5);
 
+#[cfg(test)]
 fn capture_via_import(xid: u64) -> Result<Vec<u8>> {
     if !crate::x11::window_exists(xid) {
         bail!("window {xid} no longer exists");
@@ -644,12 +905,21 @@ impl XShmSession {
             (buf.seg, buf.map.len())
         };
 
+        let _server = ServerGrab::new(&self.conn)?;
+        let fresh = self.conn.get_geometry(window)?.reply()?;
+        if fresh.width != geom.width || fresh.height != geom.height || fresh.depth != geom.depth {
+            return Err(window_capture_unavailable(
+                xid,
+                "Window resized during capture preparation; obtain a fresh observation.",
+            ));
+        }
+        let drawable = attested_drawable(&self.conn, window)?;
         let reply = self
             .conn
             .shm_get_image(
-                window,
-                0,
-                0,
+                drawable.id,
+                drawable.offset,
+                drawable.offset,
                 geom.width,
                 geom.height,
                 !0u32,
@@ -693,7 +963,7 @@ impl XShmSession {
             h,
             decoder: self
                 .pixels
-                .decoder(w, h, reply.depth, reply.visual, |visual| {
+                .decoder(w, h, reply.depth, drawable.visual, |visual| {
                     query_direct_colors(&self.conn, window, visual)
                 })?,
         })
@@ -754,6 +1024,7 @@ fn capture_raw_via_xshm_state(guard: &mut XShmState, display: &str, xid: u64) ->
 
     match first {
         Ok(frame) => Ok(frame),
+        Err(error) if is_window_capture_unavailable(&error) => Err(error),
         Err(first_err) => {
             // Cached session failure: discard/detach and reconnect+retry once.
             *guard = XShmState::Uninit;
@@ -772,6 +1043,7 @@ fn capture_raw_via_xshm_state(guard: &mut XShmState, display: &str, xid: u64) ->
             };
             match second {
                 Ok(frame) => Ok(frame),
+                Err(error) if is_window_capture_unavailable(&error) => return Err(error),
                 Err(second_err) => {
                     let combined = format!("first: {first_err:#}; retry: {second_err:#}");
                     // Request/capture failures never enter Unsupported.
@@ -831,6 +1103,7 @@ fn capture_via_persistent_xgetimage(xid: u64) -> Result<Vec<u8>> {
 
     let frame = match first {
         Ok(frame) => frame,
+        Err(error) if is_window_capture_unavailable(&error) => return Err(error),
         Err(first_err) => {
             // Cached connection failure → reconnect once.
             *guard = None;
@@ -838,7 +1111,9 @@ fn capture_via_persistent_xgetimage(xid: u64) -> Result<Vec<u8>> {
                 .map_err(|e| anyhow!("XGetImage reconnect after error ({first_err:#}): {e:#}"))?;
             match guard.as_mut() {
                 Some(session) => session.capture_raw(xid).map_err(|e| {
-                    anyhow!("XGetImage failed after reconnect (first: {first_err:#}): {e:#}")
+                    e.context(format!(
+                        "XGetImage failed after reconnect (first: {first_err:#})"
+                    ))
                 })?,
                 None => {
                     bail!("XGetImage session missing after reconnect (first: {first_err:#})")
@@ -878,6 +1153,8 @@ impl XGetImageSession {
         use x11rb::protocol::xproto::{ConnectionExt as _, ImageFormat};
 
         let window = xid_to_window(xid)?;
+        let _server = ServerGrab::new(&self.conn)?;
+        let drawable = attested_drawable(&self.conn, window)?;
         let geom = self
             .conn
             .get_geometry(window)
@@ -893,9 +1170,9 @@ impl XGetImageSession {
             .conn
             .get_image(
                 ImageFormat::Z_PIXMAP,
-                window,
-                0,
-                0,
+                drawable.id,
+                drawable.offset,
+                drawable.offset,
                 geom.width,
                 geom.height,
                 !0u32,
@@ -921,11 +1198,80 @@ impl XGetImageSession {
             data: img.data,
             w,
             h,
-            decoder: self.pixels.decoder(w, h, img.depth, img.visual, |visual| {
-                query_direct_colors(&self.conn, window, visual)
-            })?,
+            decoder: self
+                .pixels
+                .decoder(w, h, img.depth, drawable.visual, |visual| {
+                    query_direct_colors(&self.conn, window, visual)
+                })?,
         })
     }
+}
+
+/// Capture a visible target plus its currently attested owned overlays.
+/// Unrelated covering windows refuse; no external command or foreground change.
+pub fn screenshot_window_scene(xid: u64, pid: u32, overlays: &[(u64, u32)]) -> Result<Vec<u8>> {
+    use x11rb::protocol::xproto::{ConnectionExt as _, ImageFormat};
+    let window = xid_to_window(xid)?;
+    let (conn, screen) = x11rb::rust_connection::RustConnection::connect(None)?;
+    let pixels = PixelCatalog::from_setup(conn.setup());
+    let root = conn.setup().roots[screen].root;
+    let frame = {
+        let _server = ServerGrab::new(&conn)?;
+        let owners = crate::x11::OwnerResolver::new(&conn);
+        if owners.owner_pid(window) != Some(pid) {
+            return Err(window_capture_unavailable(
+                xid,
+                "Exact target owner changed before scene capture.",
+            ));
+        }
+        let mut allowed = Vec::new();
+        for &(id, owner) in overlays {
+            let mut child = xid_to_window(id)?;
+            if owners.owner_pid(child) != Some(owner) {
+                return Err(window_capture_unavailable(
+                    xid,
+                    "Overlay ownership is not current; refresh state.",
+                ));
+            }
+            for _ in 0..128 {
+                if child == root {
+                    break;
+                }
+                allowed.push(child);
+                let parent = conn.query_tree(child)?.reply()?.parent;
+                if parent == 0 || parent == child {
+                    return Err(window_capture_unavailable(
+                        xid,
+                        "Overlay ancestry is unproven.",
+                    ));
+                }
+                child = parent;
+            }
+        }
+        attest_unbacked_window(&conn, window, root, &allowed)?;
+        let rect = capture_rect(&conn, window, root)?;
+        let image = conn
+            .get_image(
+                ImageFormat::Z_PIXMAP,
+                root,
+                i16::try_from(rect.x)?,
+                i16::try_from(rect.y)?,
+                u16::try_from(rect.w)?,
+                u16::try_from(rect.h)?,
+                !0,
+            )?
+            .reply()?;
+        let (w, h) = (u32::try_from(rect.w)?, u32::try_from(rect.h)?);
+        RawFrame {
+            data: image.data,
+            w,
+            h,
+            decoder: pixels.decoder(w, h, image.depth, image.visual, |visual| {
+                query_direct_colors(&conn, root, visual)
+            })?,
+        }
+    };
+    packed_zpixmap_to_png(&frame.data, frame.w, frame.h, frame.decoder)
 }
 
 /// Public version of png_dimensions for use in tool code.
@@ -1430,6 +1776,14 @@ mod tests {
         assert_eq!(xshm_calls.get(), 1);
         assert_eq!(xgetimage_calls.get(), 0);
         assert_eq!(imagemagick_calls.get(), 0);
+        let refused = capture_window_with_backends(
+            42,
+            |_| Err(window_capture_unavailable(42, "occluded target")),
+            |_| panic!("unproven pixels must not fall through to XGetImage"),
+            |_| panic!("unproven pixels must not fall through to external capture"),
+        )
+        .unwrap_err();
+        assert!(is_window_capture_unavailable(&refused));
     }
 
     #[test]

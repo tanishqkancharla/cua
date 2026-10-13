@@ -538,14 +538,14 @@ the client is remote or forwarded, or the server is outside this PID namespace";
 /// subject to the fail-closed rules in [`crate::x11_client_pid`]. The XRes
 /// probe runs at most once per connection and only for windows that lack
 /// `_NET_WM_PID`.
-struct OwnerResolver<'c> {
+pub(crate) struct OwnerResolver<'c> {
     conn: &'c RustConnection,
     xres: std::cell::OnceCell<bool>,
     hostname: std::cell::OnceCell<Option<String>>,
 }
 
 impl<'c> OwnerResolver<'c> {
-    fn new(conn: &'c RustConnection) -> Self {
+    pub(crate) fn new(conn: &'c RustConnection) -> Self {
         Self {
             conn,
             xres: std::cell::OnceCell::new(),
@@ -553,7 +553,7 @@ impl<'c> OwnerResolver<'c> {
         }
     }
 
-    fn owner_pid(&self, window: Window) -> Option<u32> {
+    pub(crate) fn owner_pid(&self, window: Window) -> Option<u32> {
         match get_window_pid(self.conn, window) {
             Ok(Some(pid)) => Some(pid),
             Ok(None) => self.xres_pid(window),

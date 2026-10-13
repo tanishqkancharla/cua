@@ -36,3 +36,10 @@ Runtime authorization revocation remains distinct: named and anonymous calls ret
 
 
 Current SDK0.2.4 fixes custom-action display when upstream Markdown omits intrinsic ShowMenu but the structured inventory retains it. Real Notes selection/reparenting/exact styled-note archive, Finder labels and primary-button controls pass on the prior455a binary, which carries the same Mac platform implementation. Current native X11 capture control38453584125 confirms a black covered GTK frame on Bookworm/Node22.23.3 TigerVNC/XFWM4 compositor off with bounded grants:99.9827% of pixels differ from the visible frame while the driver declares valid=true. Foreground and AT-SPI text remain intact; all owned process cleanup passes. Capture issue53 remains unresolved. [SDK evidence](https://github.com/tanishqkancharla/opensky/blob/main/docs/linux-covered-capture-53.json).
+
+
+## Covered native X11 capture candidate (issue53)
+
+XGetImage/XShm on obscured unbacked windows may return undefined pixels (Xlib specification). The candidate names an existing Composite pixmap where available without enabling redirection. Otherwise a short RAII server grab attests viewability, screen/ancestor clipping and stacking, then reads pixels on that same connection. PNG encoding happens after releasing the grab. Known owned popup/dialog scenes retain root capture with current owner/ancestry checks; unrelated covering windows refuse. Raw action/input paths and foreground remain unchanged.
+
+A terminal window_capture_unavailable error stops backend fallback; an external ImageMagick window read cannot hold the same attestation. Desktop root capture is unchanged, and the existing ignored ImageMagick performance reference remains test-only. get_window_state retains real AT-SPI data with screenshot_frame_valid:false and a typed error/suggestion instead of a corrupt frame. This is a candidate: Linux compilation, real composited/noncomposited effects and existing capture regressions remain required. Shaped/transparent unbacked windows are handled conservatively; no darkness heuristic, activation, redirection or repaint is used.
