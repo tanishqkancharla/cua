@@ -499,3 +499,15 @@ def test_compare_pages_that_stop_short_are_refused():
     client = PagedCompareGitHub(total=250, reported_total=300)
     with pytest.raises(release_attribution.ReleaseError, match="refusing partial"):
         client.all_pull_commits("trycua/cua-staging", large_pull())
+
+
+def test_large_merged_pr_compares_recorded_base_sha_after_main_advances():
+    client = PagedCompareGitHub()
+    pull = large_pull()
+    pull["base"]["sha"] = "a" * 40
+    commits = client.all_pull_commits("trycua/cua-staging", pull)
+    assert len(commits) == 300
+    assert client.paths[0] == (
+        "repos/trycua/cua-staging/compare/" + "a" * 40 + "..." + "f" * 40
+        + "?per_page=100&page=1"
+    )

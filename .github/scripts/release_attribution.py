@@ -197,7 +197,9 @@ class GitHubClient:
             commits = self.pull_commits(repository, number)
             expected = expected or len(commits)
         else:
-            base_ref = str((pull.get("base") or {}).get("ref") or "")
+            base = pull.get("base") or {}
+            # The branch may have advanced (or already contain this merged PR).
+            base_ref = str(base.get("sha") or base.get("ref") or "")
             head_sha = str((pull.get("head") or {}).get("sha") or "")
             if not base_ref or not head_sha:
                 raise ReleaseError(f"pull request #{number} has no readable base or head")
