@@ -91,7 +91,7 @@ fn assert_admission_hint(driver_home: Option<&Path>, admitted: bool) {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(1), "{stderr}");
     assert!(
-        stderr.contains("Cua Driver daemon is not running."),
+        stderr.contains("OpenSky Driver daemon is not running."),
         "{stderr}"
     );
     assert_eq!(
