@@ -3675,5 +3675,5 @@
       "read_only": false
     }
   ],
-  "provenance": "Reconciled from immutable upstream ad694f82aaaa12e67257e4510837fc1f6cfc9484 and retained fork fields; full_output copied from the shared window_state_view schema. Native platform dump verification pending."
+  "provenance": "Reconciled from immutable upstream ae2c117cd96673bb2dc0c2b3bff023ad70586b92 and retained OpenSky fork fields; native platform dump verification remains pending."
 }

@@ -8,7 +8,7 @@
 
 #![cfg(any(unix, target_os = "windows"))]
 
-use cua_driver_testkit::spawn_in_job;
+use cua_driver_testkit::{driver_binary, spawn_in_job, ChildReaper};
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -114,7 +114,7 @@ async fn relay(
     }
 }
 
-struct Process(Child, #[allow(dead_code)] tempfile::TempDir);
+struct Process(Option<Child>, #[allow(dead_code)] tempfile::TempDir);
 
 impl Process {
     fn spawn(args: &[&str]) -> Self {
@@ -124,7 +124,7 @@ impl Process {
 
     fn spawn_with_session_ttl(args: &[&str], session_ttl_seconds: u64) -> Self {
         let driver_home = tempfile::tempdir().expect("isolated driver state");
-        let mut command = Command::new(env!("CARGO_BIN_EXE_cua-driver"));
+        let mut command = Command::new(driver_binary());
         command
             .args(args)
             .stdin(Stdio::piped())
@@ -143,15 +143,21 @@ impl Process {
             .env("CUA_DRIVER_LOCAL_HOME", driver_home.path())
             .env("CUA_DRIVER_RS_HOME", driver_home.path());
         Self(
-            spawn_in_job(&mut command).expect("spawn source-built driver"),
+            Some(spawn_in_job(&mut command).expect("spawn source-built driver")),
             driver_home,
         )
+    }
+
+    fn child(&mut self) -> &mut Child {
+        self.0
+            .as_mut()
+            .expect("owned child remains until Process drop")
     }
 
     fn exit(&mut self) -> std::process::ExitStatus {
         let deadline = Instant::now() + BOUND;
         loop {
-            if let Some(status) = self.0.try_wait().unwrap() {
+            if let Some(status) = self.child().try_wait().unwrap() {
                 return status;
             }
             assert!(
@@ -180,8 +186,10 @@ fn recovery_idle_seconds() -> u64 {
 
 impl Drop for Process {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        if let Some(child) = self.0.take() {
+            let mut reaper = ChildReaper::new();
+            reaper.push(child);
+        }
     }
 }
 
@@ -195,8 +203,8 @@ struct Client {
 impl Client {
     fn spawn(endpoint: &str) -> Self {
         let mut process = Process::spawn(&["mcp", "--socket", endpoint]);
-        let stdin = process.0.stdin.take();
-        let stdout = process.0.stdout.take().unwrap();
+        let stdin = process.child().stdin.take();
+        let stdout = process.child().stdout.take().unwrap();
         let (tx, responses) = mpsc::channel();
         std::thread::spawn(move || {
             for line in std::io::BufReader::new(stdout).lines() {
@@ -361,7 +369,7 @@ async fn real_proxies_recover_from_control_loss_without_waiting_for_stdin() {
     let deadline = Instant::now() + BOUND;
     loop {
         assert!(
-            daemon.0.try_wait().unwrap().is_none(),
+            daemon.child().try_wait().unwrap().is_none(),
             "daemon exited during startup"
         );
         if connect(&daemon_endpoint).await.is_ok() {
@@ -419,7 +427,7 @@ async fn real_proxies_recover_from_control_loss_without_waiting_for_stdin() {
     session_active(&daemon_endpoint, "survivor").await;
     survivor.call("get_config", json!({"session":"survivor"}));
     assert!(
-        daemon.0.try_wait().unwrap().is_none(),
+        daemon.child().try_wait().unwrap().is_none(),
         "daemon must survive selective loss"
     );
 
@@ -460,7 +468,7 @@ async fn idle_reclaimed_unnamed_session_is_recreated_through_the_daemon() {
     let deadline = Instant::now() + BOUND;
     while connect(&endpoint).await.is_err() {
         assert!(
-            daemon.0.try_wait().unwrap().is_none(),
+            daemon.child().try_wait().unwrap().is_none(),
             "daemon exited during startup"
         );
         assert!(Instant::now() < deadline, "daemon readiness timeout");
@@ -497,4 +505,42 @@ async fn idle_reclaimed_unnamed_session_is_recreated_through_the_daemon() {
     );
     client.call("start_session", json!({"session": "named-idle"}));
     client.call("get_config", json!({"session": "named-idle"}));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn daemon_drop_reaps_its_owned_process_group() {
+    let directory = tempfile::Builder::new()
+        .prefix("cua-reap-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let socket = directory.path().join("d.sock");
+    let endpoint = socket.to_str().unwrap();
+    let mut daemon = Process::spawn(&[
+        "serve",
+        "--socket",
+        endpoint,
+        "--no-overlay",
+        "--no-permissions-gate",
+    ]);
+    let group = i32::try_from(daemon.child().id()).unwrap();
+    let deadline = Instant::now() + BOUND;
+    while connect(endpoint).await.is_err() {
+        assert!(Instant::now() < deadline, "owned daemon readiness timeout");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    drop(daemon);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        if unsafe { libc::kill(-group, 0) } == -1
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "owned daemon process group survives fixture drop"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
