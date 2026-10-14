@@ -263,6 +263,9 @@ fn assert_tools_list_schema_shape(mut d: RawDriver) {
         "browser_prepare",
         // The batch's default for its steps' own delivery_mode.
         "run_steps",
+        // macOS desktop pointers require explicit foreground over background apps.
+        #[cfg(target_os = "macos")]
+        "move_cursor",
         // OpenSky retains the verified Mac set_value delivery ladder.
         "set_value",
         #[cfg(target_os = "macos")]

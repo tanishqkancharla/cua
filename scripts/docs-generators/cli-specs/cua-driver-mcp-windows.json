@@ -1,7 +1,7 @@
 {
   "tools": [
     {
-      "description": "List Windows apps \u2014 both currently running and installed-but-not-running \u2014 with per-app state flags:\n\n- running: is a process for this app live? (pid is 0 when false)\n- active: is it the system-frontmost app? (implies running)\n- kind: `\"desktop\"` for `.exe`-backed apps (resolved from Start-Menu shortcuts) or `\"uwp\"` for packaged store apps.\n- launch_path: what `launch_app` would consume.\n* desktop: full `.exe` commandline (path + any arguments preserved from the source `.lnk`; the exe is quoted when it contains whitespace).\n* uwp: `shell:appsFolder\\{PackageFamilyName}!{AppId}` where `{AppId}` falls back to `App` when the package manifest does not expose a specific Application.Id.\n- last_used: RFC3339 mtime of the launcher (`.lnk` for desktop, package install location for UWP), when readable.\n\nRunning apps are derived from visible top-level windows + the foreground pid (mirrors NSApplicationActivationPolicyRegular's intent: background services and console processes are excluded). Installed apps are merged from Start-Menu `.lnk` enumeration and the WinRT PackageManager \u2014 running processes whose executable matches a Start-Menu target are folded into a single entry with `running: true`.\n\nUse this for \"is X installed?\" as well as \"is X running?\". For per-window state \u2014 on-screen, minimized, window titles \u2014 call list_windows instead. For just opening an app \u2014 running or not \u2014 call launch_app({path: ...}) directly; list_apps is not a prerequisite.",
+      "description": "List Windows apps — both currently running and installed-but-not-running — with per-app state flags:\n\n- running: is a process for this app live? (pid is 0 when false)\n- active: is it the system-frontmost app? (implies running)\n- kind: `\"desktop\"` for `.exe`-backed apps (resolved from Start-Menu shortcuts) or `\"uwp\"` for packaged store apps.\n- launch_path: what `launch_app` would consume.\n* desktop: full `.exe` commandline (path + any arguments preserved from the source `.lnk`; the exe is quoted when it contains whitespace).\n* uwp: `shell:appsFolder\\{PackageFamilyName}!{AppId}` where `{AppId}` falls back to `App` when the package manifest does not expose a specific Application.Id.\n- last_used: RFC3339 mtime of the launcher (`.lnk` for desktop, package install location for UWP), when readable.\n\nRunning apps are derived from visible top-level windows + the foreground pid (mirrors NSApplicationActivationPolicyRegular's intent: background services and console processes are excluded). Installed apps are merged from Start-Menu `.lnk` enumeration and the WinRT PackageManager — running processes whose executable matches a Start-Menu target are folded into a single entry with `running: true`.\n\nUse this for \"is X installed?\" as well as \"is X running?\". For per-window state — on-screen, minimized, window titles — call list_windows instead. For just opening an app — running or not — call launch_app({path: ...}) directly; list_apps is not a prerequisite.",
       "destructive": false,
       "idempotent": true,
       "input_schema": {
@@ -18,7 +18,7 @@
       "read_only": true
     },
     {
-      "description": "List every top-level window currently known to the window manager. Each record self-contains its owning app identity so the caller never has to join back against list_apps.\n\nUse this \u2014 not list_apps \u2014 for any window-level reasoning: \"does this app have a visible window right now?\", \"which of this pid's windows is the main one?\".\n\nPer-record fields: window_id (HWND), pid + app_name, title, bounds {x, y, width, height}, layer (always 0), z_index (integer or null; higher values are closer to the front; null means stacking order is unavailable and callers must not infer one), is_on_screen, minimized. To select a frontmost candidate, take the maximum integer z_index; if every value is null, use an explicit fallback instead of relying on array order. The macOS-specific on_current_space / space_ids fields are omitted on Windows; current_space_id is null.\n\nInputs: pid (optional pid filter), app (app-name filter), on_screen_only (bool, default false). Filter with app or pid: an unfiltered call lists every window.",
+      "description": "List every top-level window currently known to the window manager. Each record self-contains its owning app identity so the caller never has to join back against list_apps.\n\nUse this — not list_apps — for any window-level reasoning: \"does this app have a visible window right now?\", \"which of this pid's windows is the main one?\".\n\nPer-record fields: window_id (HWND), pid + app_name, title, bounds {x, y, width, height}, layer (always 0), z_index (integer or null; higher values are closer to the front; null means stacking order is unavailable and callers must not infer one), is_on_screen, minimized. To select a frontmost candidate, take the maximum integer z_index; if every value is null, use an explicit fallback instead of relying on array order. The macOS-specific on_current_space / space_ids fields are omitted on Windows; current_space_id is null.\n\nInputs: pid (optional pid filter), app (app-name filter), on_screen_only (bool, default false). Filter with app or pid: an unfiltered call lists every window.",
       "destructive": false,
       "idempotent": true,
       "input_schema": {
@@ -47,14 +47,14 @@
       "read_only": true
     },
     {
-      "description": "Walk a running app's UIA tree and return it ONCE, as compact Markdown by default (`tree_format:\"markdown\"`). Every actionable element is tagged `[N]` (an element_index); its element_token is `<snapshot_id>:N`, where `snapshot_id` is printed in the response header and returned in structuredContent. Pass `tree_format:\"elements\"` for the structured `elements` array instead (explicit `element_token`, `frame`, `parent_index`, `value`, `actions` per row), or `\"both\"` for both (about twice the size).\n\nSize: a read is bounded by default (`max_elements` 250). When the walk stops at that budget the response says `Tree truncated at max_elements=\u2026` and `truncated: true`; pass a larger `max_elements`, or `query` / `max_depth`, to reach the rest. `_note` is omitted unless `verbose:true`. `full_output:true` restores the previous full response: both representations, all metadata, and the platform's walk limits (\u22645 000 elements, depth \u226425).\n\nDIFF READS: pass `since: <snapshot_id>` from an earlier read of the same window to get only what changed: `+` added rows, `~` changed rows, `-` removed rows (their ids are the old snapshot's), or `no change since \u2026`. Rows not listed keep their previous `[N]` unless a `reindexed:` line says otherwise. The response carries a NEW snapshot_id: use it in element_tokens. An unknown, expired, other-window or differently-scoped (query/max_elements/max_depth) `since` falls back to a full read and `since_status` says why. The focused element is not reported on Windows yet.\n\nINVARIANT: call `get_window_state` once per turn per (pid, window_id) before any element action against that window. The next snapshot of the same (pid, window_id) replaces this one, stales its element tokens, and lists the replaced ids in `invalidated_snapshot_ids`. A screenshot-only read (`include_accessibility_tree:false`) keeps the current snapshot's rows and tokens valid, and `display_only:true` also leaves its pixel frame alone.\n\nThe UIA tree walked is the window's tree (HWND-scoped); the screenshot and window bounds reported come from the same `window_id`. This is the source of truth for which window the caller intends to reason about \u2014 the driver never picks a window implicitly.\n\n`window_id` MUST belong to `pid`; the call returns `isError: true` otherwise. The driver does not auto-fall-back to a different window.\n\nSet `query` to a case-insensitive substring to project the tree to matching rows plus their ancestor chain. Original element indices are preserved. `total_element_count` reports the complete snapshot; `returned_element_count` reports the projection.\n\nAlways returns BOTH the element tree AND a screenshot \u2014 ground on both and cross-check (the tree lies on some surfaces). Choose the modality at ACTION time: an element ax action (element_token \u2192 accessibility rung) or an element px action (x,y \u2192 pixel rung off this screenshot). capture_mode is deprecated and ignored.\n\nThe mirror image: pass `include_accessibility_tree:false` to SKIP the UIA walk entirely and return just the screenshot plus window metadata (window_bounds, app_name, window_title) \u2014 the capture-only path for a live window preview / picture-in-picture. Setting BOTH `include_accessibility_tree:false` and `include_screenshot:false` is an error. Optional `max_image_dimension` overrides the configured screenshot long-edge limit for this call; pass 0 for native resolution. Legacy `max_dimension` remains a cap on the configured limit.\n\nUses `IUIAutomationCacheRequest` to batch-fetch all element properties in a single COM call (Chrome's ~5000-element tree returns in ~2-3s instead of timing out at 4s with per-property RPCs).\n\nOptional `max_elements` / `max_depth` bound the UIA walk (Electron / large web apps produce 10k+ element trees). Markdown and structured elements are truncated identically. Default: `max_elements` 250, depth \u226425.\n\nCHROMIUM COVERAGE: a browser-owned permission bubble can be composited outside the requested native window. Chromium-family snapshots therefore describe this limit in structuredContent.capture_coverage. After a verified ineffective window action, call escalate_session, take a fresh get_desktop_state snapshot, act explicitly in desktop scope if needed, then verify with another fresh desktop snapshot. This is separate from page JavaScript dialogs, which remain on browser_dialog.\n\nWindows requires no special permissions.",
+      "description": "Walk a running app's UIA tree and return it ONCE, as compact Markdown by default (`tree_format:\"markdown\"`). Every actionable element is tagged `[N]` (an element_index); its element_token is `<snapshot_id>:N`, where `snapshot_id` is printed in the response header and returned in structuredContent. Pass `tree_format:\"elements\"` for the structured `elements` array instead (explicit `element_token`, `frame`, `parent_index`, `value`, `actions` per row), or `\"both\"` for both (about twice the size).\n\nSize: a read is bounded by default (`max_elements` 250). When the walk stops at that budget the response says `Tree truncated at max_elements=…` and `truncated: true`; pass a larger `max_elements`, or `query` / `max_depth`, to reach the rest. `_note` is omitted unless `verbose:true`. `full_output:true` restores the previous full response: both representations, all metadata, and the platform's walk limits (≤5 000 elements, depth ≤25).\n\nDIFF READS: pass `since: <snapshot_id>` from an earlier read of the same window to get only what changed: `+` added rows, `~` changed rows, `-` removed rows (their ids are the old snapshot's), or `no change since …`. Rows not listed keep their previous `[N]` unless a `reindexed:` line says otherwise. The response carries a NEW snapshot_id: use it in element_tokens. An unknown, expired, other-window or differently-scoped (query/max_elements/max_depth) `since` falls back to a full read and `since_status` says why. The focused element is not reported on Windows yet.\n\nINVARIANT: call `get_window_state` once per turn per (pid, window_id) before any element action against that window. The next snapshot of the same (pid, window_id) replaces this one, stales its element tokens, and lists the replaced ids in `invalidated_snapshot_ids`. A screenshot-only read (`include_accessibility_tree:false`) keeps the current snapshot's rows and tokens valid, and `display_only:true` also leaves its pixel frame alone.\n\nThe UIA tree walked is the window's tree (HWND-scoped); the screenshot and window bounds reported come from the same `window_id`. This is the source of truth for which window the caller intends to reason about — the driver never picks a window implicitly.\n\n`window_id` MUST belong to `pid`; the call returns `isError: true` otherwise. The driver does not auto-fall-back to a different window.\n\nSet `query` to a case-insensitive substring to project the tree to matching rows plus their ancestor chain. Original element indices are preserved. `total_element_count` reports the complete snapshot; `returned_element_count` reports the projection.\n\nAlways returns BOTH the element tree AND a screenshot — ground on both and cross-check (the tree lies on some surfaces). Choose the modality at ACTION time: an element ax action (element_token → accessibility rung) or an element px action (x,y → pixel rung off this screenshot). capture_mode is deprecated and ignored.\n\nThe mirror image: pass `include_accessibility_tree:false` to SKIP the UIA walk entirely and return just the screenshot plus window metadata (window_bounds, app_name, window_title) — the capture-only path for a live window preview / picture-in-picture. Setting BOTH `include_accessibility_tree:false` and `include_screenshot:false` is an error. Optional `max_image_dimension` overrides the configured screenshot long-edge limit for this call; pass 0 for native resolution. Legacy `max_dimension` remains a cap on the configured limit.\n\nUses `IUIAutomationCacheRequest` to batch-fetch all element properties in a single COM call (Chrome's ~5000-element tree returns in ~2-3s instead of timing out at 4s with per-property RPCs).\n\nOptional `max_elements` / `max_depth` bound the UIA walk (Electron / large web apps produce 10k+ element trees). Markdown and structured elements are truncated identically. Default: `max_elements` 250, depth ≤25.\n\nCHROMIUM COVERAGE: a browser-owned permission bubble can be composited outside the requested native window. Chromium-family snapshots therefore describe this limit in structuredContent.capture_coverage. After a verified ineffective window action, call escalate_session, take a fresh get_desktop_state snapshot, act explicitly in desktop scope if needed, then verify with another fresh desktop snapshot. This is separate from page JavaScript dialogs, which remain on browser_dialog.\n\nWindows requires no special permissions.",
       "destructive": false,
       "idempotent": false,
       "input_schema": {
         "additionalProperties": false,
         "properties": {
           "capture_mode": {
-            "description": "DEPRECATED and ignored. get_window_state always returns BOTH the element tree and a screenshot \u2014 ground on both. The modality is chosen at action time by how you address the target: an element ax action (element_token) or an element px action (x,y). Any value (including the old \"som\"/\"screenshot\" aliases) is accepted but has no effect.",
+            "description": "DEPRECATED and ignored. get_window_state always returns BOTH the element tree and a screenshot — ground on both. The modality is chosen at action time by how you address the target: an element ax action (element_token) or an element px action (x,y). Any value (including the old \"som\"/\"screenshot\" aliases) is accepted but has no effect.",
             "enum": [
               "ax",
               "vision"
@@ -66,11 +66,11 @@
             "type": "boolean"
           },
           "include_accessibility_tree": {
-            "description": "Default true \u2014 walk the UIA tree and return it (per `tree_format`) alongside the screenshot. Set false to SKIP the UIA walk entirely and return just the screenshot plus window metadata (window_bounds, app_name, window_title) \u2014 the capture-only path for a live window preview / picture-in-picture. Mirrors include_screenshot. Setting BOTH include_accessibility_tree:false AND include_screenshot:false is an error (nothing to return).",
+            "description": "Default true — walk the UIA tree and return it (per `tree_format`) alongside the screenshot. Set false to SKIP the UIA walk entirely and return just the screenshot plus window metadata (window_bounds, app_name, window_title) — the capture-only path for a live window preview / picture-in-picture. Mirrors include_screenshot. Setting BOTH include_accessibility_tree:false AND include_screenshot:false is an error (nothing to return).",
             "type": "boolean"
           },
           "include_screenshot": {
-            "description": "Default true \u2014 returns a grounding screenshot alongside the tree. Set false to skip the grab and return tree only (the cheap path for re-indexing before an element ax action).",
+            "description": "Default true — returns a grounding screenshot alongside the tree. Set false to skip the grab and return tree only (the cheap path for re-indexing before an element ax action).",
             "type": "boolean"
           },
           "max_depth": {
@@ -290,7 +290,7 @@
       "read_only": true
     },
     {
-      "description": "Launch a Windows app hidden \u2014 the driver never brings the target to the foreground, the target's window is launched with SW_SHOWNOACTIVATE so it does not steal focus from whatever is currently frontmost.\n\nProvide either `bundle_id` / `name` / `aumid` (resolved as below) or `path` (full path to an executable). If both `name` and `path` are given, `path` wins. `urls` opens each URL in the default browser without activating it.\n\nRouting order: explicit `aumid` (or a `bundle_id` containing `!`) activates the packaged app via `IApplicationActivationManager::ActivateApplication`, returning the real packaged-process pid \u2014 required on Win11 for built-in apps like Notepad, Calculator, and Paint, which now ship as Microsoft Store packages where the legacy .exe in System32 is a ~7 KB stub that exits immediately. A plain `name` first attempts a `shell:AppsFolder` lookup; packaged matches use the activation manager while desktop registrations are launched through their shell parsing path. A miss falls back to ShellExecuteEx's PATH search.\n\nReturns the launched app's pid, name, active flag, AND a `windows` array \u2014 same per-window shape `list_windows` returns. When the launch settles but no window has materialized yet (transient; rare), `windows` comes back empty \u2014 call `list_windows(pid)` explicitly a moment later. `bundle_id` in the response is set to the AUMID actually used for packaged-app launches and `null` for ShellExecuteEx launches.\n\nWindows-only field: `path` (Swift uses `bundle_id` since macOS apps resolve via LaunchServices; Windows has no LaunchServices, so `path` is the canonical form). The macOS-specific `webkit_inspector_port`, `creates_new_application_instance`, and `additional_arguments` fields are accepted; `additional_arguments` is honored (forwarded as ShellExecuteEx parameters or as the AUMID activation arguments string). The remaining macOS-only fields currently no-op on Windows.",
+      "description": "Launch a Windows app hidden — the driver never brings the target to the foreground, the target's window is launched with SW_SHOWNOACTIVATE so it does not steal focus from whatever is currently frontmost.\n\nProvide either `bundle_id` / `name` / `aumid` (resolved as below) or `path` (full path to an executable). If both `name` and `path` are given, `path` wins. `urls` opens each URL in the default browser without activating it.\n\nRouting order: explicit `aumid` (or a `bundle_id` containing `!`) activates the packaged app via `IApplicationActivationManager::ActivateApplication`, returning the real packaged-process pid — required on Win11 for built-in apps like Notepad, Calculator, and Paint, which now ship as Microsoft Store packages where the legacy .exe in System32 is a ~7 KB stub that exits immediately. A plain `name` first attempts a `shell:AppsFolder` lookup; packaged matches use the activation manager while desktop registrations are launched through their shell parsing path. A miss falls back to ShellExecuteEx's PATH search.\n\nReturns the launched app's pid, name, active flag, AND a `windows` array — same per-window shape `list_windows` returns. When the launch settles but no window has materialized yet (transient; rare), `windows` comes back empty — call `list_windows(pid)` explicitly a moment later. `bundle_id` in the response is set to the AUMID actually used for packaged-app launches and `null` for ShellExecuteEx launches.\n\nWindows-only field: `path` (Swift uses `bundle_id` since macOS apps resolve via LaunchServices; Windows has no LaunchServices, so `path` is the canonical form). The macOS-specific `webkit_inspector_port`, `creates_new_application_instance`, and `additional_arguments` fields are accepted; `additional_arguments` is honored (forwarded as ShellExecuteEx parameters or as the AUMID activation arguments string). The remaining macOS-only fields currently no-op on Windows.",
       "destructive": false,
       "idempotent": true,
       "input_schema": {
@@ -308,7 +308,7 @@
             "type": "string"
           },
           "bundle_id": {
-            "description": "App User Model ID (AUMID) for a packaged app \u2014 pattern `{PackageFamilyName}!{ApplicationId}`, e.g. `Microsoft.WindowsNotepad_8wekyb3d8bbwe!App`. Falls back to a `name` alias if no `!` is present. Either bundle_id, name, aumid, path, or launch_path must be provided.",
+            "description": "App User Model ID (AUMID) for a packaged app — pattern `{PackageFamilyName}!{ApplicationId}`, e.g. `Microsoft.WindowsNotepad_8wekyb3d8bbwe!App`. Falls back to a `name` alias if no `!` is present. Either bundle_id, name, aumid, path, or launch_path must be provided.",
             "type": "string"
           },
           "creates_new_application_instance": {
@@ -316,7 +316,7 @@
             "type": "boolean"
           },
           "launch_path": {
-            "description": "Round-trip the `launch_path` returned by `list_apps`. Highest precedence \u2014 when set, this exact string is handed to ShellExecuteEx unchanged. For Windows desktop apps it's the full `.exe` commandline (path + arguments preserved from the source shortcut); for UWP apps it's `shell:appsFolder\\{PackageFamilyName}!{AppId}`. For precise UWP pid capture, prefer `aumid` over `launch_path`.",
+            "description": "Round-trip the `launch_path` returned by `list_apps`. Highest precedence — when set, this exact string is handed to ShellExecuteEx unchanged. For Windows desktop apps it's the full `.exe` commandline (path + arguments preserved from the source shortcut); for UWP apps it's `shell:appsFolder\\{PackageFamilyName}!{AppId}`. For precise UWP pid capture, prefer `aumid` over `launch_path`.",
             "type": "string"
           },
           "name": {
@@ -332,7 +332,7 @@
             "type": "string"
           },
           "start_minimized": {
-            "description": "When true, launch the app's window minimized to the taskbar instead of restored-but-not-activated. Use this when the agent wants to drive the app entirely in the background \u2014 the user's previously-frontmost window (e.g. terminal) stays visually on top. Desktop launches hold the foreground lock through startup and use SW_SHOWMINNOACTIVE; packaged-app activation remains broker-controlled and receives a best-effort SW_SHOWMINNOACTIVE post-pass. UIA / background dispatch still work on a minimized window; only `screenshot` and `delivery_mode:\"foreground\"` need it restored.",
+            "description": "When true, launch the app's window minimized to the taskbar instead of restored-but-not-activated. Use this when the agent wants to drive the app entirely in the background — the user's previously-frontmost window (e.g. terminal) stays visually on top. Desktop launches hold the foreground lock through startup and use SW_SHOWMINNOACTIVE; packaged-app activation remains broker-controlled and receives a best-effort SW_SHOWMINNOACTIVE post-pass. UIA / background dispatch still work on a minimized window; only `screenshot` and `delivery_mode:\"foreground\"` need it restored.",
             "type": "boolean"
           },
           "urls": {
@@ -353,7 +353,7 @@
       "read_only": false
     },
     {
-      "description": "Force-terminate a process by pid. Use when the cooperative close_window path fails to make the process exit \u2014 typical for UWP / WinUI3 apps (Calculator, Photos, modern Notepad) that route WM_CLOSE into a suspended-but-resident state. Equivalent to `taskkill /F /PID <pid>`. Unsaved state is lost. Prefer close_window; only escalate to `kill_app` when cooperative close didn't terminate.",
+      "description": "Force-terminate a process by pid. Use when the cooperative close_window path fails to make the process exit — typical for UWP / WinUI3 apps (Calculator, Photos, modern Notepad) that route WM_CLOSE into a suspended-but-resident state. Equivalent to `taskkill /F /PID <pid>`. Unsaved state is lost. Prefer close_window; only escalate to `kill_app` when cooperative close didn't terminate.",
       "destructive": true,
       "idempotent": true,
       "input_schema": {
@@ -374,38 +374,6 @@
         "type": "object"
       },
       "name": "kill_app",
-      "read_only": false
-    },
-    {
-      "description": "Cooperatively close one exact top-level window without activating it, then independently verify that the original window identity disappeared. The operation never falls back to hotkeys, menu labels, coordinates, or process termination. Missing, mismatched, ambiguous, disabled, unsupported, confirmation-required, and unconfirmed no-op outcomes fail closed.",
-      "destructive": true,
-      "idempotent": false,
-      "input_schema": {
-        "additionalProperties": false,
-        "description": "Exact top-level window to close cooperatively through the operating\nsystem's accessibility/window-management API.",
-        "properties": {
-          "pid": {
-            "description": "Process ID of the application that owns the exact window.",
-            "minimum": 1,
-            "type": "integer"
-          },
-          "session": {
-            "description": "For multi-call work, prefer a short public session label and repeat it on every call that\naccepts it. Omit it to use the authenticated transport's implicit lifecycle session.",
-            "type": "string"
-          },
-          "window_id": {
-            "description": "Exact native window ID from list_windows; no app-wide close fallback.",
-            "minimum": 1,
-            "type": "integer"
-          }
-        },
-        "required": [
-          "pid",
-          "window_id"
-        ],
-        "type": "object"
-      },
-      "name": "close_window",
       "read_only": false
     },
     {
@@ -495,7 +463,7 @@
       "idempotent": false,
       "input_schema": {
         "additionalProperties": false,
-        "description": "Exact, immediate-child application menu path to resolve and invoke through\nthe operating system's accessibility API. Path labels are matched after\ntrimming surrounding whitespace and otherwise remain case-sensitive. On\nmacOS, three periods in a label also match the ellipsis character that\nnative menu titles use (`Save As...` finds `Save As\u2026`).",
+        "description": "Exact, immediate-child application menu path to resolve and invoke through\nthe operating system's accessibility API. Path labels are matched after\ntrimming surrounding whitespace and otherwise remain case-sensitive. On\nmacOS, three periods in a label also match the ellipsis character that\nnative menu titles use (`Save As...` finds `Save As…`).",
         "properties": {
           "path": {
             "description": "Menu labels from the top-level menu to the item, e.g. `[\"File\", \"Save As...\"]`\n(1 to 16 labels).",
@@ -534,7 +502,7 @@
       "read_only": false
     },
     {
-      "description": "Diagnostic: dump everything cua-driver sees about a pid's top-level windows from the daemon's session perspective. Returns window class names, owning .exe basename + path, and \u2014 when CUIAutomation succeeds \u2014 the focused UIA element with the list of patterns it supports (ValuePattern, InvokePattern, TextPattern, TogglePattern, etc.). Used to design / debug input routing for XAML / UWP / WinUI3 targets; see CUA-543.",
+      "description": "Diagnostic: dump everything cua-driver sees about a pid's top-level windows from the daemon's session perspective. Returns window class names, owning .exe basename + path, and — when CUIAutomation succeeds — the focused UIA element with the list of patterns it supports (ValuePattern, InvokePattern, TextPattern, TogglePattern, etc.). Used to design / debug input routing for XAML / UWP / WinUI3 targets; see CUA-543.",
       "destructive": false,
       "idempotent": true,
       "input_schema": {
@@ -558,7 +526,7 @@
       "read_only": true
     },
     {
-      "description": "Left-click against a target pid. **Prefer `element_token` over pixel coordinates** \u2014 element_token works on backgrounded / minimized / hidden / off-desktop windows, surfaces a stable handle that survives rebuilds, and tells you what you're clicking via the cached element's role + label. Reach for `x, y` only when the target is a canvas / video / WebGL / custom-drawn surface that doesn't appear in the UIA tree.\n\nTwo addressing modes:\n\n- `element_token` (from the last `get_window_state` snapshot of that window) \u2014 performs the UIA Invoke pattern on the cached element via PostMessage. No cursor move, no focus steal. Requires a prior `get_window_state(pid, window_id)` in this turn; the token is stale once the next snapshot of the same window replaces it.\n\n- `x`, `y` (window-local screenshot pixels, top-left origin of the PNG returned by `get_window_state`). On `delivery_mode:\"background\"` (the default), cua-driver FIRST does a UIA hit-test at the resolved screen position: if the deepest invokable element under that point exposes `InvokePattern`, it's invoked through the accessibility channel \u2014 same background-safe path as the `element_token` mode, no foreground swap, no visible flash. **This makes pixel clicks on UWP / WinUI3 / Win11 packaged apps work flash-free out of the box** \u2014 agents should default to `delivery_mode:\"background\"` even on XAML hosts whose CoreInput dispatcher drops raw PostMessage. The PostMessage(WM_LBUTTONDOWN/UP) fallback only runs when the UIA hit-test misses (canvas / video / WebGL / custom-drawn surfaces with no UIA peer), and on those targets `delivery_mode:\"background\"` returns a structured `background_unavailable` error if PostMessage is known to drop too \u2014 at which point you switch to `delivery_mode:\"foreground\"`. **Always try the default `background` click first and let that error be your signal \u2014 do NOT pass `foreground` preemptively because the target 'looks like' GTK/Chromium/etc. The driver decides when background is impossible; a guessed foreground click needlessly steals the user's focus.** `count: 2` posts two down/up pairs for a double-click. Pixel clicks need a visible on-screen window to anchor the coordinate conversion (errors with `pid X has no on-screen window` otherwise).\n\nExactly one of `element_token` or (`x` AND `y`) must be provided. `pid` is required for window scope and omitted for desktop scope. After a `zoom` call, pass `from_zoom=true` to auto-translate zoom-image coords back to full-window space.\n\nWindows-only convenience: `button: \"left\"|\"right\"|\"middle\"` switches the mouse button (Swift exposes right-click as a separate `right_click` tool). `action: \"expand\"` on an `element_token` opens the element through UIA ExpandCollapsePattern (the dropdown half of an MSAA split button); other actions use the default invoke. `debug_image_out` isn't supported yet.",
+      "description": "Left-click against a target pid. **Prefer `element_token` over pixel coordinates** — element_token works on backgrounded / minimized / hidden / off-desktop windows, surfaces a stable handle that survives rebuilds, and tells you what you're clicking via the cached element's role + label. Reach for `x, y` only when the target is a canvas / video / WebGL / custom-drawn surface that doesn't appear in the UIA tree.\n\nTwo addressing modes:\n\n- `element_token` (from the last `get_window_state` snapshot of that window) — performs the UIA Invoke pattern on the cached element via PostMessage. No cursor move, no focus steal. Requires a prior `get_window_state(pid, window_id)` in this turn; the token is stale once the next snapshot of the same window replaces it.\n\n- `x`, `y` (window-local screenshot pixels, top-left origin of the PNG returned by `get_window_state`). On `delivery_mode:\"background\"` (the default), cua-driver FIRST does a UIA hit-test at the resolved screen position: if the deepest invokable element under that point exposes `InvokePattern`, it's invoked through the accessibility channel — same background-safe path as the `element_token` mode, no foreground swap, no visible flash. **This makes pixel clicks on UWP / WinUI3 / Win11 packaged apps work flash-free out of the box** — agents should default to `delivery_mode:\"background\"` even on XAML hosts whose CoreInput dispatcher drops raw PostMessage. The PostMessage(WM_LBUTTONDOWN/UP) fallback only runs when the UIA hit-test misses (canvas / video / WebGL / custom-drawn surfaces with no UIA peer), and on those targets `delivery_mode:\"background\"` returns a structured `background_unavailable` error if PostMessage is known to drop too — at which point you switch to `delivery_mode:\"foreground\"`. **Always try the default `background` click first and let that error be your signal — do NOT pass `foreground` preemptively because the target 'looks like' GTK/Chromium/etc. The driver decides when background is impossible; a guessed foreground click needlessly steals the user's focus.** `count: 2` posts two down/up pairs for a double-click. Pixel clicks need a visible on-screen window to anchor the coordinate conversion (errors with `pid X has no on-screen window` otherwise).\n\nExactly one of `element_token` or (`x` AND `y`) must be provided. `pid` is required for window scope and omitted for desktop scope. After a `zoom` call, pass `from_zoom=true` to auto-translate zoom-image coords back to full-window space.\n\nWindows-only convenience: `button: \"left\"|\"right\"|\"middle\"` switches the mouse button (Swift exposes right-click as a separate `right_click` tool). `action: \"expand\"` on an `element_token` opens the element through UIA ExpandCollapsePattern (the dropdown half of an MSAA split button); other actions use the default invoke. `debug_image_out` isn't supported yet.",
       "destructive": true,
       "idempotent": false,
       "input_schema": {
@@ -583,13 +551,13 @@
             "type": "string"
           },
           "count": {
-            "description": "Click count \u2014 1 (single), 2 (double), 3 (triple). Default 1.",
+            "description": "Click count — 1 (single), 2 (double), 3 (triple). Default 1.",
             "maximum": 3,
             "minimum": 1,
             "type": "integer"
           },
           "delivery_mode": {
-            "description": "Input delivery mode. 'background' (default) never swaps foreground: it routes through UIA Invoke / PostMessage and the window is never raised. For targets whose input stack silently drops posted events (Chromium/Electron content, GTK buttons, VCL/LibreOffice accelerators) the tool returns a structured background_unavailable error rather than fronting. 'foreground' is the explicit escalation: a brief SetForegroundWindow swap + SendInput, restoring the prior foreground afterward. IMPORTANT: 'background' is not a hint to weigh \u2014 it is the mandatory first attempt. Do NOT pass 'foreground' preemptively because a target 'looks like' GTK/Chromium/Electron; the DRIVER decides when background is impossible and tells you so via a background_unavailable error (or a verified no-op). Only THEN re-issue the same action with 'foreground'. The lists above are the driver's detectors, not a checklist for you to front on a guess \u2014 fronting up-front needlessly steals the user's focus and is a bug, not a shortcut. Matches the macOS delivery_mode surface.",
+            "description": "Input delivery mode. 'background' (default) never swaps foreground: it routes through UIA Invoke / PostMessage and the window is never raised. For targets whose input stack silently drops posted events (Chromium/Electron content, GTK buttons, VCL/LibreOffice accelerators) the tool returns a structured background_unavailable error rather than fronting. 'foreground' is the explicit escalation: a brief SetForegroundWindow swap + SendInput, restoring the prior foreground afterward. IMPORTANT: 'background' is not a hint to weigh — it is the mandatory first attempt. Do NOT pass 'foreground' preemptively because a target 'looks like' GTK/Chromium/Electron; the DRIVER decides when background is impossible and tells you so via a background_unavailable error (or a verified no-op). Only THEN re-issue the same action with 'foreground'. The lists above are the driver's detectors, not a checklist for you to front on a guess — fronting up-front needlessly steals the user's focus and is a bug, not a shortcut. Matches the macOS delivery_mode surface.",
             "enum": [
               "background",
               "foreground"
@@ -666,7 +634,7 @@
             "type": "integer"
           },
           "x": {
-            "description": "X in window-local screenshot pixels \u2014 same space as the PNG get_window_state returns. Must be provided together with y.",
+            "description": "X in window-local screenshot pixels — same space as the PNG get_window_state returns. Must be provided together with y.",
             "type": "number"
           },
           "y": {
@@ -680,14 +648,14 @@
       "read_only": false
     },
     {
-      "description": "Double-click against a target pid. Two addressing modes:\n\n- `element_token` (from the last `get_window_state` snapshot of that window) \u2014 synthesizes a stamped pixel double-click at the element's cached on-screen center via PostMessage. (Windows has no AXOpen analogue; Swift's AXOpen-first path falls through to the same pixel recipe when the element doesn't advertise AXOpen, so the user-visible behavior matches.)\n\n- `x`, `y` (window-local screenshot pixels, top-left origin of the PNG returned by `get_window_state`) \u2014 posts two WM_LBUTTONDOWN/UP pairs in quick succession to the deepest child window at that point.\n\nExactly one of `element_token` or (`x` AND `y`) must be provided. `pid` is required with `x`, `y`; an `element_token` carries its own pid. The macOS-only `modifier` field is accepted for parity (no-op on Windows \u2014 PostMessage doesn't propagate modifier-key state).",
+      "description": "Double-click against a target pid. Two addressing modes:\n\n- `element_token` (from the last `get_window_state` snapshot of that window) — synthesizes a stamped pixel double-click at the element's cached on-screen center via PostMessage. (Windows has no AXOpen analogue; Swift's AXOpen-first path falls through to the same pixel recipe when the element doesn't advertise AXOpen, so the user-visible behavior matches.)\n\n- `x`, `y` (window-local screenshot pixels, top-left origin of the PNG returned by `get_window_state`) — posts two WM_LBUTTONDOWN/UP pairs in quick succession to the deepest child window at that point.\n\nExactly one of `element_token` or (`x` AND `y`) must be provided. `pid` is required with `x`, `y`; an `element_token` carries its own pid. The macOS-only `modifier` field is accepted for parity (no-op on Windows — PostMessage doesn't propagate modifier-key state).",
       "destructive": true,
       "idempotent": false,
       "input_schema": {
         "additionalProperties": false,
         "properties": {
           "delivery_mode": {
-            "description": "Input delivery mode. 'background' (default) never swaps foreground: it routes through UIA Invoke / PostMessage and the window is never raised. For targets whose input stack silently drops posted events (Chromium/Electron content, GTK buttons, VCL/LibreOffice accelerators) the tool returns a structured background_unavailable error rather than fronting. 'foreground' is the explicit escalation: a brief SetForegroundWindow swap + SendInput, restoring the prior foreground afterward. IMPORTANT: 'background' is not a hint to weigh \u2014 it is the mandatory first attempt. Do NOT pass 'foreground' preemptively because a target 'looks like' GTK/Chromium/Electron; the DRIVER decides when background is impossible and tells you so via a background_unavailable error (or a verified no-op). Only THEN re-issue the same action with 'foreground'. The lists above are the driver's detectors, not a checklist for you to front on a guess \u2014 fronting up-front needlessly steals the user's focus and is a bug, not a shortcut. Matches the macOS delivery_mode surface.",
+            "description": "Input delivery mode. 'background' (default) never swaps foreground: it routes through UIA Invoke / PostMessage and the window is never raised. For targets whose input stack silently drops posted events (Chromium/Electron content, GTK buttons, VCL/LibreOffice accelerators) the tool returns a structured background_unavailable error rather than fronting. 'foreground' is the explicit escalation: a brief SetForegroundWindow swap + SendInput, restoring the prior foreground afterward. IMPORTANT: 'background' is not a hint to weigh — it is the mandatory first attempt. Do NOT pass 'foreground' preemptively because a target 'looks like' GTK/Chromium/Electron; the DRIVER decides when background is impossible and tells you so via a background_unavailable error (or a verified no-op). Only THEN re-issue the same action with 'foreground'. The lists above are the driver's detectors, not a checklist for you to front on a guess — fronting up-front needlessly steals the user's focus and is a bug, not a shortcut. Matches the macOS delivery_mode surface.",
             "enum": [
               "background",
               "foreground"
@@ -738,14 +706,14 @@
       "read_only": false
     },
     {
-      "description": "Right-click against a target pid. Two addressing modes:\n\n- `element_token` (from the last `get_window_state` snapshot of that window) \u2014 posts WM_RBUTTONDOWN/UP at the element's cached on-screen center via PostMessage. (Windows has no AXShowMenu analogue wired up yet; Swift's AX-action path falls through to the same pixel recipe on non-advertising elements, so user-visible behavior matches.)\n\n- `x`, `y` (window-local screenshot pixels, top-left origin of the PNG returned by `get_window_state`) \u2014 posts WM_RBUTTONDOWN/UP to the deepest child window at that point.\n\nExactly one of `element_token` or (`x` AND `y`) must be provided. `pid` is required with `x`, `y`; an `element_token` carries its own pid. `modifier` is accepted for parity (no-op on Windows \u2014 PostMessage doesn't propagate modifier-key state).",
+      "description": "Right-click against a target pid. Two addressing modes:\n\n- `element_token` (from the last `get_window_state` snapshot of that window) — posts WM_RBUTTONDOWN/UP at the element's cached on-screen center via PostMessage. (Windows has no AXShowMenu analogue wired up yet; Swift's AX-action path falls through to the same pixel recipe on non-advertising elements, so user-visible behavior matches.)\n\n- `x`, `y` (window-local screenshot pixels, top-left origin of the PNG returned by `get_window_state`) — posts WM_RBUTTONDOWN/UP to the deepest child window at that point.\n\nExactly one of `element_token` or (`x` AND `y`) must be provided. `pid` is required with `x`, `y`; an `element_token` carries its own pid. `modifier` is accepted for parity (no-op on Windows — PostMessage doesn't propagate modifier-key state).",
       "destructive": true,
       "idempotent": false,
       "input_schema": {
         "additionalProperties": false,
         "properties": {
           "delivery_mode": {
-            "description": "Input delivery mode. 'background' (default) never swaps foreground: it routes through UIA Invoke / PostMessage and the window is never raised. For targets whose input stack silently drops posted events (Chromium/Electron content, GTK buttons, VCL/LibreOffice accelerators) the tool returns a structured background_unavailable error rather than fronting. 'foreground' is the explicit escalation: a brief SetForegroundWindow swap + SendInput, restoring the prior foreground afterward. IMPORTANT: 'background' is not a hint to weigh \u2014 it is the mandatory first attempt. Do NOT pass 'foreground' preemptively because a target 'looks like' GTK/Chromium/Electron; the DRIVER decides when background is impossible and tells you so via a background_unavailable error (or a verified no-op). Only THEN re-issue the same action with 'foreground'. The lists above are the driver's detectors, not a checklist for you to front on a guess \u2014 fronting up-front needlessly steals the user's focus and is a bug, not a shortcut. Matches the macOS delivery_mode surface.",
+            "description": "Input delivery mode. 'background' (default) never swaps foreground: it routes through UIA Invoke / PostMessage and the window is never raised. For targets whose input stack silently drops posted events (Chromium/Electron content, GTK buttons, VCL/LibreOffice accelerators) the tool returns a structured background_unavailable error rather than fronting. 'foreground' is the explicit escalation: a brief SetForegroundWindow swap + SendInput, restoring the prior foreground afterward. IMPORTANT: 'background' is not a hint to weigh — it is the mandatory first attempt. Do NOT pass 'foreground' preemptively because a target 'looks like' GTK/Chromium/Electron; the DRIVER decides when background is impossible and tells you so via a background_unavailable error (or a verified no-op). Only THEN re-issue the same action with 'foreground'. The lists above are the driver's detectors, not a checklist for you to front on a guess — fronting up-front needlessly steals the user's focus and is a bug, not a shortcut. Matches the macOS delivery_mode surface.",
             "enum": [
               "background",
               "foreground"
@@ -796,7 +764,7 @@
       "read_only": false
     },
     {
-      "description": "Press-drag-release gesture from (from_x, from_y) to (to_x, to_y) in window-local screenshot pixels. duration_ms (default 500) is the wall-clock budget; steps (default 20) interpolates intermediate WM_MOUSEMOVE events along the path. No focus steal. After a zoom call, pass from_zoom=true. Drags that start on a window caption / title bar or resize border (i.e. moving or resizing the window itself) cannot be delivered in the background \u2014 the OS move/resize loop needs real pointer input \u2014 so they return background_unavailable; re-issue those with delivery_mode:\"foreground\".",
+      "description": "Press-drag-release gesture from (from_x, from_y) to (to_x, to_y) in window-local screenshot pixels. duration_ms (default 500) is the wall-clock budget; steps (default 20) interpolates intermediate WM_MOUSEMOVE events along the path. No focus steal. After a zoom call, pass from_zoom=true. Drags that start on a window caption / title bar or resize border (i.e. moving or resizing the window itself) cannot be delivered in the background — the OS move/resize loop needs real pointer input — so they return background_unavailable; re-issue those with delivery_mode:\"foreground\".",
       "destructive": true,
       "idempotent": false,
       "input_schema": {
@@ -812,7 +780,7 @@
             "type": "string"
           },
           "delivery_mode": {
-            "description": "Input delivery mode. 'background' (default) never swaps foreground: it routes through UIA Invoke / PostMessage and the window is never raised. For targets whose input stack silently drops posted events (Chromium/Electron content, GTK buttons, VCL/LibreOffice accelerators) the tool returns a structured background_unavailable error rather than fronting. 'foreground' is the explicit escalation: a brief SetForegroundWindow swap + SendInput, restoring the prior foreground afterward. IMPORTANT: 'background' is not a hint to weigh \u2014 it is the mandatory first attempt. Do NOT pass 'foreground' preemptively because a target 'looks like' GTK/Chromium/Electron; the DRIVER decides when background is impossible and tells you so via a background_unavailable error (or a verified no-op). Only THEN re-issue the same action with 'foreground'. The lists above are the driver's detectors, not a checklist for you to front on a guess \u2014 fronting up-front needlessly steals the user's focus and is a bug, not a shortcut. Matches the macOS delivery_mode surface.",
+            "description": "Input delivery mode. 'background' (default) never swaps foreground: it routes through UIA Invoke / PostMessage and the window is never raised. For targets whose input stack silently drops posted events (Chromium/Electron content, GTK buttons, VCL/LibreOffice accelerators) the tool returns a structured background_unavailable error rather than fronting. 'foreground' is the explicit escalation: a brief SetForegroundWindow swap + SendInput, restoring the prior foreground afterward. IMPORTANT: 'background' is not a hint to weigh — it is the mandatory first attempt. Do NOT pass 'foreground' preemptively because a target 'looks like' GTK/Chromium/Electron; the DRIVER decides when background is impossible and tells you so via a background_unavailable error (or a verified no-op). Only THEN re-issue the same action with 'foreground'. The lists above are the driver's detectors, not a checklist for you to front on a guess — fronting up-front needlessly steals the user's focus and is a bug, not a shortcut. Matches the macOS delivery_mode surface.",
             "enum": [
               "background",
               "foreground"
@@ -907,7 +875,7 @@
             "type": "number"
           },
           "window_id": {
-            "description": "Target window handle (HWND). Optional \u2014 driver picks frontmost window of pid when omitted.",
+            "description": "Target window handle (HWND). Optional — driver picks frontmost window of pid when omitted.",
             "type": "integer"
           }
         },
@@ -923,7 +891,7 @@
       "read_only": false
     },
     {
-      "description": "Insert text into the target pid via character-by-character PostMessage(WM_CHAR) to the focused window. No focus steal.\n\nSpecial keys (Return, Escape, arrows, Tab) go through `press_key` / `hotkey` \u2014 they are not text.\n\n**Routing on Windows.** When the target's owning EXE or top-level window class identifies it as a XAML / WinUI3 / UWP host (modern Notepad, Calculator, Photos, Settings, etc.), the tool requires `element_token` and routes through UI Automation's `ValuePattern.SetValue` \u2014 same backend as the `set_value` tool. PostMessage WM_CHAR doesn't reach those hosts (their CoreInput dispatcher only consumes events from the system input queue), so the fallback path silently dropped chars. If you call `type_text(pid, text)` on a XAML host without `element_token`, the tool returns an actionable error pointing you at `get_window_state` first. Native ConsoleHost on Windows ARM64 is hard-refused because it can accept synthesized Unicode events without delivering them; use a process or PTY setup channel instead. Legacy Win32 apps still use the PostMessage path, preserving the no-focus-steal property.\n\n`delay_ms` (0\u2013200, default 30) spaces successive characters on the PostMessage path so autocomplete and IME can keep up. Ignored on the UIA path (SetValue is atomic).",
+      "description": "Insert text into the target pid via character-by-character PostMessage(WM_CHAR) to the focused window. No focus steal.\n\nSpecial keys (Return, Escape, arrows, Tab) go through `press_key` / `hotkey` — they are not text.\n\n**Routing on Windows.** When the target's owning EXE or top-level window class identifies it as a XAML / WinUI3 / UWP host (modern Notepad, Calculator, Photos, Settings, etc.), the tool requires `element_token` and routes through UI Automation's `ValuePattern.SetValue` — same backend as the `set_value` tool. PostMessage WM_CHAR doesn't reach those hosts (their CoreInput dispatcher only consumes events from the system input queue), so the fallback path silently dropped chars. If you call `type_text(pid, text)` on a XAML host without `element_token`, the tool returns an actionable error pointing you at `get_window_state` first. Native ConsoleHost on Windows ARM64 is hard-refused because it can accept synthesized Unicode events without delivering them; use a process or PTY setup channel instead. Legacy Win32 apps still use the PostMessage path, preserving the no-focus-steal property.\n\n`delay_ms` (0–200, default 30) spaces successive characters on the PostMessage path so autocomplete and IME can keep up. Ignored on the UIA path (SetValue is atomic).",
       "destructive": true,
       "idempotent": false,
       "input_schema": {
@@ -936,7 +904,7 @@
             "type": "integer"
           },
           "delivery_mode": {
-            "description": "Input delivery mode. 'background' (default) never swaps foreground: it routes through UIA Invoke / PostMessage and the window is never raised. For targets whose input stack silently drops posted events (Chromium/Electron content, GTK buttons, VCL/LibreOffice accelerators) the tool returns a structured background_unavailable error rather than fronting. 'foreground' is the explicit escalation: a brief SetForegroundWindow swap + SendInput, restoring the prior foreground afterward. IMPORTANT: 'background' is not a hint to weigh \u2014 it is the mandatory first attempt. Do NOT pass 'foreground' preemptively because a target 'looks like' GTK/Chromium/Electron; the DRIVER decides when background is impossible and tells you so via a background_unavailable error (or a verified no-op). Only THEN re-issue the same action with 'foreground'. The lists above are the driver's detectors, not a checklist for you to front on a guess \u2014 fronting up-front needlessly steals the user's focus and is a bug, not a shortcut. Matches the macOS delivery_mode surface.",
+            "description": "Input delivery mode. 'background' (default) never swaps foreground: it routes through UIA Invoke / PostMessage and the window is never raised. For targets whose input stack silently drops posted events (Chromium/Electron content, GTK buttons, VCL/LibreOffice accelerators) the tool returns a structured background_unavailable error rather than fronting. 'foreground' is the explicit escalation: a brief SetForegroundWindow swap + SendInput, restoring the prior foreground afterward. IMPORTANT: 'background' is not a hint to weigh — it is the mandatory first attempt. Do NOT pass 'foreground' preemptively because a target 'looks like' GTK/Chromium/Electron; the DRIVER decides when background is impossible and tells you so via a background_unavailable error (or a verified no-op). Only THEN re-issue the same action with 'foreground'. The lists above are the driver's detectors, not a checklist for you to front on a guess — fronting up-front needlessly steals the user's focus and is a bug, not a shortcut. Matches the macOS delivery_mode surface.",
             "enum": [
               "background",
               "foreground"
@@ -1005,7 +973,7 @@
             "type": "integer"
           },
           "x": {
-            "description": "Window-local screenshot-pixel X of the field to type into \u2014 the element px action form. Pass x,y (no element_token) and the tool pixel-clicks there to establish real renderer focus, then types. Use for Chromium/Electron inputs the UIA/WM_CHAR path can't reach. Read straight off the get_window_state PNG, same convention as click.",
+            "description": "Window-local screenshot-pixel X of the field to type into — the element px action form. Pass x,y (no element_token) and the tool pixel-clicks there to establish real renderer focus, then types. Use for Chromium/Electron inputs the UIA/WM_CHAR path can't reach. Read straight off the get_window_state PNG, same convention as click.",
             "type": "number"
           },
           "y": {
@@ -1022,14 +990,14 @@
       "read_only": false
     },
     {
-      "description": "Press and release a single key, delivered directly to the target pid's top-level window via PostMessage(WM_KEYDOWN/WM_KEYUP). The target does NOT need to be frontmost \u2014 no focus steal.\n\nOptional `window_id` selects a specific HWND when the pid owns more than one; without it the first visible top-level window for the pid is used.\n\nKey vocabulary: return, tab, escape, up/down/left/right, space, delete, home, end, pageup, pagedown, f1-f12, plus any letter or digit. Optional `modifiers` array takes ctrl/shift/alt/win. For true combinations (ctrl+c), `hotkey` is a cleaner surface.\n\n`element_token` focuses the cached UIA element before sending the key; the top-level window remains backgrounded when delivery_mode is background.",
+      "description": "Press and release a single key, delivered directly to the target pid's top-level window via PostMessage(WM_KEYDOWN/WM_KEYUP). The target does NOT need to be frontmost — no focus steal.\n\nOptional `window_id` selects a specific HWND when the pid owns more than one; without it the first visible top-level window for the pid is used.\n\nKey vocabulary: return, tab, escape, up/down/left/right, space, delete, home, end, pageup, pagedown, f1-f12, plus any letter or digit. Optional `modifiers` array takes ctrl/shift/alt/win. For true combinations (ctrl+c), `hotkey` is a cleaner surface.\n\n`element_token` focuses the cached UIA element before sending the key; the top-level window remains backgrounded when delivery_mode is background.",
       "destructive": true,
       "idempotent": false,
       "input_schema": {
         "additionalProperties": false,
         "properties": {
           "delivery_mode": {
-            "description": "Input delivery mode. 'background' (default) never swaps foreground: it routes through UIA Invoke / PostMessage and the window is never raised. For targets whose input stack silently drops posted events (Chromium/Electron content, GTK buttons, VCL/LibreOffice accelerators) the tool returns a structured background_unavailable error rather than fronting. 'foreground' is the explicit escalation: a brief SetForegroundWindow swap + SendInput, restoring the prior foreground afterward. IMPORTANT: 'background' is not a hint to weigh \u2014 it is the mandatory first attempt. Do NOT pass 'foreground' preemptively because a target 'looks like' GTK/Chromium/Electron; the DRIVER decides when background is impossible and tells you so via a background_unavailable error (or a verified no-op). Only THEN re-issue the same action with 'foreground'. The lists above are the driver's detectors, not a checklist for you to front on a guess \u2014 fronting up-front needlessly steals the user's focus and is a bug, not a shortcut. Matches the macOS delivery_mode surface.",
+            "description": "Input delivery mode. 'background' (default) never swaps foreground: it routes through UIA Invoke / PostMessage and the window is never raised. For targets whose input stack silently drops posted events (Chromium/Electron content, GTK buttons, VCL/LibreOffice accelerators) the tool returns a structured background_unavailable error rather than fronting. 'foreground' is the explicit escalation: a brief SetForegroundWindow swap + SendInput, restoring the prior foreground afterward. IMPORTANT: 'background' is not a hint to weigh — it is the mandatory first attempt. Do NOT pass 'foreground' preemptively because a target 'looks like' GTK/Chromium/Electron; the DRIVER decides when background is impossible and tells you so via a background_unavailable error (or a verified no-op). Only THEN re-issue the same action with 'foreground'. The lists above are the driver's detectors, not a checklist for you to front on a guess — fronting up-front needlessly steals the user's focus and is a bug, not a shortcut. Matches the macOS delivery_mode surface.",
             "enum": [
               "background",
               "foreground"
@@ -1105,7 +1073,7 @@
             "type": "integer"
           },
           "x": {
-            "description": "Window-local screenshot-pixel X \u2014 the element px action form: pixel-click there to focus, then send the key. Use when the key must go to a Chromium/Electron surface the UIA path can't focus. Pass with y, no element_token.",
+            "description": "Window-local screenshot-pixel X — the element px action form: pixel-click there to focus, then send the key. Use when the key must go to a Chromium/Electron surface the UIA path can't focus. Pass with y, no element_token.",
             "type": "number"
           },
           "y": {
@@ -1122,14 +1090,14 @@
       "read_only": false
     },
     {
-      "description": "Press a combination of keys simultaneously \u2014 e.g. `[\"ctrl\", \"c\"]` for Copy, `[\"ctrl\", \"shift\", \"t\"]` for reopen-closed-tab. Dispatch is target-aware:\n\n- **Modern XAML / WinUI / UWP targets** route through UI Automation: the driver walks the target's accessibility subtree, finds a descendant whose AcceleratorKey matches the combo, and invokes it. No focus steal, no system-queue input.\n\n- **Legacy Win32 targets with modifiers** (Ctrl+S, Alt+Tab, etc.) route through `SendInput` against the system input queue, with a brief `SetForegroundWindow` swap so the events land on the target. This path is necessary because PostMessage(WM_KEYDOWN, VK_CONTROL) does NOT update the OS-wide modifier state visible to `GetKeyState` / `TranslateAccelerator`, so Win32 apps that bind accelerators via `TranslateAccelerator` (LibreOffice, FAR, classic Notepad, etc.) never see the combo as a real accelerator on the PostMessage-only path. Trade-off: brief foreground swap (mitigated by restoring the previous foreground after the keystrokes flush). Requires the daemon to have UIAccess integrity so `SetForegroundWindow` is permitted \u2014 the MCP proxy auto-prefers the `cua-driver-uia.exe` worker pipe when both daemons are running.\n\n- **Legacy Win32 targets without modifiers** (plain `enter`, `tab`, `f5`, etc.) route through `PostMessage(WM_KEYDOWN/UP)` \u2014 no focus steal, no need to update modifier state.\n\nThe target does NOT need to be frontmost in any branch.\n\n**`window_id`** (optional): explicit HWND when the pid owns more than one window; otherwise the pid's first visible window is used.\n\nRecognized modifiers: ctrl/control, shift, alt, win/windows. Non-modifier keys use the same vocabulary as `press_key` (return, tab, escape, up/down/left/right, space, delete, home, end, pageup, pagedown, f1-f12, letters, digits). Order: modifiers first, one non-modifier last.",
+      "description": "Press a combination of keys simultaneously — e.g. `[\"ctrl\", \"c\"]` for Copy, `[\"ctrl\", \"shift\", \"t\"]` for reopen-closed-tab. Dispatch is target-aware:\n\n- **Modern XAML / WinUI / UWP targets** route through UI Automation: the driver walks the target's accessibility subtree, finds a descendant whose AcceleratorKey matches the combo, and invokes it. No focus steal, no system-queue input.\n\n- **Legacy Win32 targets with modifiers** (Ctrl+S, Alt+Tab, etc.) route through `SendInput` against the system input queue, with a brief `SetForegroundWindow` swap so the events land on the target. This path is necessary because PostMessage(WM_KEYDOWN, VK_CONTROL) does NOT update the OS-wide modifier state visible to `GetKeyState` / `TranslateAccelerator`, so Win32 apps that bind accelerators via `TranslateAccelerator` (LibreOffice, FAR, classic Notepad, etc.) never see the combo as a real accelerator on the PostMessage-only path. Trade-off: brief foreground swap (mitigated by restoring the previous foreground after the keystrokes flush). Requires the daemon to have UIAccess integrity so `SetForegroundWindow` is permitted — the MCP proxy auto-prefers the `cua-driver-uia.exe` worker pipe when both daemons are running.\n\n- **Legacy Win32 targets without modifiers** (plain `enter`, `tab`, `f5`, etc.) route through `PostMessage(WM_KEYDOWN/UP)` — no focus steal, no need to update modifier state.\n\nThe target does NOT need to be frontmost in any branch.\n\n**`window_id`** (optional): explicit HWND when the pid owns more than one window; otherwise the pid's first visible window is used.\n\nRecognized modifiers: ctrl/control, shift, alt, win/windows. Non-modifier keys use the same vocabulary as `press_key` (return, tab, escape, up/down/left/right, space, delete, home, end, pageup, pagedown, f1-f12, letters, digits). Order: modifiers first, one non-modifier last.",
       "destructive": true,
       "idempotent": false,
       "input_schema": {
         "additionalProperties": false,
         "properties": {
           "delivery_mode": {
-            "description": "Input delivery mode. 'background' (default) never swaps foreground: it routes through UIA Invoke / PostMessage and the window is never raised. For targets whose input stack silently drops posted events (Chromium/Electron content, GTK buttons, VCL/LibreOffice accelerators) the tool returns a structured background_unavailable error rather than fronting. 'foreground' is the explicit escalation: a brief SetForegroundWindow swap + SendInput, restoring the prior foreground afterward. IMPORTANT: 'background' is not a hint to weigh \u2014 it is the mandatory first attempt. Do NOT pass 'foreground' preemptively because a target 'looks like' GTK/Chromium/Electron; the DRIVER decides when background is impossible and tells you so via a background_unavailable error (or a verified no-op). Only THEN re-issue the same action with 'foreground'. The lists above are the driver's detectors, not a checklist for you to front on a guess \u2014 fronting up-front needlessly steals the user's focus and is a bug, not a shortcut. Matches the macOS delivery_mode surface.",
+            "description": "Input delivery mode. 'background' (default) never swaps foreground: it routes through UIA Invoke / PostMessage and the window is never raised. For targets whose input stack silently drops posted events (Chromium/Electron content, GTK buttons, VCL/LibreOffice accelerators) the tool returns a structured background_unavailable error rather than fronting. 'foreground' is the explicit escalation: a brief SetForegroundWindow swap + SendInput, restoring the prior foreground afterward. IMPORTANT: 'background' is not a hint to weigh — it is the mandatory first attempt. Do NOT pass 'foreground' preemptively because a target 'looks like' GTK/Chromium/Electron; the DRIVER decides when background is impossible and tells you so via a background_unavailable error (or a verified no-op). Only THEN re-issue the same action with 'foreground'. The lists above are the driver's detectors, not a checklist for you to front on a guess — fronting up-front needlessly steals the user's focus and is a bug, not a shortcut. Matches the macOS delivery_mode surface.",
             "enum": [
               "background",
               "foreground"
@@ -1202,7 +1170,7 @@
             "type": "integer"
           },
           "x": {
-            "description": "Window-local screenshot-pixel X \u2014 the element px action form: pixel-click there to focus, then send the combo (so e.g. Ctrl+V pastes into that field). Pass with y. Use for Chromium/Electron surfaces the background combo can't reach.",
+            "description": "Window-local screenshot-pixel X — the element px action form: pixel-click there to focus, then send the combo (so e.g. Ctrl+V pastes into that field). Pass with y. Use for Chromium/Electron surfaces the background combo can't reach.",
             "type": "number"
           },
           "y": {
@@ -1219,14 +1187,14 @@
       "read_only": false
     },
     {
-      "description": "Set a value on a UIA element via the ValuePattern interface.\n\nTwo semantic modes (matching Swift's split):\n- **Standard input** (text fields, sliders, combo box edit): writes the value directly through UIA `IUIAutomationValuePattern::SetValue`. This is the canonical Windows write path, equivalent to Swift's `AXValue` write.\n- **ComboBox**: on a native Win32 combo box (WinForms, MFC, dialogs) selects the option whose text matches `value` and sends the app the notifications a user's choice sends (CBN_SELENDOK, CBN_SELCHANGE), without focusing the window; an editable combo gets the text typed into its edit field. A drop-down list without that option is refused with the list of options. Other combo boxes get a UIA value write, which the app may not treat as a selection.\n\nFor free-form text entry that the target accepts via keystrokes only, prefer `type_text` \u2014 UIA ValuePattern writes are ignored by some web inputs (same caveat as Swift's `AXValue`-vs-WebKit).",
+      "description": "Set a value on a UIA element via the ValuePattern interface.\n\nTwo semantic modes (matching Swift's split):\n- **Standard input** (text fields, sliders, combo box edit): writes the value directly through UIA `IUIAutomationValuePattern::SetValue`. This is the canonical Windows write path, equivalent to Swift's `AXValue` write.\n- **ComboBox**: on a native Win32 combo box (WinForms, MFC, dialogs) selects the option whose text matches `value` and sends the app the notifications a user's choice sends (CBN_SELENDOK, CBN_SELCHANGE), without focusing the window; an editable combo gets the text typed into its edit field. A drop-down list without that option is refused with the list of options. Other combo boxes get a UIA value write, which the app may not treat as a selection.\n\nFor free-form text entry that the target accepts via keystrokes only, prefer `type_text` — UIA ValuePattern writes are ignored by some web inputs (same caveat as Swift's `AXValue`-vs-WebKit).",
       "destructive": true,
       "idempotent": true,
       "input_schema": {
         "additionalProperties": false,
         "properties": {
           "delivery_mode": {
-            "description": "Input delivery mode. 'background' (default) never swaps foreground: it routes through UIA Invoke / PostMessage and the window is never raised. For targets whose input stack silently drops posted events (Chromium/Electron content, GTK buttons, VCL/LibreOffice accelerators) the tool returns a structured background_unavailable error rather than fronting. 'foreground' is the explicit escalation: a brief SetForegroundWindow swap + SendInput, restoring the prior foreground afterward. IMPORTANT: 'background' is not a hint to weigh \u2014 it is the mandatory first attempt. Do NOT pass 'foreground' preemptively because a target 'looks like' GTK/Chromium/Electron; the DRIVER decides when background is impossible and tells you so via a background_unavailable error (or a verified no-op). Only THEN re-issue the same action with 'foreground'. The lists above are the driver's detectors, not a checklist for you to front on a guess \u2014 fronting up-front needlessly steals the user's focus and is a bug, not a shortcut. Matches the macOS delivery_mode surface.",
+            "description": "Input delivery mode. 'background' (default) never swaps foreground: it routes through UIA Invoke / PostMessage and the window is never raised. For targets whose input stack silently drops posted events (Chromium/Electron content, GTK buttons, VCL/LibreOffice accelerators) the tool returns a structured background_unavailable error rather than fronting. 'foreground' is the explicit escalation: a brief SetForegroundWindow swap + SendInput, restoring the prior foreground afterward. IMPORTANT: 'background' is not a hint to weigh — it is the mandatory first attempt. Do NOT pass 'foreground' preemptively because a target 'looks like' GTK/Chromium/Electron; the DRIVER decides when background is impossible and tells you so via a background_unavailable error (or a verified no-op). Only THEN re-issue the same action with 'foreground'. The lists above are the driver's detectors, not a checklist for you to front on a guess — fronting up-front needlessly steals the user's focus and is a bug, not a shortcut. Matches the macOS delivery_mode surface.",
             "enum": [
               "background",
               "foreground"
@@ -1264,7 +1232,7 @@
       "read_only": false
     },
     {
-      "description": "Scroll the target pid's focused region.\n\nWindows transport: WM_VSCROLL / WM_HSCROLL posted to the window \u2014 the same events the OS sends when scrollbars or trackpads scroll, so any window that handles scrollbars correctly responds to this. Swift uses synthesized keystrokes (PageDown / arrow keys) via auth-signed SLEventPostToPid; both approaches reach backgrounded windows.\n\nMapping: `by: \"page\"` \u2192 SB_PAGEDOWN/UP/LEFT/RIGHT \u00d7 amount; `by: \"line\"` \u2192 SB_LINEDOWN/UP/LEFT/RIGHT \u00d7 amount.\n\nNote: `element_token` is accepted for cross-platform parity but currently no-op on Windows (UIA SetFocus not wired up yet \u2014 same caveat as `press_key`).",
+      "description": "Scroll the target pid's focused region.\n\nWindows transport: WM_VSCROLL / WM_HSCROLL posted to the window — the same events the OS sends when scrollbars or trackpads scroll, so any window that handles scrollbars correctly responds to this. Swift uses synthesized keystrokes (PageDown / arrow keys) via auth-signed SLEventPostToPid; both approaches reach backgrounded windows.\n\nMapping: `by: \"page\"` → SB_PAGEDOWN/UP/LEFT/RIGHT × amount; `by: \"line\"` → SB_LINEDOWN/UP/LEFT/RIGHT × amount.\n\nNote: `element_token` is accepted for cross-platform parity but currently no-op on Windows (UIA SetFocus not wired up yet — same caveat as `press_key`).",
       "destructive": false,
       "idempotent": false,
       "input_schema": {
@@ -1285,7 +1253,7 @@
             "type": "string"
           },
           "delivery_mode": {
-            "description": "Input delivery mode. 'background' (default) never swaps foreground: it routes through UIA Invoke / PostMessage and the window is never raised. For targets whose input stack silently drops posted events (Chromium/Electron content, GTK buttons, VCL/LibreOffice accelerators) the tool returns a structured background_unavailable error rather than fronting. 'foreground' is the explicit escalation: a brief SetForegroundWindow swap + SendInput, restoring the prior foreground afterward. IMPORTANT: 'background' is not a hint to weigh \u2014 it is the mandatory first attempt. Do NOT pass 'foreground' preemptively because a target 'looks like' GTK/Chromium/Electron; the DRIVER decides when background is impossible and tells you so via a background_unavailable error (or a verified no-op). Only THEN re-issue the same action with 'foreground'. The lists above are the driver's detectors, not a checklist for you to front on a guess \u2014 fronting up-front needlessly steals the user's focus and is a bug, not a shortcut. Matches the macOS delivery_mode surface.",
+            "description": "Input delivery mode. 'background' (default) never swaps foreground: it routes through UIA Invoke / PostMessage and the window is never raised. For targets whose input stack silently drops posted events (Chromium/Electron content, GTK buttons, VCL/LibreOffice accelerators) the tool returns a structured background_unavailable error rather than fronting. 'foreground' is the explicit escalation: a brief SetForegroundWindow swap + SendInput, restoring the prior foreground afterward. IMPORTANT: 'background' is not a hint to weigh — it is the mandatory first attempt. Do NOT pass 'foreground' preemptively because a target 'looks like' GTK/Chromium/Electron; the DRIVER decides when background is impossible and tells you so via a background_unavailable error (or a verified no-op). Only THEN re-issue the same action with 'foreground'. The lists above are the driver's detectors, not a checklist for you to front on a guess — fronting up-front needlessly steals the user's focus and is a bug, not a shortcut. Matches the macOS delivery_mode surface.",
             "enum": [
               "background",
               "foreground"
@@ -1797,7 +1765,7 @@
       "read_only": true
     },
     {
-      "description": "Single-call end-to-end driver diagnostics. Designed to let downstream consumers ship one stable call instead of stitching together check_permissions, doctor, version, bundle attribution, and platform capability status. On macOS, prompt-capable direct capture is deliberately skipped. For standalone CuaDriver, use `cua-driver permissions grant` to verify it explicitly. For an embedded or linked driver, use the host's permission flow for the app or executable macOS attributes this process's permission request to; the standalone command does not verify the host's capture readiness. cua-driver owns the health model; consumers stay thin.\n\nInput \u2014 all optional:\n  {\n    \"include\": [\"<check_name>\", ...],   // run only these\n    \"skip\":    [\"<check_name>\", ...]    // skip these\n  }\nIf both are given, `include` wins.\n\nCanonical check names:\n  macOS  : binary_version, platform_supported, session_active,\n           bundle_identity, tcc_accessibility, tcc_screen_recording,\n           tcc_event_posting (read-only CGPreflightPostEventAccess),\n           ax_capability, screen_capture_capability\n  Windows: binary_version, platform_supported, session_active,\n           ax_capability (via UIA), screen_capture_capability (via DXGI)\n  Linux  : binary_version, platform_supported, session_active,\n           ax_capability (via AT-SPI), screen_capture_capability (via X11)\n\nOutput \u2014 stable contract, schema_version=\"1\":\n  {\n    \"schema_version\": \"1\",\n    \"platform\": \"darwin\" | \"win32\" | \"linux\",\n    \"driver_version\": \"<semver>\",\n    \"overall\": \"ok\" | \"degraded\" | \"failed\",\n    \"checks\": [\n      {\n        \"name\": \"<one of the canonical names above>\",\n        \"status\": \"pass\" | \"fail\" | \"skip\",\n        \"message\": \"<one-line summary, always present>\",\n        \"hint\": \"<remediation step, present when status=fail>\",\n        \"data\": { /* check-specific structured fields */ }\n      },\n      ...\n    ]\n  }\n\n`overall` rules:\n  - `ok`       \u2014 every non-skipped check passes\n  - `degraded` \u2014 at least one non-core check fails (binary is still usable)\n  - `failed`   \u2014 any core check fails (binary_version, platform_supported, session_active)\n\nStability: schema_version=\"1\" is the contract. Future breaking changes will be `\"2\"`. Adding new check names under the same schema_version is non-breaking; consumers must tolerate unknown check names.",
+      "description": "Single-call end-to-end driver diagnostics. Designed to let downstream consumers ship one stable call instead of stitching together check_permissions, doctor, version, bundle attribution, and platform capability status. On macOS, prompt-capable direct capture is deliberately skipped. For standalone CuaDriver, use `cua-driver permissions grant` to verify it explicitly. For an embedded or linked driver, use the host's permission flow for the app or executable macOS attributes this process's permission request to; the standalone command does not verify the host's capture readiness. cua-driver owns the health model; consumers stay thin.\n\nInput — all optional:\n  {\n    \"include\": [\"<check_name>\", ...],   // run only these\n    \"skip\":    [\"<check_name>\", ...]    // skip these\n  }\nIf both are given, `include` wins.\n\nCanonical check names:\n  macOS  : binary_version, platform_supported, session_active,\n           bundle_identity, tcc_accessibility, tcc_screen_recording,\n           tcc_event_posting (read-only CGPreflightPostEventAccess),\n           ax_capability, screen_capture_capability\n  Windows: binary_version, platform_supported, session_active,\n           ax_capability (via UIA), screen_capture_capability (via DXGI)\n  Linux  : binary_version, platform_supported, session_active,\n           ax_capability (via AT-SPI), screen_capture_capability (via X11)\n\nOutput — stable contract, schema_version=\"1\":\n  {\n    \"schema_version\": \"1\",\n    \"platform\": \"darwin\" | \"win32\" | \"linux\",\n    \"driver_version\": \"<semver>\",\n    \"overall\": \"ok\" | \"degraded\" | \"failed\",\n    \"checks\": [\n      {\n        \"name\": \"<one of the canonical names above>\",\n        \"status\": \"pass\" | \"fail\" | \"skip\",\n        \"message\": \"<one-line summary, always present>\",\n        \"hint\": \"<remediation step, present when status=fail>\",\n        \"data\": { /* check-specific structured fields */ }\n      },\n      ...\n    ]\n  }\n\n`overall` rules:\n  - `ok`       — every non-skipped check passes\n  - `degraded` — at least one non-core check fails (binary is still usable)\n  - `failed`   — any core check fails (binary_version, platform_supported, session_active)\n\nStability: schema_version=\"1\" is the contract. Future breaking changes will be `\"2\"`. Adding new check names under the same schema_version is non-breaking; consumers must tolerate unknown check names.",
       "destructive": false,
       "idempotent": true,
       "input_schema": {
@@ -1828,7 +1796,7 @@
       "read_only": true
     },
     {
-      "description": "Report the current persistent driver config.\n\nPure read-only. Returns defaults when the underlying state is unset \u2014 same fallback the daemon uses at startup. Sibling to `set_config`.\n\nCurrent schema (Windows):\n\n  {\n    \"schema_version\": 1,\n    \"version\": \"<crate version>\",\n    \"source_sha\": \"<maintainer build commit or null>\",\n    \"platform\": \"windows\",\n    \"capture_mode\": \"ax\" | \"vision\" (DEPRECATED, ignored),\n    \"max_image_dimension\": 0\n  }\n\n`capture_mode` is deprecated and no longer affects behavior \u2014 `get_window_state` always returns both the UIA tree and a screenshot.",
+      "description": "Report the current persistent driver config.\n\nPure read-only. Returns defaults when the underlying state is unset — same fallback the daemon uses at startup. Sibling to `set_config`.\n\nCurrent schema (Windows):\n\n  {\n    \"schema_version\": 1,\n    \"version\": \"<crate version>\",\n    \"source_sha\": \"<maintainer build commit or null>\",\n    \"platform\": \"windows\",\n    \"capture_mode\": \"ax\" | \"vision\" (DEPRECATED, ignored),\n    \"max_image_dimension\": 0\n  }\n\n`capture_mode` is deprecated and no longer affects behavior — `get_window_state` always returns both the UIA tree and a screenshot.",
       "destructive": false,
       "idempotent": true,
       "input_schema": {
@@ -1845,17 +1813,27 @@
       "read_only": true
     },
     {
-      "description": "Write a setting into the persistent driver config. Values take effect immediately. Pass each setting as its own field.\n\nKnown keys:\n- `capture_mode` (string: `vision` | `ax` | `som`) \u2014 DEPRECATED and ignored; `get_window_state` always returns both the UIA tree and a screenshot. Still accepted/persisted for back-compat but has no effect.\n- `max_image_dimension` (integer)\n- `experimental_pip` (boolean; persisted to config.json, applies on next daemon restart \u2014 Windows backend stubbed today, see issue #1729)\n- `experimental_pip_geometry` (string `WxH` or `WxH+X+Y`; persisted; applies on next daemon restart)\n\n- `cursor.motion.style`, `cursor.motion.timing`, `cursor.motion.effects.<name>` (`on`, `off`, or `default`) \u2014 saved default cursor motion for sessions started afterwards. `cursor.motion: \"default\"` clears every saved cursor motion default.\n\nReturns the full updated config in the same shape as `get_config`.",
+      "description": "Write a setting into the persistent driver config. Values take effect immediately. Pass each setting as its own field.\n\nKnown keys:\n- `capture_mode` (string: `vision` | `ax` | `som`) — DEPRECATED and ignored; `get_window_state` always returns both the UIA tree and a screenshot. Still accepted/persisted for back-compat but has no effect.\n- `max_image_dimension` (integer)\n- `experimental_pip` (boolean; persisted to config.json, applies on next daemon restart — Windows backend stubbed today, see issue #1729)\n- `experimental_pip_geometry` (string `WxH` or `WxH+X+Y`; persisted; applies on next daemon restart)\n\n- `cursor.motion.style`, `cursor.motion.timing`, `cursor.motion.effects.<name>` (`on`, `off`, or `default`) — saved default cursor motion for sessions started afterwards. `cursor.motion: \"default\"` clears every saved cursor motion default.\n- `cursor.badges` (`minimal` default, `verbose`, or `off`) — agent cursor badge; applies to every cursor at once.\n\nReturns the full updated config in the same shape as `get_config`.",
       "destructive": false,
       "idempotent": true,
       "input_schema": {
         "additionalProperties": false,
         "properties": {
           "capture_mode": {
-            "description": "DEPRECATED and ignored \u2014 get_window_state always returns both the UIA tree and a screenshot. Still accepted/persisted for back-compat but has no effect. (\"som\"/\"screenshot\" still decode as deprecated aliases.)",
+            "description": "DEPRECATED and ignored — get_window_state always returns both the UIA tree and a screenshot. Still accepted/persisted for back-compat but has no effect. (\"som\"/\"screenshot\" still decode as deprecated aliases.)",
             "enum": [
               "ax",
               "vision"
+            ],
+            "type": "string"
+          },
+          "cursor.badges": {
+            "description": "Agent cursor badge. minimal (default): no badge at rest; a brief chip for a foreground moment or a key combo, and the session name on hover or when two or more agent cursors are on screen. verbose: the earlier badge with the session name and delivery/target chips on every action. off: no badge. Applies immediately to every cursor.",
+            "enum": [
+              "minimal",
+              "verbose",
+              "off",
+              "default"
             ],
             "type": "string"
           },
@@ -1959,7 +1937,7 @@
       "read_only": false
     },
     {
-      "description": "Return a lightweight snapshot of the desktop: running processes and on-screen visible windows with their bounds and owner pid.\n\nFor the full UIA subtree of a single window (with interactive element indices you can click by), use get_window_state instead \u2014 this is a fast discovery read.",
+      "description": "Return a lightweight snapshot of the desktop: running processes and on-screen visible windows with their bounds and owner pid.\n\nFor the full UIA subtree of a single window (with interactive element indices you can click by), use get_window_state instead — this is a fast discovery read.",
       "destructive": false,
       "idempotent": true,
       "input_schema": {
@@ -2024,7 +2002,7 @@
       "read_only": true
     },
     {
-      "description": "Legacy browser compatibility tool. Prefer get_browser_state and the typed browser_* tools for exact targeting, endpoint ownership, and consent. Read-only get_text and query_dom remain available by default. Mutating actions require the daemon operator to set CUA_DRIVER_ENABLE_LEGACY_PAGE_MUTATIONS=1 before daemon startup (restart the daemon after changing it); this escape hatch does not provide the typed browser surface's exact binding or existing-profile grant guarantees. Supports Chrome, Brave, Edge, Safari (via AppleScript on macOS), Electron apps (via CDP), Chromium/Firefox on Windows (via UIA for read; CDP for execute_javascript when --remote-debugging-port is set), and WKWebView/Tauri/AT-SPI fallbacks.\n\nActions:\n- execute_javascript: Run JS and return the result.\n- get_text: Extract visible text from the page.\n- query_dom: Find elements matching a CSS selector.\n- click_element: Click a CSS-selected element AND animate the agent cursor to its on-screen center first (so the user sees what the agent is doing). Prefer over `execute_javascript('el.click()')` whenever you want visible cursor feedback.\n- insert_text: Insert `text` at whatever currently holds DOM focus in one native operation (CDP Input.insertText) \u2014 no synthesized key events, but more durable than a one-shot execute_javascript write since rich-text editors already have to treat it like an IME commit. Try this before type_keystrokes on a contenteditable that discarded an execute_javascript write. Click/focus the target field first.\n- type_keystrokes: Type `text` via real per-character keystroke events into whatever currently holds DOM focus. Slower than insert_text but the most durable rung \u2014 use it when insert_text also gets discarded, or the editor's own keydown/keyup handlers need to see real keys. Click/focus the target field first.\n- enable_javascript_apple_events: macOS-only \u2014 patch the browser's Preferences to allow JS from Apple Events (Chrome/Brave/Edge, requires user confirmation and a browser restart).",
+      "description": "Legacy browser compatibility tool. Prefer get_browser_state and the typed browser_* tools for exact targeting, endpoint ownership, and consent. Read-only get_text and query_dom remain available by default. Mutating actions require the daemon operator to set CUA_DRIVER_ENABLE_LEGACY_PAGE_MUTATIONS=1 before daemon startup (restart the daemon after changing it); this escape hatch does not provide the typed browser surface's exact binding or existing-profile grant guarantees. Supports Chrome, Brave, Edge, Safari (via AppleScript on macOS), Electron apps (via CDP), Chromium/Firefox on Windows (via UIA for read; CDP for execute_javascript when --remote-debugging-port is set), and WKWebView/Tauri/AT-SPI fallbacks.\n\nActions:\n- execute_javascript: Run JS and return the result.\n- get_text: Extract visible text from the page.\n- query_dom: Find elements matching a CSS selector.\n- click_element: Click a CSS-selected element AND animate the agent cursor to its on-screen center first (so the user sees what the agent is doing). Prefer over `execute_javascript('el.click()')` whenever you want visible cursor feedback.\n- insert_text: Insert `text` at whatever currently holds DOM focus in one native operation (CDP Input.insertText) — no synthesized key events, but more durable than a one-shot execute_javascript write since rich-text editors already have to treat it like an IME commit. Try this before type_keystrokes on a contenteditable that discarded an execute_javascript write. Click/focus the target field first.\n- type_keystrokes: Type `text` via real per-character keystroke events into whatever currently holds DOM focus. Slower than insert_text but the most durable rung — use it when insert_text also gets discarded, or the editor's own keydown/keyup handlers need to see real keys. Click/focus the target field first.\n- enable_javascript_apple_events: macOS-only — patch the browser's Preferences to allow JS from Apple Events (Chrome/Brave/Edge, requires user confirmation and a browser restart).",
       "destructive": false,
       "idempotent": false,
       "input_schema": {
@@ -2081,7 +2059,7 @@
             "type": "string"
           },
           "target_url_contains": {
-            "description": "Optional, for execute_javascript/insert_text/type_keystrokes: require exactly one browser tab whose URL contains this substring. Use this on a multi-tab browser \u2014 there's no built-in link between window_id and which tab a CDP call reaches.",
+            "description": "Optional, for execute_javascript/insert_text/type_keystrokes: require exactly one browser tab whose URL contains this substring. Use this on a multi-tab browser — there's no built-in link between window_id and which tab a CDP call reaches.",
             "type": "string"
           },
           "text": {
@@ -2106,7 +2084,7 @@
       "read_only": false
     },
     {
-      "description": "Read-only browser inspection. Mode 1 (bind): pass pid + window_id of a native browser window to classify it, correlate it to a CDP target (exact-or-refuse), and mint a session-scoped target id plus tab ids. A driver-owned headless browser binds with pid alone. Mode 2 (snapshot): pass target_id + tab_id. The dom_refs_v1 compatibility format returns composed DOM refs. semantic_v2 joins accessibility, DOM, layout, and viewport state; ranks visible content before retained/offscreen state; and returns a semantic outline, typed action refs, content refs, scoped reads, and opaque continuation. Never performs setup \u2014 a missing endpoint is a structured browser_requires_setup refusal pointing at browser_prepare.",
+      "description": "Read-only browser inspection. Mode 1 (bind): pass pid + window_id of a native browser window to classify it, correlate it to a CDP target (exact-or-refuse), and mint a session-scoped target id plus tab ids. A driver-owned headless browser binds with pid alone. Mode 2 (snapshot): pass target_id + tab_id. The dom_refs_v1 compatibility format returns composed DOM refs. semantic_v2 joins accessibility, DOM, layout, and viewport state; ranks visible content before retained/offscreen state; and returns a semantic outline, typed action refs, content refs, scoped reads, and opaque continuation. Never performs setup: a browser that is not attached yet refuses with browser_consent_required or browser_requires_setup, and detail.next_call names the browser_prepare call that attaches it. Use this route for any web page in Chrome, Edge or Brave; desktop pointer tools move the user's pointer.",
       "destructive": false,
       "idempotent": true,
       "input_schema": {
@@ -2168,7 +2146,7 @@
       "read_only": true
     },
     {
-      "description": "Explicitly prepare an owned DevTools endpoint for a browser. pid is required for an existing process or existing-profile attachment, and optional only for allow_launch=true with an isolated profile. Existing endpoints are detected without side effects. Acting setup for an isolated profile follows the runtime permission mode and optional capability manifest. It requires allow_launch=true, launches a separate browser, and never copies, modifies, or terminates the requested user profile. Without pid, only a platform-attested system Chrome/Edge installation (or a root-owned package payload on Linux) is eligible; redirects and user-controlled locations fail closed. Existing-profile attachment is explicit and follows the runtime's immutable permission mode: standard requires an explicit --grant existing-profile launch grant or an embedding authorization host, bounded requires a launch-approved exact resource manifest, and unrestricted requires explicit trusted startup risk acceptance. Ordinary MCP transport approval never proves profile authorization. On proven platforms, an authorized request also permits one bounded exact-window setup: open the recognized browser product's fixed remote-debugging page, toggle its uniquely matched per-instance checkbox, prove the PID-owned loopback endpoint, and close the temporary tab. Every visible effect is reported; ambiguity is refused. Where attaching would bring the browser in front of the user's app (macOS Chrome shows its own remote-debugging prompt in front for every new connection), existing-profile attachment refuses with background_unavailable unless delivery_mode is \"foreground\" (the app that was in front is brought back afterwards) or the browser window is on another Space than the user's, where it attaches in the background while the driver reverts the browser's own brief activations.",
+      "description": "Attach the browser tools to a browser. For a page in the user's running Chrome, Edge or Brave, call it once with pid, window_id, session and strategy {\"kind\":\"existing_profile\"} when get_browser_state refuses with browser_consent_required or browser_requires_setup; then call get_browser_state again and act with browser_click, browser_type or browser_pointer. It attaches, or refuses with nothing changed and says why. Explicitly prepare an owned DevTools endpoint for a browser. pid is required for an existing process or existing-profile attachment, and optional only for allow_launch=true with an isolated profile. Existing endpoints are detected without side effects. Acting setup for an isolated profile follows the runtime permission mode and optional capability manifest. It requires allow_launch=true, launches a separate browser, and never copies, modifies, or terminates the requested user profile. Without pid, only a platform-attested system Chrome/Edge installation (or a root-owned package payload on Linux) is eligible; redirects and user-controlled locations fail closed. Existing-profile attachment is explicit and follows the runtime's immutable permission mode: standard requires an explicit --grant existing-profile launch grant or an embedding authorization host, bounded requires a launch-approved exact resource manifest, and unrestricted requires explicit trusted startup risk acceptance. Ordinary MCP transport approval never proves profile authorization. On proven platforms, an authorized request also permits one bounded exact-window setup: open the recognized browser product's fixed remote-debugging page, toggle its uniquely matched per-instance checkbox, prove the PID-owned loopback endpoint, and close the temporary tab. Every visible effect is reported; ambiguity is refused. Where attaching would bring the browser in front of the user's app (macOS Chrome shows its own remote-debugging prompt in front for every new connection), existing-profile attachment refuses with background_unavailable unless delivery_mode is \"foreground\" (the app that was in front is brought back afterwards) or the browser window is on another Space than the user's, where it attaches in the background while the driver reverts the browser's own brief activations.",
       "destructive": true,
       "idempotent": false,
       "input_schema": {
@@ -2228,7 +2206,7 @@
           },
           "strategy": {
             "additionalProperties": false,
-            "description": "Attach to an already-running browser instead of launching one. kind=existing_profile attaches to the user's running profile at pid/window_id and requires explicit profile authorization.",
+            "description": "Attach to an already-running browser instead of launching one. Pass an object, {\"kind\":\"existing_profile\"}, not a string. kind=existing_profile attaches to the user's running profile at pid/window_id under the runtime's profile authorization.",
             "properties": {
               "kind": {
                 "enum": [
@@ -2336,11 +2314,11 @@
             "type": "string"
           },
           "x": {
-            "description": "Viewport x (CSS px) \u2014 alternative to ref.",
+            "description": "Viewport x (CSS px) — alternative to ref.",
             "type": "number"
           },
           "y": {
-            "description": "Viewport y (CSS px) \u2014 alternative to ref.",
+            "description": "Viewport y (CSS px) — alternative to ref.",
             "type": "number"
           }
         },
@@ -2383,7 +2361,7 @@
             "type": "string"
           },
           "replace": {
-            "description": "false (default): insert at the caret, appending to whatever the field already holds. true: select the element's whole content first so the text replaces it \u2014 with an empty text this clears the field. Replacement goes through the selection, so beforeinput/input still fire and framework state stays consistent.",
+            "description": "false (default): insert at the caret, appending to whatever the field already holds. true: select the element's whole content first so the text replaces it — with an empty text this clears the field. Replacement goes through the selection, so beforeinput/input still fire and framework state stays consistent.",
             "type": "boolean"
           },
           "session": {
@@ -2412,51 +2390,6 @@
         "type": "object"
       },
       "name": "browser_type",
-      "read_only": false
-    },
-    {
-      "description": "Press one xdotool-style key or modifier combination in an exactly-bound browser tab through trusted CDP Input events. The event is delivered to the page's current focus without activating browser chrome. Optionally pass a current type-capable semantic ref to focus that exact editable node first. Browser-level shortcuts are not emulated; use browser_navigate for back, forward, and reload.",
-      "destructive": false,
-      "idempotent": false,
-      "input_schema": {
-        "additionalProperties": true,
-        "properties": {
-          "key": {
-            "description": "One key or combination, for example Return, Tab, Escape, super+v, ctrl+a, Up, F5, or KP_0.",
-            "type": "string"
-          },
-          "modifiers": {
-            "description": "Optional modifier aliases; equivalent to including them in key.",
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "ref": {
-            "description": "Page element ref in the p<snapshot>:<index> namespace from get_browser_state. Refs are invalidated by navigation and by newer snapshots of the same tab.",
-            "type": "string"
-          },
-          "session": {
-            "description": "For multi-call work, prefer a short public session label and repeat it on every call that accepts it. Omit it to use the authenticated transport's implicit lifecycle session. Browser targets, tabs, and refs belong to the resolved lifecycle session.",
-            "type": "string"
-          },
-          "tab_id": {
-            "description": "Opaque tab id from get_browser_state (session-scoped).",
-            "type": "string"
-          },
-          "target_id": {
-            "description": "Opaque browser target id minted by get_browser_state (session-scoped; never a CDP id).",
-            "type": "string"
-          }
-        },
-        "required": [
-          "target_id",
-          "tab_id",
-          "key"
-        ],
-        "type": "object"
-      },
-      "name": "browser_key",
       "read_only": false
     },
     {
@@ -2693,7 +2626,7 @@
       "read_only": false
     },
     {
-      "description": "Start trajectory recording for the calling session. Each action-tool invocation (click, right_click, scroll, type_text, press_key, hotkey, set_value) from that session writes a turn folder under `output_dir`. Without `session`, every call on the same connection is recorded, including named-session calls. Other connections and session lifecycle calls (`start_session` / `end_session`) are not recorded. CLI recordings started with `cua-driver recording start` are daemon-wide.\n\nEach turn folder holds:\n\n- `before_state.json` / `after_state.json` \u2014 application AX/UIA/AT-SPI state immediately before and after the action.\n- `before.png` / `after.png` \u2014 target-window screenshots immediately before and after the action.\n- `evidence.json` \u2014 capture status and a stable classification when an expected artifact could not be captured.\n- `app_state.json` \u2014 post-action AX/UIA snapshot for the target pid.\n- `screenshot.png` \u2014 compatibility alias of `after.png`.\n- `action.json` \u2014 tool name, full input arguments, result summary, result-error flag, pid, click point (when applicable), ISO-8601 timestamp.\n- `click.png` \u2014 for dispatched click-family actions only, `before.png` with a red marker at the click point. A call refused before target resolution is explicitly not applicable instead.\n\nThe per-turn accessibility walk is bounded like `get_window_state`: `state_timeout_ms` (default 1000) caps each before/after walk, a walk that runs out of budget records the PARTIAL tree, and `evidence.json` carries `truncated`, `truncation_reason`, `nodes_visited`, `nodes_pending` and `timeout_ms` for that phase. A provider that stops answering is abandoned after the budget plus a short grace and the phase is classified `state_capture_timeout`. Actions refused before dispatch (for example an unknown or expired `capture_id`) skip the state walk; their state is classified `not_applicable` / `action_refused_before_dispatch`. Pass `include_accessibility_tree: false` to record screenshots and actions without state.\n\nTurn folders are named `turn-00001/`, `turn-00002/`, etc.  Turn numbering restarts at 1 each time recording is (re-)started.\n\n**Video is off by default.** Pass `record_video: true` to also capture the main display to `<output_dir>/recording.mp4` (H.264 / 30 fps) for the lifetime of the session. The recording is torn down automatically when the MCP client disconnects.\n\n**macOS uses native ScreenCaptureKit** (daemon-owned SCStream + SCRecordingOutput) under the daemon's Screen Recording grant, with no ffmpeg subprocess. Requires macOS 15.0+. On macOS 26 (Tahoe), the first direct capture can also show a one-time consent asking to let Cua Driver bypass the system private window picker and directly access your screen and audio; choose Allow, or run `cua-driver permissions grant` beforehand to answer it up front. The recorder captures screen video only and does not enable system-audio capture.\n\n**Windows + Linux use an ffmpeg subprocess** (`gdigrab` / `x11grab` + libx264). Requires ffmpeg on PATH (winget install Gyan.FFmpeg / apt install ffmpeg); when ffmpeg is missing or fails on startup the per-turn capture (screenshots + action.json) still runs and the session's `last_error` field carries the diagnostic.\n\nState persists for the life of the daemon; a restart resets to disabled with no on-disk state. Call `stop_recording` to disable + finalize the mp4.",
+      "description": "Start trajectory recording for the calling session. Each action-tool invocation (click, right_click, scroll, type_text, press_key, hotkey, set_value) from that session writes a turn folder under `output_dir`. Without `session`, every call on the same connection is recorded, including named-session calls. Other connections and session lifecycle calls (`start_session` / `end_session`) are not recorded. CLI recordings started with `cua-driver recording start` are daemon-wide.\n\nEach turn folder holds:\n\n- `before_state.json` / `after_state.json` — application AX/UIA/AT-SPI state immediately before and after the action.\n- `before.png` / `after.png` — target-window screenshots immediately before and after the action.\n- `evidence.json` — capture status and a stable classification when an expected artifact could not be captured.\n- `app_state.json` — post-action AX/UIA snapshot for the target pid.\n- `screenshot.png` — compatibility alias of `after.png`.\n- `action.json` — tool name, full input arguments, result summary, result-error flag, pid, click point (when applicable), ISO-8601 timestamp.\n- `click.png` — for dispatched click-family actions only, `before.png` with a red marker at the click point. A call refused before target resolution is explicitly not applicable instead.\n\nThe per-turn accessibility walk is bounded like `get_window_state`: `state_timeout_ms` (default 1000) caps each before/after walk, a walk that runs out of budget records the PARTIAL tree, and `evidence.json` carries `truncated`, `truncation_reason`, `nodes_visited`, `nodes_pending` and `timeout_ms` for that phase. A provider that stops answering is abandoned after the budget plus a short grace and the phase is classified `state_capture_timeout`. Actions refused before dispatch (for example an unknown or expired `capture_id`) skip the state walk; their state is classified `not_applicable` / `action_refused_before_dispatch`. Pass `include_accessibility_tree: false` to record screenshots and actions without state.\n\nTurn folders are named `turn-00001/`, `turn-00002/`, etc.  Turn numbering restarts at 1 each time recording is (re-)started.\n\n**Video is off by default.** Pass `record_video: true` to also capture the main display to `<output_dir>/recording.mp4` (H.264 / 30 fps) for the lifetime of the session. The recording is torn down automatically when the MCP client disconnects.\n\n**macOS uses native ScreenCaptureKit** (daemon-owned SCStream + SCRecordingOutput) under the daemon's Screen Recording grant, with no ffmpeg subprocess. Requires macOS 15.0+. On macOS 26 (Tahoe), the first direct capture can also show a one-time consent asking to let Cua Driver bypass the system private window picker and directly access your screen and audio; choose Allow, or run `cua-driver permissions grant` beforehand to answer it up front. The recorder captures screen video only and does not enable system-audio capture.\n\n**Windows + Linux use an ffmpeg subprocess** (`gdigrab` / `x11grab` + libx264). Requires ffmpeg on PATH (winget install Gyan.FFmpeg / apt install ffmpeg); when ffmpeg is missing or fails on startup the per-turn capture (screenshots + action.json) still runs and the session's `last_error` field carries the diagnostic.\n\nState persists for the life of the daemon; a restart resets to disabled with no on-disk state. Call `stop_recording` to disable + finalize the mp4.",
       "destructive": false,
       "idempotent": true,
       "input_schema": {
@@ -2733,7 +2666,7 @@
       "read_only": false
     },
     {
-      "description": "Stop trajectory recording. Disables further per-turn capture and, when video was enabled, gracefully terminates the ffmpeg subprocess so the mp4's moov atom is finalized (the file is playable). Calling stop on an already-stopped session is a no-op. The response carries `last_video_path` pointing at the finalized mp4 (when video was on).\n\nA manual `stop_recording` is **unconditional** \u2014 it stops whatever recording is active regardless of which session started it. Ownership-scoped teardown (so one client disconnecting can't stop a recording a later client started) is handled by the registry's `session_end` lifecycle hook, not by this tool.",
+      "description": "Stop trajectory recording. Disables further per-turn capture and, when video was enabled, gracefully terminates the ffmpeg subprocess so the mp4's moov atom is finalized (the file is playable). Calling stop on an already-stopped session is a no-op. The response carries `last_video_path` pointing at the finalized mp4 (when video was on).\n\nA manual `stop_recording` is **unconditional** — it stops whatever recording is active regardless of which session started it. Ownership-scoped teardown (so one client disconnecting can't stop a recording a later client started) is handled by the registry's `session_end` lifecycle hook, not by this tool.",
       "destructive": false,
       "idempotent": true,
       "input_schema": {
@@ -2788,7 +2721,7 @@
             "type": "string"
           },
           "stop_on_error": {
-            "description": "Stop replay on the first tool-call error. Default true \u2014 set false to best-effort through the full trajectory.",
+            "description": "Stop replay on the first tool-call error. Default true — set false to best-effort through the full trajectory.",
             "type": "boolean"
           }
         },
@@ -3215,7 +3148,7 @@
       "read_only": false
     },
     {
-      "description": "Run a JavaScript program that drives apps through Cua Driver, in ONE call: loops, conditions, reads and checks between actions, and only the result comes back. Use it when the flow needs logic (a loop over rows, a branch on what the app shows, a retry); use run_steps for a fixed list of steps.\n\nThe script is the body of an async function: use `await`, and `return` a JSON value. It runs in a sandbox with no filesystem, network, process, timers or environment; the only API is `cua`:\n- `await cua.getApp(\"TextEdit\" | \"com.apple.TextEdit\" | {pid, windowId})` \u2192 app (follows the app's frontmost window unless a windowId is given)\n- `await cua.launch(nameOrBundleId)` \u2192 app; `cua.listApps()`, `cua.listWindows({pid?})`, `cua.sleep(ms)`, `cua.computer.target`\n- app.getState(opts?) \u2192 get_window_state result (`tree_markdown` or `tree_diff`, `snapshot_id`; pass get_window_state options such as {since:\"latest\"})\n- app.query({role?, name?, text?}) \u2192 matching elements across the app's windows {element_token, role, label, value, enabled, selected, frame}, then matching static-text rows {role, label, value, text, display_only} (read text such as a status line from their `value`)\n- app.waitFor({role?, name?, text?, gone?, value?, timeout_ms?}) and app.verify(predicate | predicates) (verify_state)\n- app.click(t), doubleClick(t), rightClick(t), typeText(text, t?), pressKey(\"return\" | \"cmd+s\", t?), hotkey([\"cmd\",\"s\"]), scroll(t, direction, amount?), setValue(t, value), drag([x,y], [x,y]), zoom([x1,y1,x2,y2])\nwhere a target `t` is {role, name, nth?} (found fresh, waits up to 3 s), an element_token string, a row number from this app's last getState(), or [x, y] window pixels.\n- `cua.call(tool, args)` for any other allowed tool: click, double_click, right_click, set_value, type_text, press_key, hotkey, scroll, drag, launch_app, list_apps, list_windows, get_window_state, verify_state, zoom.\nA failed driver call throws a CuaError (catch it to recover). Every call goes through the same session, permission and approval checks as a direct call.\n\nLimits: `timeout_ms` wall time (default 30000, max 120000), `max_calls` driver calls (default 100, max 500), 32 MiB heap. Returns the return value, console output, and a per-call log; an error names the script line, the call and the reason.\n\nExample:\nconst app = await cua.getApp(\"Calculator\");\nfor (const key of [\"7\", \"multiply\", \"6\", \"equals\"]) await app.click({role: \"button\", name: key});\nconst [display] = await app.query({role: \"statictext\"});\nreturn display.value;",
+      "description": "Run a JavaScript program that drives apps through Cua Driver, in ONE call: loops, conditions, reads and checks between actions, and only the result comes back. Use it when the flow needs logic (a loop over rows, a branch on what the app shows, a retry); use run_steps for a fixed list of steps.\n\nThe script is the body of an async function: use `await`, and `return` a JSON value. It runs in a sandbox with no filesystem, network, process, timers or environment; the only API is `cua`:\n- `await cua.getApp(\"TextEdit\" | \"com.apple.TextEdit\" | {pid, windowId})` → app (follows the app's frontmost window unless a windowId is given)\n- `await cua.launch(nameOrBundleId)` → app; `cua.listApps()`, `cua.listWindows({pid?})`, `cua.sleep(ms)`, `cua.computer.target`\n- app.getState(opts?) → get_window_state result (`tree_markdown` or `tree_diff`, `snapshot_id`; pass get_window_state options such as {since:\"latest\"})\n- app.query({role?, name?, text?}) → matching elements across the app's windows {element_token, role, label, value, enabled, selected, frame}, then matching static-text rows {role, label, value, text, display_only} (read text such as a status line from their `value`)\n- app.waitFor({role?, name?, text?, gone?, value?, timeout_ms?}) and app.verify(predicate | predicates) (verify_state)\n- app.click(t), doubleClick(t), rightClick(t), typeText(text, t?), pressKey(\"return\" | \"cmd+s\", t?), hotkey([\"cmd\",\"s\"]), scroll(t, direction, amount?), setValue(t, value), drag([x,y], [x,y]), zoom([x1,y1,x2,y2])\nwhere a target `t` is {role, name, nth?} (found fresh, waits up to 3 s), an element_token string, a row number from this app's last getState(), or [x, y] window pixels.\n- `cua.call(tool, args)` for any other allowed tool: click, double_click, right_click, set_value, type_text, press_key, hotkey, scroll, drag, launch_app, list_apps, list_windows, get_window_state, verify_state, zoom.\nA failed driver call throws a CuaError (catch it to recover). Every call goes through the same session, permission and approval checks as a direct call.\n\nLimits: `timeout_ms` wall time (default 30000, max 120000), `max_calls` driver calls (default 100, max 500), 32 MiB heap. Returns the return value, console output, and a per-call log; an error names the script line, the call and the reason.\n\nExample:\nconst app = await cua.getApp(\"Calculator\");\nfor (const key of [\"7\", \"multiply\", \"6\", \"equals\"]) await app.click({role: \"button\", name: key});\nconst [display] = await app.query({role: \"statictext\"});\nreturn display.value;",
       "destructive": true,
       "idempotent": false,
       "input_schema": {
@@ -3253,7 +3186,7 @@
       "read_only": false
     },
     {
-      "description": "Check the saved stable/nightly Cua Driver channel for a release on GitHub. Returns current and selected channels, current and latest versions, an `update_available` boolean, the install one-liner, and the release notes URL. Read-only \u2014 never installs. Pacman-owned Linux executables return package-manager guidance without checking GitHub. Mirror of `cua-driver check-update --json`.",
+      "description": "Check the saved stable/nightly Cua Driver channel for a release on GitHub. Returns current and selected channels, current and latest versions, an `update_available` boolean, the install one-liner, and the release notes URL. Read-only — never installs. Pacman-owned Linux executables return package-manager guidance without checking GitHub. Mirror of `cua-driver check-update --json`.",
       "destructive": false,
       "idempotent": true,
       "input_schema": {
@@ -3358,6 +3291,83 @@
       },
       "name": "parse_visual_regions",
       "read_only": true
+    },
+    {
+      "description": "Cooperatively close one exact top-level window without activating it, then independently verify that the original window identity disappeared. The operation never falls back to hotkeys, menu labels, coordinates, or process termination. Missing, mismatched, ambiguous, disabled, unsupported, confirmation-required, and unconfirmed no-op outcomes fail closed.",
+      "destructive": true,
+      "idempotent": false,
+      "input_schema": {
+        "additionalProperties": false,
+        "description": "Exact top-level window to close cooperatively through the operating\nsystem's accessibility/window-management API.",
+        "properties": {
+          "pid": {
+            "description": "Process ID of the application that owns the exact window.",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "session": {
+            "description": "For multi-call work, prefer a short public session label and repeat it on every call that\naccepts it. Omit it to use the authenticated transport's implicit lifecycle session.",
+            "type": "string"
+          },
+          "window_id": {
+            "description": "Exact native window ID from list_windows; no app-wide close fallback.",
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "pid",
+          "window_id"
+        ],
+        "type": "object"
+      },
+      "name": "close_window",
+      "read_only": false
+    },
+    {
+      "description": "Press one xdotool-style key or modifier combination in an exactly-bound browser tab through trusted CDP Input events. The event is delivered to the page's current focus without activating browser chrome. Optionally pass a current type-capable semantic ref to focus that exact editable node first. Browser-level shortcuts are not emulated; use browser_navigate for back, forward, and reload.",
+      "destructive": false,
+      "idempotent": false,
+      "input_schema": {
+        "additionalProperties": true,
+        "properties": {
+          "key": {
+            "description": "One key or combination, for example Return, Tab, Escape, super+v, ctrl+a, Up, F5, or KP_0.",
+            "type": "string"
+          },
+          "modifiers": {
+            "description": "Optional modifier aliases; equivalent to including them in key.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "ref": {
+            "description": "Page element ref in the p<snapshot>:<index> namespace from get_browser_state. Refs are invalidated by navigation and by newer snapshots of the same tab.",
+            "type": "string"
+          },
+          "session": {
+            "description": "For multi-call work, prefer a short public session label and repeat it on every call that accepts it. Omit it to use the authenticated transport's implicit lifecycle session. Browser targets, tabs, and refs belong to the resolved lifecycle session.",
+            "type": "string"
+          },
+          "tab_id": {
+            "description": "Opaque tab id from get_browser_state (session-scoped).",
+            "type": "string"
+          },
+          "target_id": {
+            "description": "Opaque browser target id minted by get_browser_state (session-scoped; never a CDP id).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "target_id",
+          "tab_id",
+          "key"
+        ],
+        "type": "object"
+      },
+      "name": "browser_key",
+      "read_only": false
     }
   ],
   "provenance": "Reconciled from immutable upstream ad694f82aaaa12e67257e4510837fc1f6cfc9484 and retained fork fields; full_output copied from the shared window_state_view schema. Native platform dump verification pending."
