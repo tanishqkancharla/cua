@@ -409,6 +409,20 @@ fn unicode_xtest_keeps_each_borrowed_mapping_until_the_client_processes_its_key(
         conn.set_input_focus(InputFocus::PARENT, target, x11rb::CURRENT_TIME)?
             .check()?;
         let before = conn.get_keyboard_mapping(8, 248)?.reply()?;
+        // One spare forces successive batches; the delayed client must see
+        // each borrowed glyph before that same keycode can be reused.
+        let spares = spare_keycodes(&conn)?;
+        let (_, occupied) = spares.split_last().expect("isolated X11 spare keycode");
+        for &keycode in occupied {
+            conn.change_keyboard_mapping(
+                1,
+                keycode,
+                before.keysyms_per_keycode,
+                &vec![0x7e1; usize::from(before.keysyms_per_keycode)],
+            )?
+            .check()?;
+        }
+        conn.get_input_focus()?.reply()?;
         let stop = Arc::new(AtomicBool::new(false));
         let client_stop = Arc::clone(&stop);
         let client = std::thread::spawn(move || -> Result<(String, usize)> {
@@ -459,6 +473,18 @@ fn unicode_xtest_keeps_each_borrowed_mapping_until_the_client_processes_its_key(
         let outcome = send_type_text_xtest(expected);
         stop.store(true, Ordering::SeqCst);
         let (received, replies) = client.join().expect("X11 client thread panicked")?;
+        let (check, _) = connect()?;
+        for &keycode in occupied {
+            check
+                .change_keyboard_mapping(
+                    1,
+                    keycode,
+                    before.keysyms_per_keycode,
+                    &vec![0; usize::from(before.keysyms_per_keycode)],
+                )?
+                .check()?;
+        }
+        check.get_input_focus()?.reply()?;
         if respond {
             outcome?;
             assert_eq!(
@@ -476,7 +502,6 @@ fn unicode_xtest_keeps_each_borrowed_mapping_until_the_client_processes_its_key(
             );
             assert_eq!(replies, 0);
         }
-        let (check, _) = connect()?;
         let after = check.get_keyboard_mapping(8, 248)?.reply()?;
         assert_eq!(after.keysyms_per_keycode, before.keysyms_per_keycode);
         assert_eq!(
