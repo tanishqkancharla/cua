@@ -1,5 +1,6 @@
 from pathlib import Path
 import os
+import plistlib
 import subprocess
 import sys
 
@@ -224,3 +225,12 @@ def test_release_installers_do_not_target_local_product_artifacts() -> None:
         assert "CuaDriverLocal" not in script
         assert ".cua-driver-local" not in script
         assert "cua-driver-local-serve" not in script
+
+
+def test_persistent_driver_bundle_does_not_opt_into_automatic_termination() -> None:
+    template = REPO_ROOT / "libs/cua-driver/rust/scripts/CuaDriverBundle/Contents/Info.plist"
+    info = plistlib.loads(template.read_bytes())
+    assert info.get("NSSupportsAutomaticTermination", False) is False, (
+        "The shared desktop daemon must outlive worker sessions and in-flight requests; "
+        "AppKit may automatically terminate an opted-in hidden app under memory pressure."
+    )

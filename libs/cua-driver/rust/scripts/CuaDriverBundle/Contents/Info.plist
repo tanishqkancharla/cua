@@ -42,7 +42,8 @@
     <string>Cua Driver captures the screen so agents can see and interact with the interface you ask them to control.</string>
     <key>NSAppleEventsUsageDescription</key>
     <string>Cua Driver uses Automation only when a requested action needs to communicate with another app.</string>
+    <!-- The persistent RPC daemon must not be auto-quit while hidden. -->
     <key>NSSupportsAutomaticTermination</key>
-    <true/>
+    <false/>
 </dict>
 </plist>
