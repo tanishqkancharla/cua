@@ -487,7 +487,6 @@ fn unicode_xtest_keeps_each_borrowed_mapping_until_the_client_processes_its_key(
     Ok(())
 }
 
-
 /// With no spare keycode left, a character missing from the keymap cannot be
 /// typed, and type_text must say so instead of reporting success.
 #[test]

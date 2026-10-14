@@ -3523,9 +3523,9 @@ pub fn send_type_text_xtest(text: &str) -> Result<()> {
     // reservation through delivery, and wait for a participating client before
     // allowing the guard-owning preflight call to restore the mappings.
     let borrowed_keys = std::cell::RefCell::new(std::collections::HashSet::new());
-    let needs_borrowed_keys = text.chars().any(|ch| {
-        char_to_keycode_shift(&mapping, mpx_keyboard::keysym_for_char(ch)).is_none()
-    });
+    let needs_borrowed_keys = text
+        .chars()
+        .any(|ch| char_to_keycode_shift(&mapping, mpx_keyboard::keysym_for_char(ch)).is_none());
     let app_events = if needs_borrowed_keys {
         let barrier = x11_app_events::AppEventBarrier::focused(&conn)?;
         if barrier.is_none() {
