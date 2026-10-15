@@ -975,7 +975,13 @@ fn actual_delivery_from_legacy(
         tool_name,
         "browser_click" | "browser_pointer" | "browser_type" | "browser_key"
     ) {
-        return Some(ActualDelivery::Background);
+        return match structured
+            .get("delivery_mode")
+            .and_then(serde_json::Value::as_str)
+        {
+            Some("foreground") => Some(ActualDelivery::Foreground),
+            _ => Some(ActualDelivery::Background),
+        };
     }
     if transport == ActionTransport::AgentCursorOverlay
         || args.get("scope").and_then(serde_json::Value::as_str) == Some("desktop")
@@ -1827,6 +1833,7 @@ mod tests {
                 "ref": "secret-ref",
                 "destination_ref": "secret-destination",
                 "input_route": input_route,
+                "delivery_mode": "foreground",
             });
             let structured = serde_json::json!({
                 "status": "ok",
