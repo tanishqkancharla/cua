@@ -758,7 +758,7 @@ pub(super) async fn run_in_background(
         ),
         Ok(Err(BackgroundPressError::Disabled {
             is_save: true,
-            message,
+            message: _,
         })) if document.is_some() => {
             let file = document.expect("checked");
             let bundle_id = crate::apps::bundle_id_for_pid(pid).unwrap_or_default();
@@ -791,12 +791,12 @@ pub(super) async fn run_in_background(
                     ActionTransport::MacosAppleEvent,
                     "The app's scripting interface reported the document saved",
                 ),
-                Ok(Err(refusal)) => background_unavailable(format!(
-                    "{preface}{message}, and saving through {app_name}'s scripting interface did not \
-                     complete ({}: {}). Nothing was saved",
-                    refusal.code, refusal.reason
-                )),
-                Err(error) => refusal(format!("invoke_menu: blocking task failed: {error}")),
+                Ok(Err(refusal)) => {
+                    background_save_failure(refusal.code, &refusal.reason, refusal.dispatched)
+                }
+                Err(error) => {
+                    background_save_failure("automation_task_failed", &error.to_string(), true)
+                }
             }
         }
         Ok(Err(BackgroundPressError::Disabled { message, .. })) => {
@@ -805,6 +805,20 @@ pub(super) async fn run_in_background(
         Ok(Err(BackgroundPressError::Other(error))) => refusal(error),
         Err(error) => refusal(format!("invoke_menu: blocking task failed: {error}")),
     }
+}
+
+fn background_save_failure(cause: &str, reason: &str, dispatched: bool) -> ToolResult {
+    if !dispatched {
+        return background_unavailable(format!(
+            "Background save refused ({cause}): {reason}. No save script was sent."
+        ));
+    }
+    ToolResult::error(format!("Background save delivery unknown ({cause}): {reason}. The app may still save. Cancellation or rollback is not established. Observe the document and file before deciding; do not automatically replay the save."))
+        .with_structured(serde_json::json!({
+            "code": "save_delivery_unknown", "effect": "unknown", "verified": false,
+            "path": "apple_events", "cause": cause, "reason": reason,
+            "script_dispatched": true, "retry": "observe_before_deciding",
+        }))
 }
 
 fn background_success(
@@ -948,6 +962,26 @@ mod tests {
         assert_eq!(result.is_error, Some(true));
         let structured = result.structured_content.expect("structured refusal");
         assert_eq!(structured["code"], "background_unavailable");
+        let before =
+            super::background_save_failure("automation_permission_timeout", "probe stalled", false);
+        assert_eq!(
+            before.structured_content.unwrap()["code"],
+            "background_unavailable"
+        );
+        for cause in [
+            "automation_timeout",
+            "save_unconfirmed",
+            "automation_task_failed",
+        ] {
+            let result = super::background_save_failure(cause, "not confirmed", true);
+            assert_eq!(result.is_error, Some(true));
+            assert!(result.action_record.is_none());
+            let data = result.structured_content.unwrap();
+            assert_eq!(data["code"], "save_delivery_unknown");
+            assert_eq!(data["effect"], "unknown");
+            assert_eq!(data["script_dispatched"], true);
+            assert_eq!(data["retry"], "observe_before_deciding");
+        }
         let message = structured["refusal"]["message"].as_str().unwrap();
         assert!(message.contains("does not activate a background app"));
         assert!(message.contains("bring_to_front"));

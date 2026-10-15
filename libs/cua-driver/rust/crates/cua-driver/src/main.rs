@@ -514,6 +514,9 @@ fn main() {
     cua_driver_sdk::configure_perception_client_resolver(
         extension_manager::perception_client_resolver(),
     );
+    if let Some(code) = platform_macos::apple_events::run_automation_probe_if_requested() {
+        std::process::exit(code);
+    }
     if let Some(code) = platform_macos::permissions::gate::run_permission_probe_if_requested() {
         std::process::exit(code);
     }

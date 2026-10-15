@@ -17,7 +17,7 @@
 use std::ffi::c_void;
 use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 /// Whether this process may send Apple Events to an app.
@@ -70,8 +70,9 @@ fn permission_from_status(status: i32) -> AutomationPermission {
     }
 }
 
-/// Read this process's Automation permission for `bundle_id` without asking.
-pub fn automation_permission(bundle_id: &str) -> AutomationPermission {
+// Only called by the finite child entry point, never by the daemon. Even with
+// ask_user_if_needed=0 this OS call has blocked indefinitely on a real desktop.
+fn raw_automation_permission(bundle_id: &str) -> i32 {
     let mut desc = AeDesc {
         descriptor_type: 0,
         data_handle: std::ptr::null_mut(),
@@ -86,19 +87,92 @@ pub fn automation_permission(bundle_id: &str) -> AutomationPermission {
         )
     };
     if created != 0 {
-        return AutomationPermission::Unknown(created as i32);
+        return created as i32;
     }
     let status =
         unsafe { AEDeterminePermissionToAutomateTarget(&desc, TYPE_WILDCARD, TYPE_WILDCARD, 0) };
     unsafe { AEDisposeDesc(&mut desc) };
-    permission_from_status(status)
+    status
 }
 
-/// A route that did not run, in words a caller can act on.
+const AUTOMATION_PROBE_ARG: &str = "--cua-internal-automation-probe";
+const AUTOMATION_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Offline child entry point. Reuse the signed executable and its inherited
+/// responsibility chain; never ask for consent, initialize tools or send input.
+/// The parent owns a deadline and reaps this read-only child on timeout.
+pub fn run_automation_probe_if_requested() -> Option<i32> {
+    let mut args = std::env::args().skip(1);
+    if args.next().as_deref() != Some(AUTOMATION_PROBE_ARG) {
+        return None;
+    }
+    let Some(bundle_id) = args.next() else {
+        return Some(2);
+    };
+    if args.next().is_some()
+        || bundle_id.is_empty()
+        || bundle_id.len() > 255
+        || !bundle_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b".-_".contains(&b))
+    {
+        return Some(2);
+    }
+    println!("{}", raw_automation_permission(&bundle_id));
+    Some(0)
+}
+
+/// Read Automation permission in a bounded fresh copy of this signed binary.
+/// A failed or timed out probe refuses before the mutating script is spawned.
+pub fn automation_permission(bundle_id: &str) -> Result<AutomationPermission, ScriptRefusal> {
+    let probe_error = |reason: String| ScriptRefusal {
+        code: "automation_permission_unavailable",
+        reason,
+        dispatched: false,
+    };
+    let executable = std::env::current_exe().map_err(|e| probe_error(e.to_string()))?;
+    let child = Command::new(executable)
+        .args([AUTOMATION_PROBE_ARG, bundle_id])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| probe_error(e.to_string()))?;
+    let output =
+        bounded_child_output(child, AUTOMATION_PROBE_TIMEOUT).map_err(|e| ScriptRefusal {
+            code: if e.code == "automation_timeout" {
+                "automation_permission_timeout"
+            } else {
+                "automation_permission_unavailable"
+            },
+            reason: format!(
+                "read-only Automation permission probe failed: {}; no script was sent",
+                e.reason
+            ),
+            dispatched: false,
+        })?;
+    if !output.status.success() {
+        return Err(probe_error(format!(
+            "Automation permission probe exited with {}",
+            output.status
+        )));
+    }
+    let status = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<i32>()
+        .map_err(|_| {
+            probe_error("Automation permission probe returned an invalid status".into())
+        })?;
+    Ok(permission_from_status(status))
+}
+
+/// A failed route; `dispatched` distinguishes a proved pre-script refusal from
+/// uncertain delivery. Killing osascript never proves the target cancelled.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScriptRefusal {
     pub code: &'static str,
     pub reason: String,
+    pub dispatched: bool,
 }
 
 /// Run `script` with `osascript`, passing `args` to its `on run argv`
@@ -115,10 +189,30 @@ pub fn run_script(script: &str, args: &[&str], timeout: Duration) -> Result<Stri
         .map_err(|error| ScriptRefusal {
             code: "automation_failed",
             reason: format!("osascript could not start: {error}"),
+            dispatched: false,
         })?;
     if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(script.as_bytes());
+        if let Err(error) = stdin.write_all(script.as_bytes()) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(ScriptRefusal {
+                code: "automation_failed",
+                reason: format!("osascript input failed: {error}"),
+                dispatched: true,
+            });
+        }
     }
+    let output = bounded_child_output(child, timeout)?;
+    if output.status.success() {
+        return Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    Err(script_error_refusal(&stderr))
+}
+
+/// Only finite, trusted children with bounded output use this helper. Always
+/// kill and reap on failure; releasing the client is not action cancellation.
+fn bounded_child_output(mut child: Child, timeout: Duration) -> Result<Output, ScriptRefusal> {
     let deadline = Instant::now() + timeout;
     loop {
         match child.try_wait() {
@@ -128,31 +222,27 @@ pub fn run_script(script: &str, args: &[&str], timeout: Duration) -> Result<Stri
                 let _ = child.wait();
                 return Err(ScriptRefusal {
                     code: "automation_timeout",
-                    reason: format!(
-                        "the app did not answer within {} s (a macOS Automation prompt may be \
-                         waiting for the user)",
-                        timeout.as_secs()
-                    ),
+                    reason: format!("child did not answer within {} ms", timeout.as_millis()),
+                    dispatched: true,
                 });
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(25)),
             Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
                 return Err(ScriptRefusal {
                     code: "automation_failed",
-                    reason: format!("osascript wait failed: {error}"),
-                })
+                    reason: format!("child wait failed: {error}"),
+                    dispatched: true,
+                });
             }
         }
     }
-    let output = child.wait_with_output().map_err(|error| ScriptRefusal {
+    child.wait_with_output().map_err(|error| ScriptRefusal {
         code: "automation_failed",
-        reason: format!("osascript output could not be read: {error}"),
-    })?;
-    if output.status.success() {
-        return Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned());
-    }
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-    Err(script_error_refusal(&stderr))
+        reason: format!("child output could not be read: {error}"),
+        dispatched: true,
+    })
 }
 
 /// Map an osascript error line ("... (-1743)") to a refusal.
@@ -163,6 +253,7 @@ fn script_error_refusal(stderr: &str) -> ScriptRefusal {
             reason: "macOS does not allow Cua Driver to control this app (System Settings > \
                      Privacy & Security > Automation)"
                 .into(),
+            dispatched: true,
         }
     } else {
         // osascript prints "<offset>: execution error: <message> (<code>)".
@@ -173,6 +264,7 @@ fn script_error_refusal(stderr: &str) -> ScriptRefusal {
         ScriptRefusal {
             code: "automation_failed",
             reason: message.to_owned(),
+            dispatched: true,
         }
     }
 }
@@ -180,17 +272,19 @@ fn script_error_refusal(stderr: &str) -> ScriptRefusal {
 /// Check the permission before a route runs: refuse when the user turned it
 /// off, so no event is sent.
 fn ensure_permitted(bundle_id: &str, app_name: &str) -> Result<(), ScriptRefusal> {
-    match automation_permission(bundle_id) {
+    match automation_permission(bundle_id)? {
         AutomationPermission::Denied => Err(ScriptRefusal {
             code: "automation_denied",
             reason: format!(
                 "macOS does not allow Cua Driver to control {app_name}. The user can allow it in \
                  System Settings > Privacy & Security > Automation"
             ),
+            dispatched: false,
         }),
         AutomationPermission::NotRunning => Err(ScriptRefusal {
             code: "automation_failed",
             reason: format!("{app_name} is not running"),
+            dispatched: false,
         }),
         // NeedsConsent: macOS shows its prompt once, on this event.
         _ => Ok(()),
@@ -222,11 +316,13 @@ pub fn finder_rename(path: &Path, new_name: &str) -> Result<std::path::PathBuf, 
         return Err(ScriptRefusal {
             code: "invalid_file_name",
             reason: format!("\"{new_name}\" is not a single file name"),
+            dispatched: false,
         });
     }
     let parent = path.parent().ok_or_else(|| ScriptRefusal {
         code: "automation_failed",
         reason: "the item has no parent folder".into(),
+        dispatched: false,
     })?;
     let target = parent.join(new_name);
     let same_item = path.file_name().and_then(|n| n.to_str()) == Some(new_name);
@@ -246,6 +342,7 @@ pub fn finder_rename(path: &Path, new_name: &str) -> Result<std::path::PathBuf, 
                 "\"{new_name}\" already exists in {}; nothing was renamed",
                 parent.display()
             ),
+            dispatched: false,
         });
     }
     ensure_permitted(FINDER_BUNDLE_ID, "Finder")?;
@@ -268,6 +365,7 @@ pub fn finder_rename(path: &Path, new_name: &str) -> Result<std::path::PathBuf, 
                     "Finder accepted the rename, but {} does not list \"{new_name}\"",
                     parent.display()
                 ),
+                dispatched: true,
             });
         }
         std::thread::sleep(Duration::from_millis(50));
@@ -339,7 +437,7 @@ end run
 /// Only reads when Automation is already granted, so a readback never shows
 /// the consent prompt; `None` when it cannot tell.
 pub fn document_modified(bundle_id: &str, path: &Path) -> Option<bool> {
-    if automation_permission(bundle_id) != AutomationPermission::Granted {
+    if automation_permission(bundle_id).ok() != Some(AutomationPermission::Granted) {
         return None;
     }
     let path_text = path.to_string_lossy();
@@ -386,18 +484,21 @@ pub fn save_document(
                     "{app_name} accepted the save, but still reports unsaved changes in {}",
                     path.display()
                 ),
+                dispatched: true,
             })
         }
         "no-document" => {
             return Err(ScriptRefusal {
                 code: "automation_failed",
                 reason: format!("{app_name} lists no open document for {}", path.display()),
+                dispatched: true,
             })
         }
         other => {
             return Err(ScriptRefusal {
                 code: "save_unconfirmed",
                 reason: format!("{app_name} answered \"{other}\" to the save"),
+                dispatched: true,
             })
         }
     }
@@ -479,11 +580,42 @@ mod tests {
             "0:120: execution error: Not authorized to send Apple events to Finder. (-1743)",
         );
         assert_eq!(denied.code, "automation_denied");
+        assert!(denied.dispatched);
         let other = script_error_refusal(
             "0:98: execution error: Finder got an error: The name \"b.txt\" is already taken. (-48)",
         );
         assert_eq!(other.code, "automation_failed");
         assert!(other.reason.starts_with("Finder got an error"));
+    }
+
+    #[test]
+    fn a_stalled_child_is_killed_and_reaped_without_undoing_prior_effects() {
+        let dir = tempfile::tempdir().unwrap();
+        let effect = dir.path().join("effect");
+        let child = Command::new("/bin/sh")
+            .args(["-c", "printf applied > \"$1\"; exec /bin/sleep 10", "probe"])
+            .arg(&effect)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let pid = child.id() as i32;
+        let started = Instant::now();
+        let error = bounded_child_output(child, Duration::from_millis(100)).unwrap_err();
+        assert_eq!(error.code, "automation_timeout");
+        assert!(error.dispatched);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(std::fs::read_to_string(&effect).unwrap(), "applied");
+        // No live child or zombie remains. A timeout did not undo its effect.
+        assert_eq!(
+            unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) },
+            -1
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD)
+        );
     }
 
     #[test]
@@ -512,6 +644,7 @@ mod tests {
         std::fs::write(dir.join("b.txt"), "b").unwrap();
         let refused = finder_rename(&dir.join("a.txt"), "b.txt").unwrap_err();
         assert_eq!(refused.code, "name_taken");
+        assert!(!refused.dispatched);
         assert_eq!(
             finder_rename(&dir.join("a.txt"), "x/y").unwrap_err().code,
             "invalid_file_name"

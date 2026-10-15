@@ -107,3 +107,26 @@ contract and an empirical run supports the change. Keep unsupported delivery
 as an exact refusal where the driver can determine it before dispatch. When an
 OS API reports success but offers no effect read-back, retain a visible gap
 rather than inventing a fixture-specific refusal in production code.
+
+## macOS scripting deadlines and uncertain effects
+
+Finder listed-name `set_value` and background document Save may use Apple Events.
+Their non-prompting Automation permission query runs in a fresh copy of the same
+signed executable, with a three-second deadline. A failed probe is reaped and
+refuses before a mutating script is started. A document-modified readback skips
+scripting when this probe cannot establish an existing grant. The query never
+requests consent; an explicitly requested scripting action can still trigger the
+normal first-use Automation prompt.
+
+The subsequent script has a thirty-second deadline. Killing `osascript` does not
+cancel an Apple Event already delivered to the target application. A timeout,
+failed readback, script error after launch or failed blocking task therefore
+returns `effect: "unknown"` and `rename_delivery_unknown` or
+`save_delivery_unknown`. Observe the actual folder/document before deciding on
+another action; never automatically replay uncertain input or assume rollback.
+A proved refusal before script launch remains a refusal. A daemon operation
+finishing does not prove that a previously delivered Apple Event stopped.
+
+The private permission-probe entry point is an implementation detail of the
+packaged driver, not an agent tool. Hosts should use the daemon or provide the
+matching probe entry point when embedding the Rust platform adapter directly.

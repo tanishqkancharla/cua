@@ -480,22 +480,51 @@ fn finder_rename_result(
             "renamed_to": new_path.display().to_string(),
         }))
         .with_action_record(rename_record()),
-        Ok(Err(refusal)) => ToolResult::error(format!(
-            "set_value refused ({FILE_NAME_NEEDS_RENAME}): renaming \"{old_name}\" through \
-             Finder did not complete ({}: {}). The file keeps its name; nothing else was sent.",
-            refusal.code, refusal.reason
-        ))
-        .with_structured(serde_json::json!({
-            "code": FILE_NAME_NEEDS_RENAME,
-            "effect": "refused",
-            "path": "apple_events",
-            "pid": pid,
-            "window_id": window_id,
-            "reason": refusal.reason,
-            "cause": refusal.code,
-        })),
-        Err(error) => ToolResult::error(format!("set_value rename task failed: {error}")),
+        Ok(Err(refusal)) => finder_rename_failure(
+            pid,
+            window_id,
+            refusal.code,
+            &refusal.reason,
+            refusal.dispatched,
+        ),
+        Err(error) => finder_rename_failure(
+            pid,
+            window_id,
+            "automation_task_failed",
+            &error.to_string(),
+            true,
+        ),
     }
+}
+
+fn finder_rename_failure(
+    pid: i32,
+    window_id: u32,
+    cause: &str,
+    reason: &str,
+    dispatched: bool,
+) -> ToolResult {
+    let effect = if dispatched { "unknown" } else { "refused" };
+    let instruction = if dispatched {
+        "A script may have reached Finder and may still complete. Cancellation or rollback is not established. Observe the folder before deciding what to do; do not automatically replay this rename."
+    } else {
+        "No rename script was sent."
+    };
+    ToolResult::error(format!(
+        "set_value rename {effect} ({cause}): {reason}. {instruction}"
+    ))
+    .with_structured(serde_json::json!({
+        "code": if dispatched { "rename_delivery_unknown" } else { FILE_NAME_NEEDS_RENAME },
+        "effect": effect,
+        "verified": false,
+        "path": "apple_events",
+        "pid": pid,
+        "window_id": window_id,
+        "reason": reason,
+        "cause": cause,
+        "script_dispatched": dispatched,
+        "retry": if dispatched { "observe_before_deciding" } else { "not_dispatched" },
+    }))
 }
 
 const LIST_RENAME_ROUTE: &str = "This is a file's name as the list shows it. Writing its AXValue \
@@ -1277,12 +1306,39 @@ mod tests {
             Ok(Err(crate::apple_events::ScriptRefusal {
                 code: "automation_denied",
                 reason: "off".into(),
+                dispatched: false,
             })),
         );
         assert_eq!(refused.is_error, Some(true));
         let data = refused.structured_content.unwrap();
         assert_eq!(data["code"], "file_name_needs_rename");
         assert_eq!(data["cause"], "automation_denied");
+        assert_eq!(data["effect"], "refused");
+        assert_eq!(data["script_dispatched"], false);
+        for cause in [
+            "automation_timeout",
+            "automation_failed",
+            "rename_unconfirmed",
+            "automation_task_failed",
+        ] {
+            let result = super::finder_rename_failure(7, 42, cause, "not confirmed", true);
+            assert_eq!(result.is_error, Some(true));
+            assert!(result.action_record.is_none());
+            let data = result.structured_content.unwrap();
+            assert_eq!(data["code"], "rename_delivery_unknown");
+            assert_eq!(data["effect"], "unknown");
+            assert_eq!(data["cause"], cause);
+            assert_eq!(data["script_dispatched"], true);
+            assert_eq!(data["retry"], "observe_before_deciding");
+        }
+        let result = super::finder_rename_failure(
+            7,
+            42,
+            "automation_permission_timeout",
+            "probe stalled",
+            false,
+        );
+        assert_eq!(result.structured_content.unwrap()["effect"], "refused");
     }
 
     #[test]
