@@ -1473,19 +1473,67 @@ mod tests {
 
     #[test]
     fn pooled_native_worker_returns_work_result_and_error() {
-        static GATE: NativeCaptureGate = NativeCaptureGate::new();
+        use objc2::mutability::Immutable;
+        use objc2::rc::{Allocated, Retained};
+        use objc2::runtime::NSObject;
+        use objc2::{declare_class, msg_send_id, ClassType, DeclaredClass};
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
-        let ok = run_native_capture_worker(&GATE, Duration::from_secs(5), || Ok(7u8));
+        static GATE: NativeCaptureGate = NativeCaptureGate::new();
+        static RELEASED: AtomicUsize = AtomicUsize::new(0);
+        declare_class!(
+            struct CaptureWorkerReleaseProbe;
+            unsafe impl ClassType for CaptureWorkerReleaseProbe {
+                type Super = NSObject;
+                type Mutability = Immutable;
+                const NAME: &'static str = "OpenSkyCaptureWorkerReleaseProbe";
+            }
+            impl DeclaredClass for CaptureWorkerReleaseProbe {}
+            unsafe impl CaptureWorkerReleaseProbe {
+                #[method_id(init)]
+                unsafe fn init(this: Allocated<Self>) -> Retained<Self> {
+                    let this = this.set_ivars(());
+                    unsafe { msg_send_id![super(this), init] }
+                }
+            }
+        );
+        impl Drop for CaptureWorkerReleaseProbe {
+            fn drop(&mut self) {
+                RELEASED.fetch_add(1, AtomicOrdering::SeqCst);
+            }
+        }
+        fn defer_release() {
+            // Real Cocoa ownership, without a window, capture or test hook.
+            let object: Retained<CaptureWorkerReleaseProbe> =
+                unsafe { msg_send_id![CaptureWorkerReleaseProbe::class(), new] };
+            let _ = Retained::autorelease_ptr(object);
+        }
+        let initial = RELEASED.load(AtomicOrdering::SeqCst);
+        let ok = run_native_capture_worker(&GATE, Duration::from_secs(5), || {
+            defer_release();
+            Ok(7u8)
+        });
         assert_eq!(ok.expect("work result flows through the pooled worker"), 7);
+        assert_eq!(
+            RELEASED.load(AtomicOrdering::SeqCst),
+            initial + 1,
+            "successful work drains deferred Cocoa releases before returning"
+        );
 
         let err: anyhow::Result<u8> =
             run_native_capture_worker(&GATE, Duration::from_secs(5), || {
+                defer_release();
                 Err(anyhow::anyhow!("boom"))
             });
         assert!(err
             .expect_err("work error flows through")
             .to_string()
             .contains("boom"));
+        assert_eq!(
+            RELEASED.load(AtomicOrdering::SeqCst),
+            initial + 2,
+            "failed work also drains deferred Cocoa releases before returning"
+        );
     }
 
     #[test]
