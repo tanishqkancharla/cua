@@ -12,7 +12,22 @@ const BOUND: Duration = Duration::from_secs(10);
 const PROBE_BOUND: Duration = Duration::from_secs(2);
 
 fn driver(home: &Path, args: &[&str]) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_cua-driver"));
+    // A responsibility-disclaimed macOS child can stall when its executable
+    // lives in a protected checkout such as Documents. Keep the exact Cargo
+    // artifact in this test-owned temporary directory; never use an installed
+    // binary that could belong to a different source revision.
+    #[cfg(target_os = "macos")]
+    let binary = {
+        let copied = home.join("source-built-opensky-driver");
+        if !copied.exists() {
+            std::fs::copy(env!("CARGO_BIN_EXE_cua-driver"), &copied)
+                .expect("copy current Cargo executable to the isolated test home");
+        }
+        copied
+    };
+    #[cfg(not(target_os = "macos"))]
+    let binary = std::path::PathBuf::from(env!("CARGO_BIN_EXE_cua-driver"));
+    let mut command = Command::new(binary);
     command
         .args(args)
         .stdin(Stdio::null())
