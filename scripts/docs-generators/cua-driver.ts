@@ -200,7 +200,7 @@ export const CLI_GROUPS: CliGroup[] = [
   {
     slug: 'permissions',
     title: 'Permissions and diagnostics',
-    summary: 'macOS permission grants, diagnostic probes and install reports',
+    summary: 'Native platform status, macOS permission grants and diagnostic probes',
     commands: ['permissions', 'doctor', 'diagnose'],
   },
   {

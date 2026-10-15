@@ -13378,16 +13378,6 @@ impl Tool for CheckPermissionsTool {
     }
 }
 
-#[cfg(test)]
-#[tokio::test]
-async fn check_permissions_accepts_the_status_prompt_argument() {
-    let result = build_registry_with_provider(false, None)
-        .invoke("check_permissions", json!({ "prompt": false }))
-        .await;
-    let wire = serde_json::to_value(&result).unwrap();
-    assert!(wire["structuredContent"].get("x11").is_some(), "{wire}");
-}
-
 // ── get_config ────────────────────────────────────────────────────────────────
 
 pub struct GetConfigTool {

@@ -729,14 +729,14 @@
    ]
   },
   {
-   "abstract": "Inspect or raise macOS TCC permission grants (macOS only).",
+   "abstract": "Read native platform status or raise installed-app macOS TCC grants.",
    "arguments": [],
    "default_subcommand": "status",
-   "discussion": "macOS only: Accessibility and Screen Recording are macOS TCC grants. See the macOS permissions reference.",
+   "discussion": "Status reports the selected daemon: Linux X11/AT-SPI, Windows integrity/UIA, or macOS TCC. Grant configures the installed macOS app and refuses --socket.",
    "examples": [
     {
      "command": "opensky-driver permissions",
-     "description": "Report Accessibility and Screen Recording status"
+     "description": "Report native platform status"
     }
    ],
    "flags": [],
@@ -744,9 +744,9 @@
    "options": [],
    "subcommands": [
     {
-     "abstract": "Report Accessibility and Screen Recording status through a running daemon (read-only, no prompt). The default subcommand.",
+     "abstract": "Report native platform status through the selected running daemon (read-only, no prompt). The default subcommand.",
      "arguments": [],
-     "discussion": "",
+     "discussion": "An unavailable selected endpoint reports unknown without falling back to another daemon.",
      "examples": [
       {
        "command": "opensky-driver permissions status --json",
@@ -762,7 +762,16 @@
       }
      ],
      "name": "status",
-     "options": [],
+     "options": [
+      {
+       "default_value": null,
+       "help": "Override the exact daemon socket or named-pipe path.",
+       "is_optional": true,
+       "name": "socket",
+       "short_name": null,
+       "type": "String"
+      }
+     ],
      "subcommands": []
     },
     {

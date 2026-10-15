@@ -79,7 +79,30 @@ jobs:
       - name: CLI and isolated history owners
         if: always() && steps.compile.outcome == 'success'
         working-directory: libs/cua-driver/rust
-        run: cargo test --locked -p cua-driver --test permissions_cli_test --test testkit_host_state_isolation_test --test status_pid_file_cli_test -- --test-threads=1 2>&1 | tee ../../../artifacts/opensky-build/cli-history.log
+        run: cargo test --locked -p cua-driver --test permissions_cli_test --test testkit_host_state_isolation_test --test status_pid_file_cli_test --test permission_prompt_authorization_test -- --test-threads=1 2>&1 | tee ../../../artifacts/opensky-build/cli-history.log
+      - name: Mutation-check native permission status owner
+        if: always() && runner.os == 'Linux' && steps.compile.outcome == 'success'
+        working-directory: libs/cua-driver/rust
+        run: |
+          python3 - <<'PYCODE'
+          import pathlib, subprocess
+          source = pathlib.Path('crates/platform-linux/src/tools/impl_.rs')
+          original = source.read_text()
+          accepted = '"properties":{"prompt":{"type":"boolean","description":"Ignored: Linux has no permission prompts."}}'
+          assert original.count(accepted) == 1
+          command = ['cargo', 'test', '--locked', '-p', 'cua-driver', '--test', 'permissions_cli_test', '--', '--test-threads=1']
+          try:
+              source.write_text(original.replace(accepted, '"properties":{}'))
+              mutant = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+              pathlib.Path('../../../artifacts/opensky-build/permission-schema-mutant.log').write_text(mutant.stdout)
+              print(mutant.stdout)
+              assert mutant.returncode == 101
+              assert 'permission_status_honors_its_endpoint_and_platform_schema ... FAILED' in mutant.stdout
+              assert 'invalid_arguments' in mutant.stdout
+          finally:
+              source.write_text(original)
+          subprocess.run(command, check=True)
+          PYCODE
       - name: Shared contract and core unit tests
         if: always() && steps.compile.outcome == 'success'
         working-directory: libs/cua-driver/rust

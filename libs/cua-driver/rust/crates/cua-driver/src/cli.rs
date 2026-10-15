@@ -142,6 +142,7 @@ pub enum Command {
     Permissions {
         subcommand: String,
         json: bool,
+        socket: Option<String>,
     },
     Config {
         /// `show` | `get` | `set` | `reset` (None → show)
@@ -550,15 +551,15 @@ pub fn parse_command() -> Command {
         println!("Usage: opensky-driver [SUBCOMMAND] [OPTIONS]");
         println!("Subcommands: {}", HELP_SUBCOMMANDS.join(", "));
         println!();
-        println!("permissions options (macOS):");
-        println!("  opensky-driver permissions status   Report Accessibility + Screen Recording status. Read-only (no prompt).");
+        println!("permissions options:");
+        println!("  opensky-driver permissions status   Report native platform status. Read-only (no prompt); --socket selects the exact daemon.");
         println!("                                  Answers via a running daemon, so the result carries the OpenSkyDriver");
         println!("                                  identity (com.opensky.driver). If no daemon is running it reports");
         println!("                                  `unknown` rather than your terminal's grants. Add --json for the payload.");
         println!("  opensky-driver permissions grant    Launch OpenSkyDriver via LaunchServices so dialogs attribute to the app,");
         println!("                                  explain and request Accessibility, Screen Recording, and Tahoe's");
         println!("                                  direct-capture consent, then verify live capture. This is the correct");
-        println!("                                  way to grant; the read-only status command never triggers that probe.");
+        println!("                                  way to grant; the read-only status command never triggers that probe. --socket is refused for grant.");
         println!();
         println!("Updating opensky-driver:");
         println!("  opensky-driver check-update         Ask GitHub whether a newer release is available. Read-only.");
@@ -981,7 +982,11 @@ pub fn parse_command() -> Command {
         Some("permissions") => {
             let subcommand = pos.next().unwrap_or("status").to_string();
             let json = args.iter().any(|a| a == "--json");
-            Command::Permissions { subcommand, json }
+            Command::Permissions {
+                subcommand,
+                json,
+                socket,
+            }
         }
         Some("config") => {
             let subcommand = pos.next().map(str::to_owned);
@@ -2150,9 +2155,10 @@ pub fn build_manifest() -> serde_json::Value {
               "description": "Emit a developer-focused diagnostic dump suitable for bug reports.",
               "args": [] },
             { "name": "permissions",
-              "description": "Inspect / raise TCC permission grants (macOS).",
+              "description": "Read native platform status; raise installed-app TCC grants on macOS.",
               "args": [
                   { "name": "subcommand", "type": "positional-string", "description": "status | grant" },
+                  { "name": "--socket", "type": "string", "description": "Exact daemon endpoint for status only; refused for grant." },
                   { "name": "--json", "type": "flag", "description": "Machine-readable payload." }
               ] },
             { "name": "config",
@@ -3466,10 +3472,16 @@ pub fn run_update_cmd(apply: bool, json: bool) {
 }
 
 /// `opensky-driver permissions status|grant`.
-pub fn run_permissions_cmd(subcommand: &str, json: bool) {
+pub fn run_permissions_cmd(subcommand: &str, json: bool, socket: Option<String>) {
     match subcommand {
-        "status" => run_permissions_status(json),
-        "grant" => run_permissions_grant(),
+        "status" => run_permissions_status(json, socket),
+        "grant" => {
+            if socket.is_some() {
+                eprintln!("permissions grant does not accept --socket; it configures the installed app. Use permissions status --socket <path> for a read-only endpoint check.");
+                process::exit(64);
+            }
+            run_permissions_grant();
+        }
         other => {
             eprintln!("unknown permissions subcommand '{other}'. Valid: status, grant.");
             process::exit(64);
@@ -3489,8 +3501,8 @@ pub fn run_permissions_cmd(subcommand: &str, json: bool) {
 /// `✅ granted` while the driver itself has none. An honest "unknown" beats a
 /// confident lie. To grant + verify, use `opensky-driver permissions grant`.
 /// Never raises a prompt.
-fn run_permissions_status(json: bool) {
-    let socket = crate::serve::default_socket_path();
+fn run_permissions_status(json: bool, socket: Option<String>) {
+    let socket = socket.unwrap_or_else(crate::serve::default_socket_path);
     let cli_name = crate::bundle::cli_name();
     let app_name = crate::bundle::app_name();
     let bundle_id = crate::bundle::bundle_id();
@@ -4519,13 +4531,13 @@ fn cli_docs_literal() -> serde_json::Value {
             },
             {
                 "name": "permissions",
-                "abstract": "Inspect or raise macOS TCC permission grants (macOS only).",
-                "discussion": "macOS only: Accessibility and Screen Recording are macOS TCC grants. See the macOS permissions reference.",
+                "abstract": "Read native platform status or raise installed-app macOS TCC grants.",
+                "discussion": "Status reports the selected daemon: Linux X11/AT-SPI, Windows integrity/UIA, or macOS TCC. Grant configures the installed macOS app and refuses --socket.",
                 "arguments": no_args,
                 "options": [],
                 "flags": [],
                 "subcommands": [
-                    {"name": "status", "abstract": "Report Accessibility and Screen Recording status through a running daemon (read-only, no prompt). The default subcommand.", "discussion": "", "arguments": [], "options": [], "flags": [{"name":"json","short_name":null,"help":"Emit machine-readable output.","default_value":false}], "subcommands": []},
+                    {"name": "status", "abstract": "Report native platform status through the selected running daemon (read-only, no prompt). The default subcommand.", "discussion": "An unavailable selected endpoint reports unknown without falling back to another daemon.", "arguments": [], "options": [{"name":"socket","short_name":null,"help":"Override the exact daemon socket or named-pipe path.","type":"String","default_value":null,"is_optional":true}], "flags": [{"name":"json","short_name":null,"help":"Emit machine-readable output.","default_value":false}], "subcommands": []},
                     {"name": "grant", "abstract": "Launch CuaDriver through LaunchServices so the permission prompts are attributed to the app.", "discussion": "", "arguments": [], "options": [], "flags": [], "subcommands": []}
                 ]
             },
@@ -4817,7 +4829,7 @@ const CLI_EXAMPLES: &[(&str, &[(&str, &str)])] = &[
     ("history list", &[("opensky-driver history list 20", "List the 20 most recent events")]),
     ("history show", &[("opensky-driver history show 42 --json", "Print event 42 as JSON")]),
     ("history delete", &[("opensky-driver history delete --yes", "Delete every recorded chunk and its key")]),
-    ("permissions", &[("opensky-driver permissions", "Report Accessibility and Screen Recording status")]),
+    ("permissions", &[("opensky-driver permissions", "Report native platform status")]),
     ("permissions status", &[("opensky-driver permissions status --json", "Report the grants as JSON")]),
     ("permissions grant", &[("opensky-driver permissions grant", "Request the grants for OpenSkyDriver.app")]),
     ("mcp-config", &[

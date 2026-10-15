@@ -862,8 +862,12 @@ fn main() {
         cli::Command::Diagnose => {
             cli::run_diagnose_cmd();
         }
-        cli::Command::Permissions { subcommand, json } => {
-            cli::run_permissions_cmd(&subcommand, json);
+        cli::Command::Permissions {
+            subcommand,
+            json,
+            socket,
+        } => {
+            cli::run_permissions_cmd(&subcommand, json, socket);
         }
         cli::Command::Autostart { subcommand } => {
             autostart::run_autostart_cmd(&subcommand);
@@ -1172,8 +1176,12 @@ fn main() -> anyhow::Result<()> {
             cli::run_diagnose_cmd();
             Ok(())
         }
-        cli::Command::Permissions { subcommand, json } => {
-            cli::run_permissions_cmd(&subcommand, json);
+        cli::Command::Permissions {
+            subcommand,
+            json,
+            socket,
+        } => {
+            cli::run_permissions_cmd(&subcommand, json, socket);
             Ok(())
         }
         cli::Command::Autostart { subcommand } => {
