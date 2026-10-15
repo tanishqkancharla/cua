@@ -639,6 +639,7 @@ impl BrowserPointerTool {
                 Ok(_) => ToolResult::text("Dispatched trusted wheel scroll in the exact tab.")
                     .with_structured(json!({
                         "status": "ok", "action": "scroll", "route": "trusted",
+                        "delivery_mode": if request.foreground { "foreground" } else { "background" },
                         "target_id": validated.record.target_id, "tab_id": validated.tab.tab_id,
                         "x": origin.0, "y": origin.1,
                         "delta_x": request.delta_x, "delta_y": request.delta_y,

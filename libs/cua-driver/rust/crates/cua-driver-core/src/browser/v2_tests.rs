@@ -709,6 +709,7 @@ fn fixture_handler(state: SharedState) -> MockHandler {
             "DOM.focus"
             | "Emulation.setFocusEmulationEnabled"
             | "Input.dispatchMouseEvent"
+            | "Input.synthesizeScrollGesture"
             | "Input.insertText" => MockReply::ok(json!({})),
             "DOM.resolveNode" => MockReply::ok(json!({
                 "object": { "objectId": format!("obj-{}", call.params["backendNodeId"]) }
@@ -3437,22 +3438,36 @@ async fn foreground_delivery_mode_accepts_window_activation_for_trusted_click() 
     let public = serde_json::to_value(public).expect("serialize public result");
     assert_eq!(public["delivery"]["mode"], "foreground", "{public}");
 
-    let pointer_args = json!({
-        "target_id": target, "tab_id": tab, "action": "hover", "x": 10, "y": 10,
-        "delivery_mode": "foreground", "session": SESSION
-    });
-    let pointer = BrowserPointerTool::new(f.engine.clone())
-        .invoke(pointer_args.clone())
-        .await;
-    let p = structured(&pointer);
-    assert_eq!(p["status"], "ok", "{p}");
-    assert_eq!(p["delivery_mode"], "foreground", "{p}");
-    let public = ActionExecutionRecord::from_legacy("browser_pointer", &pointer_args, p)
-        .expect("browser pointer action record")
-        .public_result()
-        .expect("public browser pointer result");
-    let public = serde_json::to_value(public).expect("serialize public result");
-    assert_eq!(public["delivery"]["mode"], "foreground", "{public}");
+    // Hover and wheel gestures publish through different producer paths.
+    // Both must preserve the executed foreground branch in the public result.
+    for action in ["hover", "scroll"] {
+        let mut pointer_args = json!({
+            "target_id": target, "tab_id": tab, "action": action, "x": 10, "y": 10,
+            "delivery_mode": "foreground", "session": SESSION
+        });
+        if action == "scroll" {
+            pointer_args["delta_y"] = json!(240);
+        }
+        let pointer = BrowserPointerTool::new(f.engine.clone())
+            .invoke(pointer_args.clone())
+            .await;
+        assert!(!pointer.is_error.unwrap_or(false), "{action}: {pointer:?}");
+        let p = structured(&pointer);
+        assert_eq!(p["status"], "ok", "{action}: {p}");
+        assert_eq!(p["delivery_mode"], "foreground", "{action}: {p}");
+        let public = ActionExecutionRecord::from_legacy("browser_pointer", &pointer_args, p)
+            .expect("browser pointer action record")
+            .public_result()
+            .expect("public browser pointer result");
+        let public = serde_json::to_value(public).expect("serialize public result");
+        assert_eq!(
+            public["delivery"]["mode"], "foreground",
+            "{action}: {public}"
+        );
+    }
+    let gestures = recorded_calls(&f, "Input.synthesizeScrollGesture");
+    assert_eq!(gestures.len(), 1, "exactly one trusted wheel gesture");
+    assert_eq!(gestures[0].1["yDistance"], -240.0);
 }
 
 #[tokio::test]
