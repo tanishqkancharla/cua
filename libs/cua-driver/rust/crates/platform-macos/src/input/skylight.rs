@@ -1167,6 +1167,10 @@ pub fn with_foreground_hid_activation(
         anyhow::bail!("could not resolve target window for foreground HID delivery");
     }
 
+    // The cold-launch watchdog otherwise demotes this explicitly authorized
+    // target during the key interval. Cancel both its poller and observer only
+    // after resolving the exact PID/window, before either activation path.
+    crate::tools::cancel_background_launch_watchdog(target_pid);
     let focused_window_id = crate::ax::bindings::focused_window_id_of_pid(target_pid);
     if preserves_exact_existing_focus(prev_ok, prev_psn, target_psn, focused_window_id, target_wid)
     {

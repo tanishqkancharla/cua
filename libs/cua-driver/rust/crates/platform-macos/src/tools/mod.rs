@@ -1323,3 +1323,9 @@ mod recording_start_guard_tests {
         let _ = rec.stop_owner(None);
     }
 }
+
+/// Explicit foreground delivery supersedes only its target's background launch
+/// watchdog, including the detached poller as well as the observer lease.
+pub(crate) fn cancel_background_launch_watchdog(pid: i32) {
+    launch_app::cancel_watchdog(pid);
+}
