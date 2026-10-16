@@ -449,7 +449,7 @@ mod tests {
         let seen = windowserver_connection_entry(false, true);
         assert_eq!(seen.status, CheckStatus::Fail);
         assert!(seen.message.contains("1002"));
-        assert!(seen.hint.unwrap().contains("open -n -g -a CuaDriver"));
+        assert!(seen.hint.unwrap().contains("open -n -g -a OpenSkyDriver"));
         assert_eq!(
             windowserver_connection_entry(true, false).status,
             CheckStatus::Fail
