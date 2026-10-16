@@ -51,6 +51,8 @@ pub struct SessionManifest {
     terminable_pids: HashSet<i64>,
     configuration_changes: Vec<(String, serde_json::Value)>,
     computer_history_operations: HashSet<String>,
+    clipboard_reads: HashSet<String>,
+    clipboard_writes: HashSet<String>,
     last_authorized_dispatch: Arc<Mutex<Instant>>,
     idle_expired: Arc<AtomicBool>,
 }
@@ -200,6 +202,32 @@ impl SessionManifest {
             ))
         };
         match adapter_id {
+            "clipboard" => {
+                if kind != "system_clipboard" {
+                    return refused();
+                }
+                let operation = resource
+                    .get("operation")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| "clipboard did not attest an operation".to_owned())?;
+                let content = resource
+                    .get("content_kind")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| "clipboard did not attest a content kind".to_owned())?;
+                let allowed = match (operation, content) {
+                    ("read", "types") => {
+                        self.clipboard_reads.contains("types")
+                            || self.clipboard_reads.contains("text")
+                    }
+                    ("read", "text_and_types") => self.clipboard_reads.contains("text"),
+                    ("write", "text" | "image" | "file_url") => {
+                        self.clipboard_writes.contains(content)
+                    }
+                    _ => false,
+                };
+                allowed.then_some(()).ok_or_else(|| format!(
+                    "clipboard {operation} content kind '{content}' is outside the capability manifest"))
+            }
             "computer_history" => {
                 if kind != "computer_history" {
                     return refused();
@@ -576,6 +604,8 @@ struct RawResources {
     driver_configuration: RawDriverConfigurationResources,
     #[serde(default)]
     computer_history: RawComputerHistoryResources,
+    #[serde(default)]
+    clipboard: Option<RawClipboardResources>,
 }
 
 #[cfg(feature = "yaml")]
@@ -677,6 +707,16 @@ struct RawProcessResources {
 struct RawDriverConfigurationResources {
     #[serde(default)]
     changes: Vec<RawConfigurationChange>,
+}
+
+#[cfg(feature = "yaml")]
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawClipboardResources {
+    #[serde(default)]
+    read: Vec<String>,
+    #[serde(default)]
+    write: Vec<String>,
 }
 
 #[cfg(feature = "yaml")]
@@ -793,6 +833,7 @@ pub fn load_manifest(path: &Path) -> Result<SessionManifest, String> {
             processes,
             driver_configuration,
             computer_history,
+            clipboard,
         } = resources;
         let RawBrowserResources {
             existing_profiles: raw_existing_profiles,
@@ -980,6 +1021,38 @@ pub fn load_manifest(path: &Path) -> Result<SessionManifest, String> {
                 "computer_history resources require capability manifest version 3".to_owned(),
             );
         }
+        if version < 3 && clipboard.is_some() {
+            return Err("clipboard resources require capability manifest version 3".to_owned());
+        }
+        let clipboard = clipboard.unwrap_or_default();
+        let mut clipboard_reads = HashSet::new();
+        let mut clipboard_writes = HashSet::new();
+        for (section, values, allowed, grants) in [
+            (
+                "read",
+                clipboard.read,
+                &["types", "text"][..],
+                &mut clipboard_reads,
+            ),
+            (
+                "write",
+                clipboard.write,
+                &["text", "image", "file_url"][..],
+                &mut clipboard_writes,
+            ),
+        ] {
+            for value in values {
+                if !allowed.contains(&value.as_str()) {
+                    return Err(format!(
+                        "unsupported clipboard.{section} content kind '{value}'; expected {}",
+                        allowed.join(", ")
+                    ));
+                }
+                if !grants.insert(value.clone()) {
+                    return Err(format!("clipboard.{section} repeats '{value}'"));
+                }
+            }
+        }
         let mut computer_history_operations = HashSet::new();
         for operation in raw_computer_history_operations {
             let operation = operation.trim();
@@ -1056,6 +1129,8 @@ pub fn load_manifest(path: &Path) -> Result<SessionManifest, String> {
             terminable_pids,
             configuration_changes,
             computer_history_operations,
+            clipboard_reads,
+            clipboard_writes,
             last_authorized_dispatch: Arc::new(Mutex::new(Instant::now())),
             idle_expired: Arc::new(AtomicBool::new(false)),
         })
@@ -1930,6 +2005,70 @@ allow:
                 }),
             )
             .is_err());
+    }
+
+    #[cfg(feature = "yaml")]
+    #[test]
+    fn clipboard_resources_are_versioned_and_operation_scoped() {
+        let load = |resource: &str| {
+            manifest(&format!(
+            "version: 3\nresources:\n  clipboard:\n{resource}\nallow:\n  tools: [native_paste, clipboard_read, clipboard_write]\n"))
+        };
+        let text = load("    write: [text]").unwrap();
+        let resource = |operation, kind| serde_json::json!({"kind":"system_clipboard","operation":operation,"content_kind":kind});
+        text.authorize_protected_resource("clipboard", &resource("write", "text"))
+            .unwrap();
+        for (op, kind) in [
+            ("read", "types"),
+            ("read", "text_and_types"),
+            ("write", "image"),
+            ("write", "file_url"),
+            ("write", "*"),
+            ("read", "text"),
+        ] {
+            assert_eq!(
+                text.authorize_protected_resource("clipboard", &resource(op, kind))
+                    .unwrap_err(),
+                format!("clipboard {op} content kind '{kind}' is outside the capability manifest")
+            );
+        }
+        let types = load("    read: [types]").unwrap();
+        types
+            .authorize_protected_resource("clipboard", &resource("read", "types"))
+            .unwrap();
+        assert_eq!(
+            types
+                .authorize_protected_resource("clipboard", &resource("read", "text_and_types"))
+                .unwrap_err(),
+            "clipboard read content kind 'text_and_types' is outside the capability manifest"
+        );
+        let reads = load("    read: [text]").unwrap();
+        for kind in ["types", "text_and_types"] {
+            reads
+                .authorize_protected_resource("clipboard", &resource("read", kind))
+                .unwrap();
+        }
+        let none = manifest("version: 3\nallow:\n  tools: [native_paste]\n").unwrap();
+        assert_eq!(
+            none.authorize_protected_resource("clipboard", &resource("write", "text"))
+                .unwrap_err(),
+            "clipboard write content kind 'text' is outside the capability manifest"
+        );
+        assert_eq!(
+            text.authorize_protected_resource("clipboard", &serde_json::json!({"kind":"window"}))
+                .unwrap_err(),
+            "clipboard resource kind 'window' is outside the capability manifest"
+        );
+        assert_eq!(
+            load("    write: [text, text]").unwrap_err(),
+            "clipboard.write repeats 'text'"
+        );
+        assert_eq!(
+            load("    write: ['*']").unwrap_err(),
+            "unsupported clipboard.write content kind '*'; expected text, image, file_url"
+        );
+        assert_eq!(manifest("version: 2\nmode: bounded\nexpires_after: 1h\nidle_timeout: 30m\nresources:\n  clipboard:\n    write: [text]\nallow:\n  tools: [native_paste]\n").unwrap_err(),
+            "clipboard resources require capability manifest version 3");
     }
 
     #[cfg(feature = "yaml")]

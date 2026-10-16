@@ -9,3 +9,30 @@ The existing X11 foreground transaction activates and confirms the exact window.
 Clipboard is deliberately left with the payload; an observed newer external writer is never overwritten. No snapshot/restore policy is supplied on Linux. Clipboard write failures may already have changed the board. Structured errors distinguish input_dispatched and clipboard_may_have_changed. Any failure after the first XTEST event is effect unknown, never permission to replay. A post-input read timeout does not undo application input. Client cancellation does not cancel a dispatched daemon action; hosts retain/await its tracked action before conflicting work.
 
 As with ordinary desktop input, another desktop/clipboard client can race after the final checks. No atomic global desktop/clipboard transaction or rollback is promised. The exact resulting buffer and saved bytes, bounded grants/refusals, host cancellation/completion and owned cleanup must be verified on Bookworm/TigerVNC before release. No Chrome sandbox or Wayland acceptance follows from this X11 implementation.
+
+## Explicit clipboard grants
+
+The first bounded SDK run38871519468 refuses before dispatch: tool/desktop grants cannot name the already-enforced clipboard resource. Complete that existing adapter's manifest migration with version3 clipboard declarations. This is an explicit resource ceiling; tool allowlists and desktop/application/window scopes remain separate. Undeclared clipboard resources still deny. Legacy version1/2 manifests do not gain clipboard permission.
+
+For native plaintext paste, add this to a version3 manifest (version3 has no `mode` field):
+
+```yaml
+version: 3
+expires_after: 1h
+idle_timeout: 30m
+resources:
+  clipboard:
+    write: [text]
+  desktop:
+    windows:
+      - pid: 1234
+        window_id: 5678
+allow:
+  tools: [start_session, end_session, native_paste]
+```
+
+Select `--permission-mode bounded` and approve that exact manifest at trusted daemon startup. Include the observation/discovery tools and their exact desktop scopes when the SDK needs to bind an app. The real Halo owner uses that private editor's PID/window and explicit display/discovery scopes.
+
+`clipboard.write` accepts only text, image, file_url, with no wildcard. Text denotes textual clipboard data, including representations produced by an otherwise-granted text-paste tool; it does not constrain each tool's supported formats. The X11 native tool itself accepts only plaintext. `clipboard.read` separately accepts types or text; text includes the types returned alongside content. A text-write grant never permits exposing existing clipboard text. Native paste reads its own payload internally to check delivery, without exposing prior contents. Direct clipboard-read, file-transfer, and desktop-input operations keep their independent tool/resource requirements.
+
+The actual SDK owner must prove that a same-target daemon with no clipboard resource refuses before input; granting text-write still refuses clipboard-read; missing foreground refuses; and exact saved text, partial effects and host completion remain truthful. A fresh editor-state sequence prevents refusal checks from accidentally accepting an old unchanged sample. The blocking native paste worker retains the clipboard lease even if its async waiter is dropped.

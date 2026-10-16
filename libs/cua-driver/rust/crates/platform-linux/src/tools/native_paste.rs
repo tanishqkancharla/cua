@@ -236,9 +236,16 @@ impl Tool for NativePasteTool {
             Ok(v) => v,
             Err(result) => return result,
         };
-        let _lock = CLIPBOARD_WRITE_LOCK.lock().await;
+        let clipboard_guard = CLIPBOARD_WRITE_LOCK.lock().await;
         let clipboard = self.clipboard.clone();
-        match tokio::task::spawn_blocking(move || paste(input, clipboard.as_ref())).await {
+        // A dropped async waiter does not stop spawn_blocking. The real
+        // worker owns the clipboard lease until its actual work finishes.
+        match tokio::task::spawn_blocking(move || {
+            let _clipboard_guard = clipboard_guard;
+            paste(input, clipboard.as_ref())
+        })
+        .await
+        {
             Ok(result) => result,
             Err(_) => failure(
                 "native_paste_worker_failed",
