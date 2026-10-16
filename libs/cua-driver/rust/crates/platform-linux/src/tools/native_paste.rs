@@ -225,10 +225,10 @@ impl Tool for NativePasteTool {
             description:"Paste plaintext into one exact X11 native editable with one foreground Ctrl+V. Requires exact PID/window, explicit foreground delivery and clipboard_policy leave. Proves focused AT-SPI identity, current value/selection and clipboard payload before input, then exact value after input. Leaves the payload clipboard; observed external writers are not overwritten. AT-SPI PasteText and replacement typing are never fallbacks. Rich formats and Wayland refuse before mutation. Unknown input must not be replayed; observe actual application state and use the host completion/drain contract after client timeout.".into(),
             input_schema:json!({"type":"object","required":["pid","window_id","text","clipboard_policy"],
                 "properties":{"session":cua_driver_core::tool_schema::session_schema(),
-                    "pid":{"type":"integer","minimum":1},"window_id":{"type":"integer","minimum":1},
-                    "text":{"type":"string"},"format":{"type":"string","enum":["text"],"default":"text"},
-                    "clipboard_policy":{"type":"string","enum":["leave"]},
-                    "delivery_mode":crate::input::delivery::delivery_mode_schema()},"additionalProperties":false}),
+                    "pid":{"type":"integer","minimum":1,"description":"Exact target process ID; must own the observed X11 window."},"window_id":{"type":"integer","minimum":1,"description":"Exact observed X11 window ID belonging to pid; no first-window fallback."},
+                    "text":{"type":"string","description":"Plaintext clipboard payload,1..16384 UTF-8 bytes."},"format":{"type":"string","enum":["text"],"default":"text","description":"Plaintext only; HTML and Markdown refuse before mutation."},
+                    "clipboard_policy":{"type":"string","enum":["leave"],"description":"Required leave policy: retain the payload clipboard; observed newer writers are not overwritten. Linux does not restore prior formats."},
+                    "delivery_mode":cua_driver_core::tool_schema::delivery_mode_schema_with("Choose foreground before dispatch: activates and confirms this exact X11 window, sends one Ctrl+V and leaves the target active. Background/default refuses before clipboard mutation or input; no implicit escalation or replay.")},"additionalProperties":false}),
             read_only:false,destructive:true,idempotent:false,open_world:true})
     }
     async fn invoke(&self, args: Value) -> ToolResult {
