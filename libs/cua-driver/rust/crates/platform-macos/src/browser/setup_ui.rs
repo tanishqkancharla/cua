@@ -2041,6 +2041,7 @@ mod tests {
 
     fn tree(nodes: Vec<AXNode>) -> TreeWalkResult {
         TreeWalkResult {
+            collapsed_rows: 0,
             tree_markdown: String::new(),
             nodes,
             truncated: false,
@@ -2373,6 +2374,7 @@ mod tests {
     #[test]
     fn pixel_fallback_requires_committed_navigation_and_complete_ax_proof() {
         let truncated = TreeWalkResult {
+            collapsed_rows: 0,
             tree_markdown: String::new(),
             nodes: Vec::new(),
             truncated: true,

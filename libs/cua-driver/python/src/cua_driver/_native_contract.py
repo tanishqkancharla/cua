@@ -4394,7 +4394,7 @@ class _UniffiFfiConverterTypeGetSessionStateInput(_UniffiConverterRustBuffer):
 
 @dataclass
 class GetWindowStateInput:
-    def __init__(self, *, pid:int, window_id:int, session:typing.Optional[str], query:typing.Optional[str], include_accessibility_tree:typing.Optional[bool], include_screenshot:typing.Optional[bool], screenshot_out_file:typing.Optional[str], max_elements:typing.Optional[int], max_depth:typing.Optional[int], max_dimension:typing.Optional[int], max_image_dimension:typing.Optional[int], timeout_ms:typing.Optional[int] = _DEFAULT, tree_format:typing.Optional[str] = _DEFAULT, since:typing.Optional[str] = _DEFAULT, verbose:typing.Optional[bool] = _DEFAULT, full_output:typing.Optional[bool] = _DEFAULT):
+    def __init__(self, *, pid:int, window_id:int, session:typing.Optional[str], query:typing.Optional[str], include_accessibility_tree:typing.Optional[bool], include_screenshot:typing.Optional[bool], screenshot_out_file:typing.Optional[str], max_elements:typing.Optional[int], max_depth:typing.Optional[int], max_dimension:typing.Optional[int], max_image_dimension:typing.Optional[int], timeout_ms:typing.Optional[int] = _DEFAULT, tree_format:typing.Optional[str] = _DEFAULT, since:typing.Optional[str] = _DEFAULT, verbose:typing.Optional[bool] = _DEFAULT, full_output:typing.Optional[bool] = _DEFAULT, native_row_scope:typing.Optional[str] = _DEFAULT):
         self.pid = pid
         self.window_id = window_id
         self.session = session
@@ -4426,12 +4426,16 @@ class GetWindowStateInput:
             self.full_output = None
         else:
             self.full_output = full_output
+        if native_row_scope is _DEFAULT:
+            self.native_row_scope = None
+        else:
+            self.native_row_scope = native_row_scope
 
 
 
 
     def __str__(self):
-        return "GetWindowStateInput(pid={}, window_id={}, session={}, query={}, include_accessibility_tree={}, include_screenshot={}, screenshot_out_file={}, max_elements={}, max_depth={}, max_dimension={}, max_image_dimension={}, timeout_ms={}, tree_format={}, since={}, verbose={}, full_output={})".format(self.pid, self.window_id, self.session, self.query, self.include_accessibility_tree, self.include_screenshot, self.screenshot_out_file, self.max_elements, self.max_depth, self.max_dimension, self.max_image_dimension, self.timeout_ms, self.tree_format, self.since, self.verbose, self.full_output)
+        return "GetWindowStateInput(pid={}, window_id={}, session={}, query={}, include_accessibility_tree={}, include_screenshot={}, screenshot_out_file={}, max_elements={}, max_depth={}, max_dimension={}, max_image_dimension={}, timeout_ms={}, tree_format={}, since={}, verbose={}, full_output={}, native_row_scope={})".format(self.pid, self.window_id, self.session, self.query, self.include_accessibility_tree, self.include_screenshot, self.screenshot_out_file, self.max_elements, self.max_depth, self.max_dimension, self.max_image_dimension, self.timeout_ms, self.tree_format, self.since, self.verbose, self.full_output, self.native_row_scope)
     def __eq__(self, other):
         if self.pid != other.pid:
             return False
@@ -4465,6 +4469,8 @@ class GetWindowStateInput:
             return False
         if self.full_output != other.full_output:
             return False
+        if self.native_row_scope != other.native_row_scope:
+            return False
         return True
 
 class _UniffiFfiConverterTypeGetWindowStateInput(_UniffiConverterRustBuffer):
@@ -4487,6 +4493,7 @@ class _UniffiFfiConverterTypeGetWindowStateInput(_UniffiConverterRustBuffer):
             since=_UniffiFfiConverterOptionalString.read(buf),
             verbose=_UniffiFfiConverterOptionalBoolean.read(buf),
             full_output=_UniffiFfiConverterOptionalBoolean.read(buf),
+            native_row_scope=_UniffiFfiConverterOptionalString.read(buf),
         )
 
     @staticmethod
@@ -4507,6 +4514,7 @@ class _UniffiFfiConverterTypeGetWindowStateInput(_UniffiConverterRustBuffer):
         _UniffiFfiConverterOptionalString.check_lower(value.since)
         _UniffiFfiConverterOptionalBoolean.check_lower(value.verbose)
         _UniffiFfiConverterOptionalBoolean.check_lower(value.full_output)
+        _UniffiFfiConverterOptionalString.check_lower(value.native_row_scope)
 
     @staticmethod
     def write(value, buf):
@@ -4526,6 +4534,7 @@ class _UniffiFfiConverterTypeGetWindowStateInput(_UniffiConverterRustBuffer):
         _UniffiFfiConverterOptionalString.write(value.since, buf)
         _UniffiFfiConverterOptionalBoolean.write(value.verbose, buf)
         _UniffiFfiConverterOptionalBoolean.write(value.full_output, buf)
+        _UniffiFfiConverterOptionalString.write(value.native_row_scope, buf)
 
 @dataclass
 class HotkeyInput:
@@ -8468,7 +8477,7 @@ class _UniffiFfiConverterSequenceTypeSnapshotImage(_UniffiConverterRustBuffer):
 
 @dataclass
 class WindowStateOutput:
-    def __init__(self, *, pid:int, window_id:int, snapshot_id:typing.Optional[str], app_name:typing.Optional[str], window_title:typing.Optional[str], tree_markdown:typing.Optional[str], elements:typing.Optional[typing.List[WindowElement]], element_count:typing.Optional[int], total_element_count:typing.Optional[int], returned_element_count:typing.Optional[int], filtered_element_count:typing.Optional[int], elements_complete:typing.Optional[bool], degraded:typing.Optional[bool], degraded_reason:typing.Optional[str], truncated:typing.Optional[bool], truncation_reason:typing.Optional[str], truncation_hint:typing.Optional[str], tree_format:typing.Optional[str], since:typing.Optional[str], since_status:typing.Optional[str], tree_diff:typing.Optional[str], screenshot_width:typing.Optional[int], screenshot_height:typing.Optional[int], screenshot_scale:typing.Optional[float], screenshot_mime_type:typing.Optional[str], screenshot_file_path:typing.Optional[str], screenshot_frame_valid:typing.Optional[bool], window_bounds:typing.Optional[WindowBounds], images:typing.List[SnapshotImage]):
+    def __init__(self, *, pid:int, window_id:int, snapshot_id:typing.Optional[str], app_name:typing.Optional[str], window_title:typing.Optional[str], tree_markdown:typing.Optional[str], elements:typing.Optional[typing.List[WindowElement]], element_count:typing.Optional[int], total_element_count:typing.Optional[int], returned_element_count:typing.Optional[int], filtered_element_count:typing.Optional[int], elements_complete:typing.Optional[bool], collapsed_rows:typing.Optional[int], degraded:typing.Optional[bool], degraded_reason:typing.Optional[str], truncated:typing.Optional[bool], truncation_reason:typing.Optional[str], truncation_hint:typing.Optional[str], tree_format:typing.Optional[str], since:typing.Optional[str], since_status:typing.Optional[str], tree_diff:typing.Optional[str], screenshot_width:typing.Optional[int], screenshot_height:typing.Optional[int], screenshot_scale:typing.Optional[float], screenshot_mime_type:typing.Optional[str], screenshot_file_path:typing.Optional[str], screenshot_frame_valid:typing.Optional[bool], window_bounds:typing.Optional[WindowBounds], images:typing.List[SnapshotImage]):
         self.pid = pid
         self.window_id = window_id
         self.snapshot_id = snapshot_id
@@ -8481,6 +8490,7 @@ class WindowStateOutput:
         self.returned_element_count = returned_element_count
         self.filtered_element_count = filtered_element_count
         self.elements_complete = elements_complete
+        self.collapsed_rows = collapsed_rows
         self.degraded = degraded
         self.degraded_reason = degraded_reason
         self.truncated = truncated
@@ -8503,7 +8513,7 @@ class WindowStateOutput:
 
 
     def __str__(self):
-        return "WindowStateOutput(pid={}, window_id={}, snapshot_id={}, app_name={}, window_title={}, tree_markdown={}, elements={}, element_count={}, total_element_count={}, returned_element_count={}, filtered_element_count={}, elements_complete={}, degraded={}, degraded_reason={}, truncated={}, truncation_reason={}, truncation_hint={}, tree_format={}, since={}, since_status={}, tree_diff={}, screenshot_width={}, screenshot_height={}, screenshot_scale={}, screenshot_mime_type={}, screenshot_file_path={}, screenshot_frame_valid={}, window_bounds={}, images={})".format(self.pid, self.window_id, self.snapshot_id, self.app_name, self.window_title, self.tree_markdown, self.elements, self.element_count, self.total_element_count, self.returned_element_count, self.filtered_element_count, self.elements_complete, self.degraded, self.degraded_reason, self.truncated, self.truncation_reason, self.truncation_hint, self.tree_format, self.since, self.since_status, self.tree_diff, self.screenshot_width, self.screenshot_height, self.screenshot_scale, self.screenshot_mime_type, self.screenshot_file_path, self.screenshot_frame_valid, self.window_bounds, self.images)
+        return "WindowStateOutput(pid={}, window_id={}, snapshot_id={}, app_name={}, window_title={}, tree_markdown={}, elements={}, element_count={}, total_element_count={}, returned_element_count={}, filtered_element_count={}, elements_complete={}, collapsed_rows={}, degraded={}, degraded_reason={}, truncated={}, truncation_reason={}, truncation_hint={}, tree_format={}, since={}, since_status={}, tree_diff={}, screenshot_width={}, screenshot_height={}, screenshot_scale={}, screenshot_mime_type={}, screenshot_file_path={}, screenshot_frame_valid={}, window_bounds={}, images={})".format(self.pid, self.window_id, self.snapshot_id, self.app_name, self.window_title, self.tree_markdown, self.elements, self.element_count, self.total_element_count, self.returned_element_count, self.filtered_element_count, self.elements_complete, self.collapsed_rows, self.degraded, self.degraded_reason, self.truncated, self.truncation_reason, self.truncation_hint, self.tree_format, self.since, self.since_status, self.tree_diff, self.screenshot_width, self.screenshot_height, self.screenshot_scale, self.screenshot_mime_type, self.screenshot_file_path, self.screenshot_frame_valid, self.window_bounds, self.images)
     def __eq__(self, other):
         if self.pid != other.pid:
             return False
@@ -8528,6 +8538,8 @@ class WindowStateOutput:
         if self.filtered_element_count != other.filtered_element_count:
             return False
         if self.elements_complete != other.elements_complete:
+            return False
+        if self.collapsed_rows != other.collapsed_rows:
             return False
         if self.degraded != other.degraded:
             return False
@@ -8581,6 +8593,7 @@ class _UniffiFfiConverterTypeWindowStateOutput(_UniffiConverterRustBuffer):
             returned_element_count=_UniffiFfiConverterOptionalUInt64.read(buf),
             filtered_element_count=_UniffiFfiConverterOptionalUInt64.read(buf),
             elements_complete=_UniffiFfiConverterOptionalBoolean.read(buf),
+            collapsed_rows=_UniffiFfiConverterOptionalUInt64.read(buf),
             degraded=_UniffiFfiConverterOptionalBoolean.read(buf),
             degraded_reason=_UniffiFfiConverterOptionalString.read(buf),
             truncated=_UniffiFfiConverterOptionalBoolean.read(buf),
@@ -8614,6 +8627,7 @@ class _UniffiFfiConverterTypeWindowStateOutput(_UniffiConverterRustBuffer):
         _UniffiFfiConverterOptionalUInt64.check_lower(value.returned_element_count)
         _UniffiFfiConverterOptionalUInt64.check_lower(value.filtered_element_count)
         _UniffiFfiConverterOptionalBoolean.check_lower(value.elements_complete)
+        _UniffiFfiConverterOptionalUInt64.check_lower(value.collapsed_rows)
         _UniffiFfiConverterOptionalBoolean.check_lower(value.degraded)
         _UniffiFfiConverterOptionalString.check_lower(value.degraded_reason)
         _UniffiFfiConverterOptionalBoolean.check_lower(value.truncated)
@@ -8646,6 +8660,7 @@ class _UniffiFfiConverterTypeWindowStateOutput(_UniffiConverterRustBuffer):
         _UniffiFfiConverterOptionalUInt64.write(value.returned_element_count, buf)
         _UniffiFfiConverterOptionalUInt64.write(value.filtered_element_count, buf)
         _UniffiFfiConverterOptionalBoolean.write(value.elements_complete, buf)
+        _UniffiFfiConverterOptionalUInt64.write(value.collapsed_rows, buf)
         _UniffiFfiConverterOptionalBoolean.write(value.degraded, buf)
         _UniffiFfiConverterOptionalString.write(value.degraded_reason, buf)
         _UniffiFfiConverterOptionalBoolean.write(value.truncated, buf)

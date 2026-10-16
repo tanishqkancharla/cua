@@ -3061,7 +3061,12 @@ export type GetWindowStateInput = {
      * Restore the previous full response (both representations, all
      * metadata, platform walk limits).
      */
-    fullOutput?: boolean
+    fullOutput?: boolean,
+    /**
+     * macOS native row domain: visible rows plus selection, or all rows.
+     * Requires full_output:true; compact since diffs retain their old domain.
+     */
+    nativeRowScope?: string
 }
 
 /**
@@ -3073,7 +3078,8 @@ export const GetWindowStateInput = (() => {
         treeFormat: undefined,
         since: undefined,
         verbose: undefined,
-        fullOutput: undefined
+        fullOutput: undefined,
+        nativeRowScope: undefined
     });
     const create = (() => {
         return uniffiCreateRecord<GetWindowStateInput, ReturnType<typeof defaults>>(defaults);
@@ -3105,7 +3111,8 @@ const FfiConverterTypeGetWindowStateInput = (() => {
                 treeFormat: FfiConverterOptionalString.read(from),
                 since: FfiConverterOptionalString.read(from),
                 verbose: FfiConverterOptionalBoolean.read(from),
-                fullOutput: FfiConverterOptionalBoolean.read(from)
+                fullOutput: FfiConverterOptionalBoolean.read(from),
+                nativeRowScope: FfiConverterOptionalString.read(from)
             };
         }
         write(value: TypeName, into: RustBuffer): void {
@@ -3125,6 +3132,7 @@ const FfiConverterTypeGetWindowStateInput = (() => {
             FfiConverterOptionalString.write(value.since, into);
             FfiConverterOptionalBoolean.write(value.verbose, into);
             FfiConverterOptionalBoolean.write(value.fullOutput, into);
+            FfiConverterOptionalString.write(value.nativeRowScope, into);
         }
         allocationSize(value: TypeName): number {
             return FfiConverterUInt32.allocationSize(value.pid) +
@@ -3142,7 +3150,8 @@ const FfiConverterTypeGetWindowStateInput = (() => {
              FfiConverterOptionalString.allocationSize(value.treeFormat) +
              FfiConverterOptionalString.allocationSize(value.since) +
              FfiConverterOptionalBoolean.allocationSize(value.verbose) +
-             FfiConverterOptionalBoolean.allocationSize(value.fullOutput);
+             FfiConverterOptionalBoolean.allocationSize(value.fullOutput) +
+             FfiConverterOptionalString.allocationSize(value.nativeRowScope);
 
         }
     };
@@ -6499,6 +6508,10 @@ export type WindowStateOutput = {
     returnedElementCount?: bigint,
     filteredElementCount?: bigint,
     elementsComplete?: boolean,
+    /**
+     * Native rows intentionally left unread under explicit viewport scope.
+     */
+    collapsedRows?: bigint,
     degraded?: boolean,
     degradedReason?: string,
     truncated?: boolean,
@@ -6572,6 +6585,7 @@ const FfiConverterTypeWindowStateOutput = (() => {
                 returnedElementCount: FfiConverterOptionalUInt64.read(from),
                 filteredElementCount: FfiConverterOptionalUInt64.read(from),
                 elementsComplete: FfiConverterOptionalBoolean.read(from),
+                collapsedRows: FfiConverterOptionalUInt64.read(from),
                 degraded: FfiConverterOptionalBoolean.read(from),
                 degradedReason: FfiConverterOptionalString.read(from),
                 truncated: FfiConverterOptionalBoolean.read(from),
@@ -6604,6 +6618,7 @@ const FfiConverterTypeWindowStateOutput = (() => {
             FfiConverterOptionalUInt64.write(value.returnedElementCount, into);
             FfiConverterOptionalUInt64.write(value.filteredElementCount, into);
             FfiConverterOptionalBoolean.write(value.elementsComplete, into);
+            FfiConverterOptionalUInt64.write(value.collapsedRows, into);
             FfiConverterOptionalBoolean.write(value.degraded, into);
             FfiConverterOptionalString.write(value.degradedReason, into);
             FfiConverterOptionalBoolean.write(value.truncated, into);
@@ -6635,6 +6650,7 @@ const FfiConverterTypeWindowStateOutput = (() => {
              FfiConverterOptionalUInt64.allocationSize(value.returnedElementCount) +
              FfiConverterOptionalUInt64.allocationSize(value.filteredElementCount) +
              FfiConverterOptionalBoolean.allocationSize(value.elementsComplete) +
+             FfiConverterOptionalUInt64.allocationSize(value.collapsedRows) +
              FfiConverterOptionalBoolean.allocationSize(value.degraded) +
              FfiConverterOptionalString.allocationSize(value.degradedReason) +
              FfiConverterOptionalBoolean.allocationSize(value.truncated) +

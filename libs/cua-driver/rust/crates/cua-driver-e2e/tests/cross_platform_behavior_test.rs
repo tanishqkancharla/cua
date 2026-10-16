@@ -846,6 +846,7 @@ fn delivered_observation() -> Observation {
 
 fn sdk_window_input(fixture: &Fixture) -> GetWindowStateInput {
     GetWindowStateInput {
+        native_row_scope: None,
         pid: fixture.pid,
         window_id: fixture.wid,
         session: None,

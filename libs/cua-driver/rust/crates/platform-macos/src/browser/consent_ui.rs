@@ -616,6 +616,7 @@ mod tests {
                     budget.stop_for_timeout();
                 }
                 trees.push(TreeWalkResult {
+                    collapsed_rows: 0,
                     nodes: vec![button],
                     tree_markdown: String::new(),
                     truncated: false,

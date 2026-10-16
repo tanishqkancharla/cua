@@ -22,6 +22,7 @@ pub mod exact_target;
 pub(crate) mod focus_observation;
 pub mod launch;
 pub mod reveal_scroll;
+pub(crate) mod row_collapse;
 pub mod snapshot;
 pub(crate) mod text_selection;
 mod text_style;

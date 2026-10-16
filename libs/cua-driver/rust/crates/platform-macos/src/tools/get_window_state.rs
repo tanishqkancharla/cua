@@ -44,6 +44,7 @@ fn def() -> &'static ToolDef {
                 "pid": { "type": "integer", "description": "Target process ID." },
                 "window_id": { "type": "integer", "description": "Target window ID from list_windows." },
                 "probe_only": { "type": "boolean", "description": "Default false. Check exact ownership and AXWindow matching with a bounded walk without replacing action caches, snapshot tokens or screenshot bindings. Returns only pid, window_id, probe_only, window_matched and a degraded_reason when unresolved. No controls or screenshot are returned. Incompatible with query, screenshot_out_file, include_screenshot:true or include_accessibility_tree:false." },
+                "native_row_scope": { "type": "string", "enum": ["visible", "all"], "description": "Mac native rows only. Requires full_output:true (no since diff). visible walks authoritative AXVisibleRows plus AXSelectedRows, leaving other native rows unread with collapsed_rows metadata. Unknown visibility keeps all rows. all or omission retains the bounded full walk. Web content is unchanged." },
                 "query": { "type": "string", "description": "Case-insensitive filter for tree_markdown and structured elements. Returns matching actionable rows plus their actionable ancestors without renumbering element_index values." },
                 "capture_mode": cua_driver_core::capture_mode::capture_mode_schema(),
                 "include_accessibility_tree": {
@@ -144,6 +145,16 @@ impl Tool for GetWindowStateTool {
             Err(refusal) => return refusal,
         };
         use cua_driver_core::tool_args::ArgsExt;
+        let visible_rows = match args.get("native_row_scope") {
+            None => false,
+            Some(Value::String(scope)) if scope == "visible" || scope == "all" => {
+                if args.get("full_output").and_then(Value::as_bool) != Some(true) {
+                    return ToolResult::error("native_row_scope requires full_output:true; since diffs are not supported for this explicit row scope");
+                }
+                scope == "visible"
+            }
+            Some(_) => return ToolResult::error("native_row_scope must be visible or all"),
+        };
         let pid = match args.require_i32("pid") {
             Ok(v) => v,
             Err(e) => return e,
@@ -321,13 +332,15 @@ impl Tool for GetWindowStateTool {
             // (dropping a spawn_blocking JoinHandle cannot cancel it).
             let walk_future = tokio::task::spawn_blocking(move || {
                 let tree = crate::ax::tree::with_menus_collapsed(collapse_menus, || {
-                    crate::ax::tree::walk_tree_budgeted(
-                        pid,
-                        Some(window_id),
-                        q.as_deref(),
-                        max_depth,
-                        cua_driver_core::walk_budget::WalkBudget::new(timeout_ms, max_elements),
-                    )
+                    crate::ax::tree::with_visible_native_rows(visible_rows, || {
+                        crate::ax::tree::walk_tree_budgeted(
+                            pid,
+                            Some(window_id),
+                            q.as_deref(),
+                            max_depth,
+                            cua_driver_core::walk_budget::WalkBudget::new(timeout_ms, max_elements),
+                        )
+                    })
                 });
                 let collections = if !tree.truncated && q.is_none() {
                     unsafe { crate::ax::collection_viewport::observe(&tree.nodes) }
@@ -720,6 +733,9 @@ impl Tool for GetWindowStateTool {
         }
         if let Some(r) = tree_result.as_ref() {
             r.walk.apply(&mut structured);
+            if r.collapsed_rows > 0 {
+                structured["collapsed_rows"] = serde_json::json!(r.collapsed_rows);
+            }
         }
         // Out-of-band observation: never mint indices or collect another
         // window's focused selection. Capture-only/probe/degraded paths omit it.

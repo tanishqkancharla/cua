@@ -13,6 +13,7 @@
 
 use super::bindings::*;
 use super::launch::{is_still_launching, LaunchStep, LaunchWait};
+use super::row_collapse::{collapse_offscreen_rows, is_row_container};
 use super::window_scope::{decide_window_scope, ScopeDecision, TopLevelCandidate, WindowScope};
 use core_foundation::base::{CFEqual, CFRelease, CFRetain, CFTypeRef};
 use cua_driver_core::walk_budget::{WalkBudget, WalkOutcome};
@@ -148,6 +149,8 @@ fn is_addressable(actions_present: bool, value_settable: bool, enabled: Option<b
 }
 
 pub struct TreeWalkResult {
+    /// Authoritatively offscreen, unselected native rows left unread.
+    pub collapsed_rows: usize,
     pub tree_markdown: String,
     pub nodes: Vec<AXNode>,
     /// True when the walk was cut short by its node or time budget.
@@ -252,12 +255,14 @@ fn collect_tree(
     let mut nodes: Vec<AXNode> = Vec::new();
     let mut lines: Vec<(usize, String)> = Vec::new(); // (depth, line)
     let mut index_counter = 0usize;
+    let mut collapsed_rows = 0usize;
     let mut window_scope: Option<WindowScope> = None;
 
     unsafe {
         let app_elem = AXUIElementCreateApplication(pid);
         if app_elem.is_null() {
             return TreeWalkResult {
+                collapsed_rows: 0,
                 tree_markdown: String::new(),
                 nodes,
                 truncated: false,
@@ -329,6 +334,7 @@ fn collect_tree(
             CFRelease(app_elem as CFTypeRef);
             let walk = budget.outcome();
             return TreeWalkResult {
+                collapsed_rows: 0,
                 tree_markdown: String::new(),
                 nodes,
                 truncated: walk.truncated(),
@@ -348,6 +354,7 @@ fn collect_tree(
                 &mut lines,
                 &mut index_counter,
                 &mut budget,
+                &mut collapsed_rows,
                 max_depth,
             );
         }
@@ -373,6 +380,7 @@ fn collect_tree(
     }
 
     TreeWalkResult {
+        collapsed_rows,
         tree_markdown,
         nodes,
         truncated: walk.truncated(),
@@ -463,6 +471,7 @@ unsafe fn walk_element(
     lines: &mut Vec<(usize, String)>,
     counter: &mut usize,
     budget: &mut WalkBudget,
+    collapsed_rows: &mut usize,
     max_depth: usize,
 ) {
     if depth > max_depth {
@@ -485,6 +494,17 @@ unsafe fn walk_element(
         .unwrap_or_else(|| "AXUnknown".into());
 
     let in_web_content = in_web_content || is_web_content_role(&role);
+    // Only the caller's native viewport scope may omit rows; web content and
+    // unknown or inconsistent visible/selected membership retain the full walk.
+    let visible_rows = VISIBLE_ROWS.with(std::cell::Cell::get) && !in_web_content;
+    let collapsed = if visible_rows {
+        collapse_offscreen_rows(element, &role)
+    } else {
+        None
+    };
+    if let Some(rows) = &collapsed {
+        *collapsed_rows += rows.count();
+    }
 
     // Probe only hosting groups; ordinary layout/display nodes keep the cheap path.
     let parent_selected = if role == "AXGroup"
@@ -515,6 +535,9 @@ unsafe fn walk_element(
         // collapse, so children inherit the parent's depth AND the same
         // parent_index (no actionable node was emitted here).
         for child in children.iter() {
+            if collapsed.as_ref().is_some_and(|rows| rows.hides(child)) {
+                continue;
+            }
             walk_element(
                 child,
                 depth,
@@ -524,6 +547,7 @@ unsafe fn walk_element(
                 lines,
                 counter,
                 budget,
+                collapsed_rows,
                 max_depth,
             );
         }
@@ -601,8 +625,16 @@ unsafe fn walk_element(
     let is_actionable = is_addressable(!actions.is_empty(), value_settable == Some(true), enabled)
         || (parent_selected.is_some() && enabled != Some(false));
 
-    if !is_actionable && !has_content && role != "AXWindow" && role != "AXSheet" {
+    if !is_actionable
+        && !has_content
+        && role != "AXWindow"
+        && role != "AXSheet"
+        && !(visible_rows && is_row_container(&role))
+    {
         for child in children.iter() {
+            if collapsed.as_ref().is_some_and(|rows| rows.hides(child)) {
+                continue;
+            }
             walk_element(
                 child,
                 depth + 1,
@@ -612,6 +644,7 @@ unsafe fn walk_element(
                 lines,
                 counter,
                 budget,
+                collapsed_rows,
                 max_depth,
             );
         }
@@ -737,11 +770,17 @@ unsafe fn walk_element(
     };
     lines.push((depth, line));
     nodes.push(node);
+    if let Some(rows) = &collapsed {
+        lines.push((depth + 1, format!("- Native row viewport: {} of {} rows are offscreen and unselected; not read. Scroll/search, or request native_row_scope:\"all\" for a bounded full walk.", rows.count(), rows.total())));
+    }
     if collapse_here {
         return;
     }
 
     for child in children.iter() {
+        if collapsed.as_ref().is_some_and(|rows| rows.hides(child)) {
+            continue;
+        }
         walk_element(
             child,
             depth + 1,
@@ -751,6 +790,7 @@ unsafe fn walk_element(
             lines,
             counter,
             budget,
+            collapsed_rows,
             max_depth,
         );
     }
@@ -947,6 +987,7 @@ fn format_node_line(node: &AXNode) -> String {
 }
 
 thread_local! {
+    static VISIBLE_ROWS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static MENUS_COLLAPSED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
@@ -1199,5 +1240,35 @@ mod lean_row_tests {
         assert_eq!(lines.len(), 4);
         assert_eq!(echo_text_of("- AXStaticText = \"x\""), Some("x"));
         assert_eq!(echo_text_of("- [2] AXStaticText = \"\""), None);
+    }
+}
+
+/// Scope visible native rows to one walk, restoring nested calls and unwinding.
+pub fn with_visible_native_rows<T>(visible: bool, walk: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            VISIBLE_ROWS.with(|f| f.set(self.0));
+        }
+    }
+    let _restore = Restore(VISIBLE_ROWS.with(|f| f.replace(visible)));
+    walk()
+}
+
+#[cfg(test)]
+mod viewport_scope_tests {
+    use super::*;
+    #[test]
+    fn visible_native_row_scope_restores_nesting_and_unwinding() {
+        assert!(!VISIBLE_ROWS.with(std::cell::Cell::get));
+        with_visible_native_rows(true, || {
+            assert!(VISIBLE_ROWS.with(std::cell::Cell::get));
+            let failure = std::panic::catch_unwind(|| {
+                with_visible_native_rows(false, || panic!("scope unwind"))
+            });
+            assert!(failure.is_err());
+            assert!(VISIBLE_ROWS.with(std::cell::Cell::get));
+        });
+        assert!(!VISIBLE_ROWS.with(std::cell::Cell::get));
     }
 }

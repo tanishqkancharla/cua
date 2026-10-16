@@ -48,3 +48,5 @@ authorized_live_jev_use_demo_test::authorized_live_jev_no_matching_action_contro
 
 # Packaged Notepad reads VK_PACKET ahead of translation (#4830). Manual on the Windows Space image.
 installed_app_notepad_windows_test::foreground_type_text_round_trips_through_notepad_save | Windows Space gate: packaged Notepad VK_PACKET read-ahead (#4830); record build, Notepad version, layout and IME
+
+native_row_scope_macos_test::native_process_viewport_keeps_toolbar_and_explicit_all_recovers_unread_rows | Manual owned Activity Monitor desktop gate: external controller supplies exact cold PID/window, large live process list and verified cleanup; no native input

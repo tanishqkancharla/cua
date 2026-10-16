@@ -1313,6 +1313,53 @@ pub unsafe fn copy_ax_windows_including(
     windows
 }
 
+/// Copy a complete AX element array; malformed members preserve the caller's
+/// full observation rather than silently granting partial visibility evidence.
+/// # Safety
+/// `element` must be live. Every returned element is retained once.
+pub unsafe fn copy_element_array_attr(
+    element: AXUIElementRef,
+    name: &str,
+) -> Option<Vec<AXUIElementRef>> {
+    use core_foundation::{array::CFArray, base::TCFType};
+    let name = core_foundation::string::CFString::new(name);
+    let mut value: CFTypeRef = std::ptr::null();
+    let err = AXUIElementCopyAttributeValue(element, name.as_concrete_TypeRef(), &mut value);
+    if value.is_null() {
+        return None;
+    }
+    if err != kAXErrorSuccess
+        || core_foundation::base::CFGetTypeID(value) != CFArray::<CFTypeRef>::type_id()
+    {
+        CFRelease(value);
+        return None;
+    }
+    let array = CFArray::<CFTypeRef>::wrap_under_create_rule(value as _);
+    let mut owned = Vec::new();
+    for i in 0..array.len() {
+        let Some(item) = array.get(i) else {
+            release_all(owned);
+            return None;
+        };
+        let item = *item;
+        if item.is_null() || core_foundation::base::CFGetTypeID(item) != AXUIElementGetTypeID() {
+            release_all(owned);
+            return None;
+        }
+        CFRetain(item);
+        owned.push(item as AXUIElementRef);
+    }
+    Some(owned)
+}
+
+/// # Safety
+/// Each element must be owned by the caller exactly once.
+pub unsafe fn release_all(elements: Vec<AXUIElementRef>) {
+    for element in elements {
+        CFRelease(element as CFTypeRef);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
