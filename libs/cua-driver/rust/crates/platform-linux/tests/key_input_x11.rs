@@ -357,7 +357,7 @@ fn unicode_text_keeps_each_borrowed_mapping_until_the_receiving_client_processes
         Arc,
     };
     use x11rb::wrapper::ConnectionExt as _;
-    for foreground in [false] {
+    for foreground in [true, false] {
         for respond in [true, false] {
             let (conn, screen) = connect()?;
             let root = conn.setup().roots[screen].root;
@@ -800,8 +800,8 @@ fn xtest_text_restores_the_keycode_of_a_client_that_never_answers() -> Result<()
     assert_eq!(spare_keycodes(&conn)?, before);
     assert_eq!(
         typed.pings.len(),
-        1,
-        "a client that missed a ping is pinged again"
+        2,
+        "a missed preparation ping never skips the post-input restoration wait"
     );
     assert!(
         typed.elapsed < Duration::from_millis(2500),

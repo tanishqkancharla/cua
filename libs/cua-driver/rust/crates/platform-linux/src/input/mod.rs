@@ -4726,12 +4726,18 @@ impl<'a> TextClient<'a> {
 
     fn release(&mut self) -> bool {
         let sent = std::mem::take(&mut self.sent);
+        let mut confirmed = true;
         for &window in &sent {
-            self.ping(window);
+            // A failed preparation ping preceded the keys. It cannot establish
+            // that their actual recipient has consumed the later input. Always
+            // make a fresh post-input attempt before restoring borrowed maps.
+            if sync_client(self.conn, Some(window)) == ClientSync::Unanswered {
+                confirmed = false;
+            }
         }
         self.borrowed.clear();
-        let unanswered = std::mem::take(&mut self.unanswered);
-        !sent.iter().any(|window| unanswered.contains(window))
+        self.unanswered.clear();
+        confirmed
     }
 }
 
