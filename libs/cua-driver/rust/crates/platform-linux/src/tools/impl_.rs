@@ -14755,6 +14755,12 @@ pub fn build_registry_with_provider(
     let clipboard: Arc<dyn cua_driver_core::clipboard::ClipboardBackend> =
         Arc::new(crate::clipboard::LinuxClipboard::new());
     cua_driver_core::clipboard::register_clipboard_tools(&mut r, clipboard.clone());
+    if !crate::wayland::is_wayland() {
+        r.register(pid_window_guarded(
+            super::native_paste::NativePasteTool::new(clipboard.clone()),
+            &pid_window_candidates,
+        ));
+    }
     // `screenshot` removed - see the matching comment in
     // platform-windows/src/tools/impl_.rs::build_registry. Canonical
     // screenshot path is `get_window_state` (it always returns a screenshot now).

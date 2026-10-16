@@ -3724,6 +3724,103 @@ async fn live_accessible<'a>(
     Ok((acc, role))
 }
 
+/// Private readback state for one exact native clipboard paste. Never emitted.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct PasteTextState {
+    pub object_ref: ObjectRef,
+    pub value: String,
+    pub start: i32,
+    pub end: i32,
+    pub focused: bool,
+}
+
+async fn paste_text_state_for(
+    conn: &AccessibilityConnection,
+    object_ref: &ObjectRef,
+) -> Result<PasteTextState> {
+    let (acc, role) = live_accessible(conn, object_ref).await?;
+    if role == "password text" {
+        anyhow::bail!("protected text is not a paste readback target");
+    }
+    let state = acc.get_state().await?;
+    if !state.contains(State::Editable) || !is_enabled_state(&state) {
+        anyhow::bail!("native paste target is not enabled and editable");
+    }
+    let proxies = acc.proxies().await?;
+    // Require native editability, not a renderer echo or guessed first field.
+    let _editable = proxies.editable_text().await?;
+    let text = proxies.text().await?;
+    let count = text.character_count().await?;
+    if !(0..=262144).contains(&count) {
+        anyhow::bail!("native paste readback exceeds the supported character bound");
+    }
+    let value = text.get_text(0, count).await?;
+    if value.chars().count() != count as usize {
+        anyhow::bail!("native text changed during paste preparation");
+    }
+    let (start, end) = match text.get_n_selections().await? {
+        0 => {
+            let caret = text.caret_offset().await?;
+            (caret, caret)
+        }
+        1 => text.get_selection(0).await?,
+        _ => anyhow::bail!("native paste requires at most one selection"),
+    };
+    if start < 0 || end < start || end > count {
+        anyhow::bail!("native paste selection is outside the observed text");
+    }
+    Ok(PasteTextState {
+        object_ref: object_ref.clone(),
+        value,
+        start,
+        end,
+        focused: state.contains(State::Focused),
+    })
+}
+
+/// Prove the unique focused editable belongs to the exact requested window.
+/// An incomplete/app-wide tree cannot choose a paste destination.
+pub(crate) fn prepare_native_paste(pid: u32, xid: u64) -> Result<PasteTextState> {
+    bounded_for(
+        INPUT_QUERY_BUDGET,
+        async {
+            let conn = shared_connection().await?;
+            let collected = collect_visited_bounded(conn, pid, xid, None, None)
+                .await?
+                .ok_or_else(|| anyhow!("native paste application is unavailable"))?;
+            let frame = collected
+                .scoped_frame
+                .ok_or_else(|| anyhow!("native paste window identity is unproven"))?;
+            if collected.truncation.is_some() {
+                anyhow::bail!("native paste requires a complete exact-window observation");
+            }
+            let mut focused = collected.visited.iter().filter(|node| {
+                node.frame_ordinal == frame && node.focused && node.has_editable && !node.in_web_doc
+            });
+            let target = focused
+                .next()
+                .ok_or_else(|| anyhow!("no focused native editable in exact window"))?;
+            if focused.next().is_some() {
+                anyhow::bail!("multiple focused native editables in exact window");
+            }
+            let state = paste_text_state_for(conn, &target.object_ref).await?;
+            if !state.focused {
+                anyhow::bail!("native paste focus changed during preparation");
+            }
+            Ok(state)
+        },
+        || Err(anyhow!("native paste target preparation timed out")),
+    )
+}
+
+pub(crate) fn read_native_paste_target(object_ref: &ObjectRef) -> Result<PasteTextState> {
+    bounded_for(
+        std::time::Duration::from_millis(500),
+        async { paste_text_state_for(shared_connection().await?, object_ref).await },
+        || Err(anyhow!("native paste target readback timed out")),
+    )
+}
+
 /// [`perform_action`] on a snapshot-cached element identity. Same contract:
 /// `Ok((action_name, suspected_noop))`. Errors when the object no longer
 /// exists so the caller can fall back to resolving the index afresh.

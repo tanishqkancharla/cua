@@ -268,7 +268,7 @@ fn assert_tools_list_schema_shape(mut d: RawDriver) {
         "move_cursor",
         // OpenSky retains the verified Mac set_value delivery ladder.
         "set_value",
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         "native_paste",
     ];
     for tool in DELIVERY_MODE_TOOLS {
