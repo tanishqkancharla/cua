@@ -170,7 +170,7 @@ pub fn reexec_disclaimed_if_needed() {
 #[cfg(not(target_os = "macos"))]
 pub fn reexec_disclaimed_if_needed() {}
 
-/// The startup warning for a daemon running outside CuaDriver.app, or `None`
+/// The startup warning for a daemon running outside OpenSkyDriver.app, or `None`
 /// when it is embedded or bundled (CUA-1777).
 #[cfg(target_os = "macos")]
 fn unbundled_warning(embedded: bool, inside_bundle: bool) -> Option<&'static str> {
@@ -178,10 +178,10 @@ fn unbundled_warning(embedded: bool, inside_bundle: bool) -> Option<&'static str
         return None;
     }
     Some(
-        "warning: running unbundled (outside CuaDriver.app). The daemon is its own responsible \
+        "warning: running unbundled (outside OpenSkyDriver.app). The daemon is its own responsible \
          process, so macOS gives it no valid WindowServer connection: background (no-raise) \
          focus steps fail with status 1002 and background actions will be refused. Run the \
-         app-bundle daemon instead: `open -n -g -a CuaDriver --args serve`.",
+         app-bundle daemon instead: `open -n -g -a OpenSkyDriver --args serve`.",
     )
 }
 
@@ -207,7 +207,7 @@ mod tests {
     #[test]
     fn unbundled_daemon_gets_a_startup_warning_and_bundled_or_embedded_does_not() {
         let message = unbundled_warning(false, false).expect("warns when unbundled");
-        assert!(message.contains("open -n -g -a CuaDriver --args serve"));
+        assert!(message.contains("open -n -g -a OpenSkyDriver --args serve"));
         assert!(unbundled_warning(false, true).is_none());
         assert!(unbundled_warning(true, false).is_none());
     }

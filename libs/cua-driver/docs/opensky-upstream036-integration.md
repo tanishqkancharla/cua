@@ -17,3 +17,5 @@ The merge preserves canonical upstream history at `6d6c734c127025fb39ad5d585a103
 Initial combined compilation exposed three merge-adaptation errors (a duplicated window serialization helper and two missing action borrows); corrected before acceptance. Existing common and Mac whole library tests pass:67 contract,1056 core (1 ignored),677 platform-macos (6 ignored). Ignored desktop cases have not run through these unit commands.
 
 Candidate installation, signed native desktop qualification, native Linux typing and sandboxed browser contracts, generated snapshot refresh and paid regression pairs are pending. No new runtime or release qualification is claimed by this source merge.
+
+The canonical new unbundled/WindowServer remediation now names this fork’s OpenSkyDriver app. The health bundle probe compares the existing com.opensky.driver identity; this changes diagnostics only and does not change the bundle/signing identity or permissions.

@@ -39,7 +39,7 @@ pub const MACOS_CHECK_NAMES: &[&str] = &[
 /// The canonical bundle identifier whose TCC grants matter for the
 /// daemon. The `bundle_identity` check passes when the running process
 /// reports this id.
-pub const CANONICAL_BUNDLE_ID: &str = "com.trycua.driver";
+pub const CANONICAL_BUNDLE_ID: &str = "com.opensky.driver";
 
 pub struct MacosHealthProvider;
 
@@ -80,11 +80,11 @@ impl HealthCheckProvider for MacosHealthProvider {
 // ── Individual checks ────────────────────────────────────────────────────────
 
 /// True when this daemon is neither embedded in a host app nor inside
-/// CuaDriver.app: it relaunched itself disclaimed, as its own responsible
+/// OpenSkyDriver.app: it relaunched itself disclaimed, as its own responsible
 /// process (CUA-1777).
 pub fn is_unbundled(embedded: bool, exe_path: &str) -> bool {
     !embedded
-        && !(exe_path.contains("/CuaDriver.app/Contents/MacOS/")
+        && !(exe_path.contains("/OpenSkyDriver.app/Contents/MacOS/")
             || exe_path.contains("/CuaDriverLocal.app/Contents/MacOS/"))
 }
 
@@ -112,7 +112,7 @@ fn windowserver_connection_entry(unbundled: bool, invalid_seen: bool) -> CheckEn
     if unbundled {
         return CheckEntry::fail(
             NAME_WINDOWSERVER_CONNECTION,
-            "Running unbundled (outside CuaDriver.app): the daemon is its own responsible process and its no-raise focus steps are expected to fail with 1002.",
+            "Running unbundled (outside OpenSkyDriver.app): the daemon is its own responsible process and its no-raise focus steps are expected to fail with 1002.",
             hint,
         );
     }
@@ -183,7 +183,7 @@ fn standalone_bundle_identity(bid: Option<String>, exe: String) -> CheckEntry {
     };
     let hint = "This bundle check does not identify the app or executable macOS attributes \
                 this process's permission request to. For standalone CuaDriver, start the \
-                daemon inside CuaDriver.app with `open -n -g -a CuaDriver --args serve` and \
+                daemon inside OpenSkyDriver.app with `open -n -g -a OpenSkyDriver --args serve` and \
                 connect via `cua-driver mcp`. For an embedded or linked driver, use the \
                 host's launch and permission setup instead.";
 
@@ -271,8 +271,8 @@ fn accessibility_check(granted: bool, bundle_identifier: Option<String>) -> Chec
         "Accessibility is NOT granted for this process.",
         "Grant Accessibility to the app or executable macOS attributes this process's \
          permission request to in System Settings → Privacy & Security → Accessibility. \
-         For standalone CuaDriver, use CuaDriver.app. For an embedded or linked driver, \
-         follow the host's permission setup; a grant to a separate CuaDriver.app does not \
+         For standalone CuaDriver, use OpenSkyDriver.app. For an embedded or linked driver, \
+         follow the host's permission setup; a grant to a separate OpenSkyDriver.app does not \
          verify this process's access.",
     )
     .with_data(data)
@@ -296,8 +296,8 @@ fn screen_recording_check(granted: bool, bundle_identifier: Option<String>) -> C
         "Screen Recording is NOT granted for this process.",
         "Grant Screen Recording to the app or executable macOS attributes this process's \
          permission request to in System Settings → Privacy & Security → Screen Recording. \
-         For standalone CuaDriver, use CuaDriver.app. For an embedded or linked driver, \
-         follow the host's permission setup; a grant to a separate CuaDriver.app does not \
+         For standalone CuaDriver, use OpenSkyDriver.app. For an embedded or linked driver, \
+         follow the host's permission setup; a grant to a separate OpenSkyDriver.app does not \
          verify this process's access.",
     )
     .with_data(data)
@@ -367,7 +367,7 @@ fn bundle_identifier(bundle: &core_foundation::bundle::CFBundle) -> Option<Strin
 
 /// Read the running process's `CFBundleIdentifier` via CoreFoundation.
 /// Returns `None` when the process has no associated bundle (e.g.
-/// running the bare binary outside `CuaDriver.app`).
+/// running the bare binary outside `OpenSkyDriver.app`).
 fn current_bundle_identifier() -> Option<String> {
     use core_foundation::base::TCFType;
     use core_foundation::bundle::{CFBundle, CFBundleGetMainBundle};
@@ -440,7 +440,7 @@ mod tests {
         assert!(!is_unbundled(true, "/usr/local/bin/cua-driver"));
         assert!(!is_unbundled(
             false,
-            "/Applications/CuaDriver.app/Contents/MacOS/cua-driver"
+            "/Applications/OpenSkyDriver.app/Contents/MacOS/cua-driver"
         ));
     }
 
@@ -604,8 +604,8 @@ mod tests {
         let _guard = env_lock();
         let embedded = swap_env(cua_driver_core::EMBEDDED_ENV, None);
 
-        // The Rust test binary runs outside CuaDriver.app, so its
-        // bundle id is either absent or not com.trycua.driver. Either
+        // The Rust test binary runs outside OpenSkyDriver.app, so its
+        // bundle id is either absent or not com.opensky.driver. Either
         // way the documented fail-mode shape applies: message + hint
         // + data + (when bid is present) bundle_identifier surfaced.
         //
