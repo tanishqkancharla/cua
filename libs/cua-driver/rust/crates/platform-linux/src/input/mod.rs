@@ -3492,16 +3492,33 @@ pub fn send_type_text_with_delay(xid: u64, text: &str, inter_char_ms: u64) -> Re
     let window = xid as u32;
     let root = conn.setup().roots[0].root;
     let mapping = conn.get_keyboard_mapping(8, 248)?.reply()?;
+    let borrowed_keys = std::cell::RefCell::new(std::collections::HashSet::new());
+    let needs_borrowed_keys = text
+        .chars()
+        .any(|ch| char_to_keycode_shift(&mapping, mpx_keyboard::keysym_for_char(ch)).is_none());
+    let app_events = if needs_borrowed_keys {
+        let barrier = x11_app_events::AppEventBarrier::targeted(&conn, window)?;
+        if barrier.is_none() {
+            tracing::warn!("Target X11 client does not advertise _NET_WM_PING; borrowed-key application delivery remains unverified");
+        }
+        barrier
+    } else {
+        None
+    };
     type_text_in_spare_batches(
         text,
         &mapping,
         |ch, mapping| {
-            keycode_for_keysym(
+            let (keycode, guard) = keycode_for_keysym(
                 &conn,
                 mapping,
                 mpx_keyboard::keysym_for_char(ch),
                 &ch.to_string(),
-            )
+            )?;
+            if guard.is_some() {
+                borrowed_keys.borrow_mut().insert(keycode);
+            }
+            Ok((keycode, guard))
         },
         |keycode, needs_shift| {
             let state = if needs_shift {
@@ -3547,6 +3564,13 @@ pub fn send_type_text_with_delay(xid: u64, text: &str, inter_char_ms: u64) -> Re
             sleep(Duration::from_millis(KEY_DELAY_MS));
             conn.send_event(false, window, EventMask::KEY_RELEASE, release)?;
             conn.flush()?;
+            if borrowed_keys.borrow().contains(&keycode) {
+                if let Some(barrier) = &app_events {
+                    // Do not reuse or restore this mapping until the actual
+                    // background recipient has processed the preceding key.
+                    barrier.acknowledge()?;
+                }
+            }
             if inter_char_ms > 0 {
                 sleep(Duration::from_millis(inter_char_ms));
             }

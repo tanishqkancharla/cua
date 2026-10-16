@@ -1,4 +1,4 @@
-//! Keep a borrowed keysym live until a participating focused X11 client has
+//! Keep a borrowed keysym live until a participating receiving X11 client has
 //! processed the preceding input. A server round trip alone is insufficient
 //! when the app is stalled. EWMH ping is event-loop evidence, not text readback.
 
@@ -13,7 +13,7 @@ pub(super) struct AppEventBarrier<'a> {
     conn: &'a RustConnection,
     root: Window,
     client: Window,
-    focus: Window,
+    focus: Option<Window>,
     protocols: Atom,
     ping: Atom,
     probe: Window,
@@ -23,16 +23,31 @@ pub(super) struct AppEventBarrier<'a> {
 impl<'a> AppEventBarrier<'a> {
     pub(super) fn focused(conn: &'a RustConnection) -> Result<Option<Self>> {
         let focus = conn.get_input_focus()?.reply()?.focus;
-        if focus <= 1 {
+        Self::for_recipient(conn, focus, Some(focus))
+    }
+
+    /// A background XSendEvent recipient can differ from keyboard focus.
+    pub(super) fn targeted(conn: &'a RustConnection, target: Window) -> Result<Option<Self>> {
+        Self::for_recipient(conn, target, None)
+    }
+
+    fn for_recipient(
+        conn: &'a RustConnection,
+        recipient: Window,
+        focus: Option<Window>,
+    ) -> Result<Option<Self>> {
+        if recipient <= 1 {
             return Ok(None);
         }
-        let root = conn.query_tree(focus)?.reply()?.root;
+        let root = conn.query_tree(recipient)?.reply()?.root;
         let protocols = conn.intern_atom(false, b"WM_PROTOCOLS")?.reply()?.atom;
         let ping = conn.intern_atom(false, b"_NET_WM_PING")?.reply()?.atom;
-        let mut client = focus;
+        let owner_mask = !conn.setup().resource_id_mask;
+        let owner = recipient & owner_mask;
+        let mut client = recipient;
         let mut supported = false;
         for _ in 0..32 {
-            if client == root || client == 0 {
+            if client == root || client == 0 || client & owner_mask != owner {
                 break;
             }
             let property = conn
@@ -141,8 +156,10 @@ impl<'a> AppEventBarrier<'a> {
                         self.client,
                     ) =>
                 {
-                    if self.conn.get_input_focus()?.reply()?.focus != self.focus {
-                        bail!("X11 input focus changed while awaiting application processing; text delivery may be partial, inspect before retrying");
+                    if let Some(focus) = self.focus {
+                        if self.conn.get_input_focus()?.reply()?.focus != focus {
+                            bail!("X11 input focus changed while awaiting application processing; text delivery may be partial, inspect before retrying");
+                        }
                     }
                     return Ok(());
                 }
