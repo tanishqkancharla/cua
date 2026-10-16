@@ -148,7 +148,9 @@ impl Tool for GetWindowStateTool {
         let visible_rows = match args.get("native_row_scope") {
             None => false,
             Some(Value::String(scope)) if scope == "visible" || scope == "all" => {
-                if args.get("full_output").and_then(Value::as_bool) != Some(true) {
+                if args.get("full_output").and_then(Value::as_bool) != Some(true)
+                    || args.get("since").is_some()
+                {
                     return ToolResult::error("native_row_scope requires full_output:true; since diffs are not supported for this explicit row scope");
                 }
                 scope == "visible"
@@ -1581,6 +1583,34 @@ mod window_scope_contract_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn native_row_scope_refuses_invalid_domains_before_window_lookup() {
+        let tool = GetWindowStateTool::new(Arc::new(ToolState::new(false, false, None)));
+        for scope in ["visible", "all"] {
+            for args in [
+                json!({"native_row_scope":scope}),
+                json!({"native_row_scope":scope,"full_output":false}),
+                json!({"native_row_scope":scope,"full_output":true,"since":"latest"}),
+            ] {
+                assert_eq!(
+                    serde_json::to_value(tool.invoke(args).await).unwrap(),
+                    serde_json::to_value(ToolResult::error("native_row_scope requires full_output:true; since diffs are not supported for this explicit row scope")).unwrap()
+                );
+            }
+        }
+        for scope in [json!("guessed"), json!(null), json!(true)] {
+            assert_eq!(
+                serde_json::to_value(
+                    tool.invoke(json!({"native_row_scope":scope,"full_output":true}))
+                        .await
+                )
+                .unwrap(),
+                serde_json::to_value(ToolResult::error("native_row_scope must be visible or all"))
+                    .unwrap()
+            );
+        }
+    }
 
     #[test]
     fn only_off_space_chromium_windows_get_the_staleness_note() {

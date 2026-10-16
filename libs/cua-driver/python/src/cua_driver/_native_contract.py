@@ -4394,7 +4394,7 @@ class _UniffiFfiConverterTypeGetSessionStateInput(_UniffiConverterRustBuffer):
 
 @dataclass
 class GetWindowStateInput:
-    def __init__(self, *, pid:int, window_id:int, session:typing.Optional[str], query:typing.Optional[str], include_accessibility_tree:typing.Optional[bool], include_screenshot:typing.Optional[bool], screenshot_out_file:typing.Optional[str], max_elements:typing.Optional[int], max_depth:typing.Optional[int], max_dimension:typing.Optional[int], max_image_dimension:typing.Optional[int], timeout_ms:typing.Optional[int] = _DEFAULT, tree_format:typing.Optional[str] = _DEFAULT, since:typing.Optional[str] = _DEFAULT, verbose:typing.Optional[bool] = _DEFAULT, full_output:typing.Optional[bool] = _DEFAULT, native_row_scope:typing.Optional[str] = _DEFAULT):
+    def __init__(self, *, pid:int, window_id:int, session:typing.Optional[str], query:typing.Optional[str], include_accessibility_tree:typing.Optional[bool], include_screenshot:typing.Optional[bool], screenshot_out_file:typing.Optional[str], max_elements:typing.Optional[int], max_depth:typing.Optional[int], max_dimension:typing.Optional[int], max_image_dimension:typing.Optional[int], timeout_ms:typing.Optional[int] = _DEFAULT, tree_format:typing.Optional[str] = _DEFAULT, since:typing.Optional[str] = _DEFAULT, verbose:typing.Optional[bool] = _DEFAULT, full_output:typing.Optional[bool] = _DEFAULT):
         self.pid = pid
         self.window_id = window_id
         self.session = session
@@ -4426,16 +4426,12 @@ class GetWindowStateInput:
             self.full_output = None
         else:
             self.full_output = full_output
-        if native_row_scope is _DEFAULT:
-            self.native_row_scope = None
-        else:
-            self.native_row_scope = native_row_scope
 
 
 
 
     def __str__(self):
-        return "GetWindowStateInput(pid={}, window_id={}, session={}, query={}, include_accessibility_tree={}, include_screenshot={}, screenshot_out_file={}, max_elements={}, max_depth={}, max_dimension={}, max_image_dimension={}, timeout_ms={}, tree_format={}, since={}, verbose={}, full_output={}, native_row_scope={})".format(self.pid, self.window_id, self.session, self.query, self.include_accessibility_tree, self.include_screenshot, self.screenshot_out_file, self.max_elements, self.max_depth, self.max_dimension, self.max_image_dimension, self.timeout_ms, self.tree_format, self.since, self.verbose, self.full_output, self.native_row_scope)
+        return "GetWindowStateInput(pid={}, window_id={}, session={}, query={}, include_accessibility_tree={}, include_screenshot={}, screenshot_out_file={}, max_elements={}, max_depth={}, max_dimension={}, max_image_dimension={}, timeout_ms={}, tree_format={}, since={}, verbose={}, full_output={})".format(self.pid, self.window_id, self.session, self.query, self.include_accessibility_tree, self.include_screenshot, self.screenshot_out_file, self.max_elements, self.max_depth, self.max_dimension, self.max_image_dimension, self.timeout_ms, self.tree_format, self.since, self.verbose, self.full_output)
     def __eq__(self, other):
         if self.pid != other.pid:
             return False
@@ -4469,8 +4465,6 @@ class GetWindowStateInput:
             return False
         if self.full_output != other.full_output:
             return False
-        if self.native_row_scope != other.native_row_scope:
-            return False
         return True
 
 class _UniffiFfiConverterTypeGetWindowStateInput(_UniffiConverterRustBuffer):
@@ -4493,7 +4487,6 @@ class _UniffiFfiConverterTypeGetWindowStateInput(_UniffiConverterRustBuffer):
             since=_UniffiFfiConverterOptionalString.read(buf),
             verbose=_UniffiFfiConverterOptionalBoolean.read(buf),
             full_output=_UniffiFfiConverterOptionalBoolean.read(buf),
-            native_row_scope=_UniffiFfiConverterOptionalString.read(buf),
         )
 
     @staticmethod
@@ -4514,7 +4507,6 @@ class _UniffiFfiConverterTypeGetWindowStateInput(_UniffiConverterRustBuffer):
         _UniffiFfiConverterOptionalString.check_lower(value.since)
         _UniffiFfiConverterOptionalBoolean.check_lower(value.verbose)
         _UniffiFfiConverterOptionalBoolean.check_lower(value.full_output)
-        _UniffiFfiConverterOptionalString.check_lower(value.native_row_scope)
 
     @staticmethod
     def write(value, buf):
@@ -4534,7 +4526,6 @@ class _UniffiFfiConverterTypeGetWindowStateInput(_UniffiConverterRustBuffer):
         _UniffiFfiConverterOptionalString.write(value.since, buf)
         _UniffiFfiConverterOptionalBoolean.write(value.verbose, buf)
         _UniffiFfiConverterOptionalBoolean.write(value.full_output, buf)
-        _UniffiFfiConverterOptionalString.write(value.native_row_scope, buf)
 
 @dataclass
 class HotkeyInput:

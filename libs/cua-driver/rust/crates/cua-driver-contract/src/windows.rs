@@ -126,16 +126,6 @@ pub struct GetWindowStateInput {
     #[schemars(schema_with = "bool_schema")]
     #[uniffi(default = None)]
     pub full_output: Option<bool>,
-    /// macOS native row domain: visible rows plus selection, or all rows.
-    /// Requires full_output:true; compact since diffs retain their old domain.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(schema_with = "native_row_scope_schema")]
-    #[uniffi(default = None)]
-    pub native_row_scope: Option<String>,
-}
-
-fn native_row_scope_schema(_: &mut SchemaGenerator) -> Schema {
-    json_schema!({"type":"string","enum":["visible","all"]})
 }
 
 fn tree_format_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
@@ -171,14 +161,6 @@ impl ToolInput for GetWindowStateInput {
             return Err(format!(
                 "timeout_ms must be between {TIMEOUT_MS_MIN} and {TIMEOUT_MS_MAX} milliseconds"
             ));
-        }
-        if let Some(scope) = self.native_row_scope.as_deref() {
-            if !["visible", "all"].contains(&scope) {
-                return Err("native_row_scope must be visible or all".into());
-            }
-            if self.full_output != Some(true) || self.since.is_some() {
-                return Err("native_row_scope requires full_output:true without since".into());
-            }
         }
         if self.include_accessibility_tree == Some(false) && self.include_screenshot == Some(false)
         {
@@ -515,37 +497,6 @@ mod tests {
         .unwrap();
         native_resolution.validate().unwrap();
         assert_eq!(ListAppsInput::input_schema()["properties"], json!({}));
-    }
-
-    #[test]
-    fn native_row_scope_requires_an_explicit_full_response_domain() {
-        for scope in ["visible", "all"] {
-            let valid: GetWindowStateInput = serde_json::from_value(
-                json!({"pid":7,"window_id":9,"native_row_scope":scope,"full_output":true}),
-            )
-            .unwrap();
-            valid.validate().unwrap();
-            let mut no_full = valid.clone();
-            no_full.full_output = None;
-            assert_eq!(
-                no_full.validate().unwrap_err(),
-                "native_row_scope requires full_output:true without since"
-            );
-            let mut since = valid.clone();
-            since.since = Some("latest".into());
-            assert_eq!(
-                since.validate().unwrap_err(),
-                "native_row_scope requires full_output:true without since"
-            );
-        }
-        let invalid: GetWindowStateInput = serde_json::from_value(
-            json!({"pid":7,"window_id":9,"native_row_scope":"guessed","full_output":true}),
-        )
-        .unwrap();
-        assert_eq!(
-            invalid.validate().unwrap_err(),
-            "native_row_scope must be visible or all"
-        );
     }
 
     #[test]

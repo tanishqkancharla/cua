@@ -3061,12 +3061,7 @@ export type GetWindowStateInput = {
      * Restore the previous full response (both representations, all
      * metadata, platform walk limits).
      */
-    fullOutput?: boolean,
-    /**
-     * macOS native row domain: visible rows plus selection, or all rows.
-     * Requires full_output:true; compact since diffs retain their old domain.
-     */
-    nativeRowScope?: string
+    fullOutput?: boolean
 }
 
 /**
@@ -3078,8 +3073,7 @@ export const GetWindowStateInput = (() => {
         treeFormat: undefined,
         since: undefined,
         verbose: undefined,
-        fullOutput: undefined,
-        nativeRowScope: undefined
+        fullOutput: undefined
     });
     const create = (() => {
         return uniffiCreateRecord<GetWindowStateInput, ReturnType<typeof defaults>>(defaults);
@@ -3111,8 +3105,7 @@ const FfiConverterTypeGetWindowStateInput = (() => {
                 treeFormat: FfiConverterOptionalString.read(from),
                 since: FfiConverterOptionalString.read(from),
                 verbose: FfiConverterOptionalBoolean.read(from),
-                fullOutput: FfiConverterOptionalBoolean.read(from),
-                nativeRowScope: FfiConverterOptionalString.read(from)
+                fullOutput: FfiConverterOptionalBoolean.read(from)
             };
         }
         write(value: TypeName, into: RustBuffer): void {
@@ -3132,7 +3125,6 @@ const FfiConverterTypeGetWindowStateInput = (() => {
             FfiConverterOptionalString.write(value.since, into);
             FfiConverterOptionalBoolean.write(value.verbose, into);
             FfiConverterOptionalBoolean.write(value.fullOutput, into);
-            FfiConverterOptionalString.write(value.nativeRowScope, into);
         }
         allocationSize(value: TypeName): number {
             return FfiConverterUInt32.allocationSize(value.pid) +
@@ -3150,8 +3142,7 @@ const FfiConverterTypeGetWindowStateInput = (() => {
              FfiConverterOptionalString.allocationSize(value.treeFormat) +
              FfiConverterOptionalString.allocationSize(value.since) +
              FfiConverterOptionalBoolean.allocationSize(value.verbose) +
-             FfiConverterOptionalBoolean.allocationSize(value.fullOutput) +
-             FfiConverterOptionalString.allocationSize(value.nativeRowScope);
+             FfiConverterOptionalBoolean.allocationSize(value.fullOutput);
 
         }
     };

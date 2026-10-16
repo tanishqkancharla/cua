@@ -1680,14 +1680,6 @@
             "minimum": 0,
             "type": "integer"
           },
-          "native_row_scope": {
-            "description": "macOS native row domain: visible rows plus selection, or all rows.\nRequires full_output:true; compact since diffs retain their old domain.",
-            "enum": [
-              "visible",
-              "all"
-            ],
-            "type": "string"
-          },
           "pid": {
             "maximum": 4294967295,
             "minimum": 1,
