@@ -216,6 +216,22 @@ pub fn walk_tree_bounded(
     )
 }
 
+pub(crate) fn walk_native_chrome_bounded(
+    pid: i32,
+    window_id: u32,
+    max_elements: usize,
+) -> TreeWalkResult {
+    collect_tree(
+        pid,
+        Some(window_id),
+        None,
+        DEFAULT_MAX_DEPTH,
+        WalkBudget::nodes_only(max_elements),
+        true,
+        false,
+    )
+}
+
 /// [`walk_tree_bounded`] under a caller's [`WalkBudget`]: the walk also stops
 /// when the budget's `timeout_ms` runs out, returning the partial tree. Each
 /// AX call is bounded by the per-element messaging timeout, so the walk
@@ -227,7 +243,7 @@ pub fn walk_tree_budgeted(
     max_depth: usize,
     budget: WalkBudget,
 ) -> TreeWalkResult {
-    collect_tree(pid, window_id, query, max_depth, budget, true)
+    collect_tree(pid, window_id, query, max_depth, budget, true, true)
 }
 
 /// Resolve the exact native AX window through the same readiness/ownership
@@ -240,6 +256,7 @@ pub fn probe_window_scope(pid: i32, window_id: u32, timeout_ms: u64) -> Option<W
         DEFAULT_MAX_DEPTH,
         WalkBudget::new(timeout_ms, DEFAULT_MAX_ELEMENTS),
         false,
+        true,
     )
     .window_scope
 }
@@ -251,6 +268,7 @@ fn collect_tree(
     max_depth: usize,
     mut budget: WalkBudget,
     collect_descendants: bool,
+    include_web_content: bool,
 ) -> TreeWalkResult {
     let mut nodes: Vec<AXNode> = Vec::new();
     let mut lines: Vec<(usize, String)> = Vec::new(); // (depth, line)
@@ -356,6 +374,7 @@ fn collect_tree(
                 &mut budget,
                 &mut collapsed_rows,
                 max_depth,
+                include_web_content,
             );
         }
 
@@ -473,6 +492,7 @@ unsafe fn walk_element(
     budget: &mut WalkBudget,
     collapsed_rows: &mut usize,
     max_depth: usize,
+    include_web_content: bool,
 ) {
     if depth > max_depth {
         return;
@@ -494,6 +514,9 @@ unsafe fn walk_element(
         .unwrap_or_else(|| "AXUnknown".into());
 
     let in_web_content = in_web_content || is_web_content_role(&role);
+    if in_web_content && !include_web_content {
+        return;
+    }
     // Only the caller's native viewport scope may omit rows; web content and
     // unknown or inconsistent visible/selected membership retain the full walk.
     let visible_rows = VISIBLE_ROWS.with(std::cell::Cell::get) && !in_web_content;
@@ -549,6 +572,7 @@ unsafe fn walk_element(
                 budget,
                 collapsed_rows,
                 max_depth,
+                include_web_content,
             );
         }
         return;
@@ -646,6 +670,7 @@ unsafe fn walk_element(
                 budget,
                 collapsed_rows,
                 max_depth,
+                include_web_content,
             );
         }
         return;
@@ -792,6 +817,7 @@ unsafe fn walk_element(
             budget,
             collapsed_rows,
             max_depth,
+            include_web_content,
         );
     }
 }

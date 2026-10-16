@@ -296,6 +296,7 @@ impl Tool for HotkeyTool {
         // key equivalent in a native app that is not in front, run that menu
         // item in the background instead (verified for Save), or refuse when
         // macOS keeps it disabled. No key events are sent on this route.
+        let mut key_scope: Option<crate::input::skylight::WindowKeyScope> = None;
         if !fg && px.is_none() {
             if let (Some(wid), Some(combo)) = (
                 window_id,
@@ -315,6 +316,13 @@ impl Tool for HotkeyTool {
                 .ok()
                 .flatten();
                 if let Some(item) = menu_item {
+                    // The menu command acts on the app's key window. Make the
+                    // addressed window key first, confirmed, or refuse: never
+                    // act on another window (CUA-1767).
+                    match super::acquire_key_scope(pid, Some(wid), false).await {
+                        Ok(scope) => key_scope = scope,
+                        Err(refusal) => return refusal,
+                    }
                     if let Some(ptr) = element_ptr {
                         // The menu command acts on the focused element.
                         let focused =
@@ -327,13 +335,50 @@ impl Tool for HotkeyTool {
                             );
                         }
                     }
-                    return super::invoke_menu::run_in_background(
+                    let menu_result = super::invoke_menu::run_in_background(
                         pid,
                         wid,
                         item.path,
-                        super::invoke_menu::MenuRequest::KeyEquivalent(key_display),
+                        super::invoke_menu::MenuRequest::KeyEquivalent(key_display.clone()),
                     )
                     .await;
+                    // The menu route is only a better route when it works. A
+                    // refusal (an item macOS keeps disabled while the app is in
+                    // the background, as LibreOffice's Format > Bold does) must
+                    // not end the call: the caller named a window, so the combo
+                    // goes to that window as key events below (CUA-1767).
+                    if menu_result.is_error != Some(true) {
+                        return menu_result;
+                    }
+                }
+            }
+        }
+
+        // ── Paste must not land in browser chrome ──
+        // A background Cmd+V goes to the window's first responder. In a
+        // browser that can be the omnibox rather than the page field the
+        // caller meant, which pastes (possibly secret) clipboard content into
+        // the address bar. With no element/pixel target, refuse when the
+        // window's focused field is positively browser chrome.
+        if !fg && px.is_none() && element_index.is_none() && is_paste_combo(&modifiers, &key) {
+            if let Some(wid) = window_id {
+                let chrome = tokio::task::spawn_blocking(move || {
+                    super::type_text::is_browser_pid(pid)
+                        && super::type_text::window_focus_is_browser_chrome_field(pid, wid)
+                })
+                .await
+                .unwrap_or(false);
+                if chrome {
+                    return ToolResult::error(
+                        "hotkey: the browser's focused field is its own address/search bar, \
+                         not a page field, so the paste was not sent. Focus the page field \
+                         first (type_text with x,y, or a snapshot element_token), or use \
+                         browser_type for page text.",
+                    )
+                    .with_structured(serde_json::json!({
+                        "code": "paste_target_is_browser_chrome",
+                        "delivered": false
+                    }));
                 }
             }
         }
@@ -380,7 +425,9 @@ impl Tool for HotkeyTool {
                     pid,
                     wid,
                     element_ptr,
-                    cua_driver_core::background_input::BackgroundAction::GenericKey,
+                    super::window_keyboard_action(
+                        cua_driver_core::background_input::BackgroundAction::GenericKey,
+                    ),
                 )
                 .await
                 {
@@ -393,6 +440,14 @@ impl Tool for HotkeyTool {
         } else {
             None
         };
+
+        // Key post: the addressed window must be the confirmed key window.
+        if key_scope.is_none() {
+            match super::acquire_key_scope(pid, window_id, fg).await {
+                Ok(scope) => key_scope = scope,
+                Err(refusal) => return refusal,
+            }
+        }
 
         // Web-content AX nodes can acknowledge AXFocused without moving the
         // renderer's real first responder. That makes a direct focus write an
@@ -471,6 +526,8 @@ impl Tool for HotkeyTool {
                 false
             }
         };
+
+        let _hold_key_scope = &key_scope;
 
         // A focus click already moved the cursor. Otherwise place a named
         // session's cursor on the element, its remembered position, or the

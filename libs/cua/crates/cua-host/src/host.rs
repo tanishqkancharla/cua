@@ -1316,7 +1316,7 @@ impl Host {
         }
         status.paused_signed_out = config.paused_signed_out;
         if let (Some(url), Some(id)) = (&config.relay_url, &config.machine_id) {
-            match self.relay_machine(url, id).await {
+            match recall_relay_view(url, id, self.relay_machine(url, id).await) {
                 Ok(m) => {
                     status.online = Some(m.online);
                     // Paused: nobody can reach it, whatever the relay's
@@ -1614,12 +1614,30 @@ impl Host {
     /// and deletes `<home>/host`. The machine id is kept so a later setup
     /// reuses it.
     pub async fn remove(&self) -> Result<()> {
+        self.remove_inner(false).await
+    }
+
+    /// [`Self::remove`] for an uninstall of the app: the Spaces this machine
+    /// provides do not stop it. Their relay machines (each Space joined the
+    /// relay as its own) are unregistered too, so nothing stays reachable
+    /// through the relay; the Spaces themselves are left as they are for
+    /// the caller to turn off ([`Self::provided_spaces`]).
+    pub async fn remove_for_uninstall(&self) -> Result<()> {
+        self.remove_inner(true).await
+    }
+
+    /// The Spaces this host provides to the owner's other devices.
+    pub fn provided_spaces(&self) -> Result<Vec<crate::provided::ProvidedSpace>> {
+        crate::provided::load_provided(&self.paths.dir)
+    }
+
+    async fn remove_inner(&self, uninstalling: bool) -> Result<()> {
         let Some(config) = self.config()? else {
             return Ok(());
         };
         // Spaces it provides would keep running with nobody to delete them.
         let provided = crate::provided::load_provided(&self.paths.dir)?;
-        if !provided.is_empty() {
+        if !provided.is_empty() && !uninstalling {
             return Err(Error::InvalidArgument(format!(
                 "this machine still provides {} Space{} ({}); delete {} first (`cua spaces delete <local:name>`)",
                 provided.len(),
@@ -1633,17 +1651,32 @@ impl Host {
             )));
         }
         let mut relay_error = None;
+        let mut note = |e: Error| match e {
+            // Already gone: nothing to tell the relay.
+            Error::NotFound(_) => {}
+            // A refused machine token leaves the entry listed under My
+            // machines; report it (after the local cleanup) rather than
+            // pretending the unregister worked.
+            e => relay_error = Some(e),
+        };
+        if uninstalling {
+            for space in &provided {
+                if space.machine_token.is_empty() || space.relay_url.is_empty() {
+                    continue;
+                }
+                if let Err(e) = RelayClient::new(&space.relay_url)?
+                    .delete(&space.machine_token, &space.relay_machine)
+                    .await
+                {
+                    note(e);
+                }
+            }
+        }
         if let (Some(url), Some(id)) = (&config.relay_url, &config.machine_id)
             && let Ok(token) = read_secret(&self.paths.machine_token())
+            && let Err(e) = RelayClient::new(url)?.delete(&token, id).await
         {
-            match RelayClient::new(url)?.delete(&token, id).await {
-                // Already gone: nothing to tell the relay.
-                Ok(()) | Err(Error::NotFound(_)) => {}
-                // A refused machine token leaves the entry listed under My
-                // machines; report it (after the local cleanup) rather than
-                // pretending the unregister worked.
-                Err(e) => relay_error = Some(e),
-            }
+            note(e);
         }
         self.manager_for_config(&config).uninstall()?;
         std::fs::remove_dir_all(&self.paths.dir)?;
@@ -1653,6 +1686,41 @@ impl Host {
             ))),
             None => Ok(()),
         }
+    }
+}
+
+/// How long [`Host::status`] keeps the relay's last answer about this
+/// machine while the relay is briefly unreachable, before it shows the
+/// failure ("Needs attention"). A relay deploy replaces its one pod, and
+/// the proxy in front of it answers 503 for about 20 s meanwhile; the
+/// host service reconnects on its own.
+pub const RELAY_HICCUP_GRACE: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// The relay's last answer about each machine (relay URL, machine id),
+/// and when it came.
+type RelayViews = std::collections::HashMap<(String, String), (std::time::Instant, crate::Machine)>;
+static RELAY_VIEWS: std::sync::Mutex<Option<RelayViews>> = std::sync::Mutex::new(None);
+
+/// `read` (the relay's answer about machine `id`), remembered when it
+/// worked; a transient failure ([`Error::is_transient`]) within
+/// [`RELAY_HICCUP_GRACE`] of the last answer gets that answer instead.
+fn recall_relay_view(url: &str, id: &str, read: Result<crate::Machine>) -> Result<crate::Machine> {
+    let key = (url.to_string(), id.to_string());
+    let mut views = RELAY_VIEWS.lock().unwrap_or_else(|e| e.into_inner());
+    let views = views.get_or_insert_with(Default::default);
+    match read {
+        Ok(m) => {
+            views.insert(key, (std::time::Instant::now(), m.clone()));
+            Ok(m)
+        }
+        Err(e) if e.is_transient() => match views.get(&key) {
+            Some((at, m)) if at.elapsed() < RELAY_HICCUP_GRACE => {
+                tracing::debug!("relay status read failed; showing its last answer: {e}");
+                Ok(m.clone())
+            }
+            _ => Err(e),
+        },
+        Err(e) => Err(e),
     }
 }
 

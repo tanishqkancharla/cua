@@ -116,7 +116,7 @@ export function GettingStarted() {
           <p className="mt-0.5 text-xs text-muted-foreground">{view.detail}</p>
         </div>
         <span className="mt-0.5 text-xs tabular-nums text-muted-foreground" data-checklist-count="">
-          {view.progress}
+          {view.progress} done
         </span>
         <Button variant="ghost" size="icon-sm" aria-label={view.closeLabel} onClick={() => dismiss()}>
           <XIcon className="size-3.5 text-muted-foreground" />
@@ -156,7 +156,9 @@ export function GettingStarted() {
 /**
  * Tells the checklist what the app already shows (another machine, a
  * Space, an agent; the core ticks those steps off) and answers Help >
- * Getting Started. Teleport and Share tick themselves off where they
+ * Getting Started. In the Mac app and Electron the host ticks those steps
+ * off itself (`checklist::observe_from`) and this page's observations are
+ * not sent; they count only where the page keeps its own copy (the demo). Teleport and Share tick themselves off where they
  * finish (`bridge/teleport.ts`, `bridge/share.ts`). Mounted once, under
  * the main layout.
  */

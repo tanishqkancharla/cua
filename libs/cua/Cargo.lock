@@ -2472,6 +2472,7 @@ dependencies = [
  "humantime",
  "hyper",
  "hyper-util",
+ "libc",
  "pbjson-types",
  "prost",
  "prost-types",
@@ -2569,6 +2570,7 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2627,6 +2629,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "core-foundation 0.10.1",
+ "cua-home",
  "cua-telemetry",
  "hex",
  "keyring",
@@ -3031,6 +3034,7 @@ dependencies = [
  "cua-chromium-storage",
  "cua-daemon",
  "cua-fleet",
+ "cua-home",
  "cua-host",
  "cua-keyvault",
  "cua-media-client",

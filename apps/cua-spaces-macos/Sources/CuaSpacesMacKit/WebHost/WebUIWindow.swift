@@ -31,7 +31,7 @@ public final class WebUIWindowController: NSWindowController, NSWindowDelegate, 
 
     /// The traffic lights' width plus a gap, for `--titlebar-left-inset`.
     static let fallbackLeftInset: CGFloat = 78
-    static let titlebarHeight: CGFloat = 38
+    static let titlebarHeight: CGFloat = 48
     /// Where the window's frame is saved (the defaults' `NSWindow Frame <name>`).
     static let frameName = "CuaSpacesWebUI"
     static let devServer = URL(string: "http://localhost:5174/")!
@@ -174,6 +174,12 @@ public final class WebUIWindowController: NSWindowController, NSWindowDelegate, 
         webView.uiDelegate = self
         bridge.host = self
         videoSurfaces?.emit = { [weak self] event, payload in self?.emit(event, payload: payload) }
+        // A real window dragged over a tile: the page highlights it.
+        dropTargets.window = window
+        dropTargets.setFrames([:])
+        dropTargets.onTargeted = { [weak self] id in
+            self?.emit("window.dropTarget", payload: ["spaceId": id.map { $0 as Any } ?? NSNull()])
+        }
         setBackground(Self.storedBackground(for: window.effectiveAppearance), keep: false)
     }
 
@@ -219,8 +225,9 @@ public final class WebUIWindowController: NSWindowController, NSWindowDelegate, 
     }
 
     public func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
-        // A new page: the old one's video slots are gone with it.
+        // A new page: the old one's video slots and tiles are gone with it.
         videoSurfaces?.removeAll()
+        dropTargets.setFrames([:])
     }
 
     public func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
@@ -289,7 +296,23 @@ public final class WebUIWindowController: NSWindowController, NSWindowDelegate, 
         return max(Self.fallbackLeftInset, (right + 20).rounded())
     }
 
+    /// Centres the traffic lights on the page's top bar (`titlebarHeight`):
+    /// a transparent title bar is shorter, so they would sit above the
+    /// search field's centre line. Nothing to do in full screen.
+    func centerTrafficLights() {
+        guard let window, !window.styleMask.contains(.fullScreen),
+              let close = window.standardWindowButton(.closeButton), let bar = close.superview,
+              let host = bar.superview else { return }
+        let height = Self.titlebarHeight
+        bar.frame = NSRect(x: bar.frame.minX, y: host.bounds.height - height, width: bar.frame.width, height: height)
+        for kind in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+            guard let button = window.standardWindowButton(kind) else { continue }
+            button.setFrameOrigin(NSPoint(x: button.frame.minX, y: ((height - button.frame.height) / 2).rounded()))
+        }
+    }
+
     func applyInset() {
+        centerTrafficLights()
         let inset = Int(leftInset)
         webView.titlebarLeftInset = CGFloat(inset)
         webView.evaluateJavaScript(
@@ -352,6 +375,21 @@ public final class WebUIWindowController: NSWindowController, NSWindowDelegate, 
     func setDragRegions(_ rects: [CGRect]) {
         webView.dragRegions = rects
     }
+
+    /// The page's Space tiles (CSS pixels from its top left) as targets for
+    /// a real window dragged onto one, in the window content's points (the
+    /// web view is the content view).
+    func setDropTargets(_ frames: [String: CGRect]) {
+        let zoom = webView.pageZoom * webView.magnification
+        dropTargets.window = window
+        dropTargets.setFrames(frames.mapValues {
+            CGRect(x: $0.minX * zoom, y: $0.minY * zoom, width: $0.width * zoom, height: $0.height * zoom)
+        })
+    }
+
+    /// The drop targets this window's page reports (the app model's, which
+    /// the notch's drag monitor hit-tests).
+    var dropTargets: SidebarDropTargets { bridge.model.pageDropTargets }
 
     /// Tells the page something changed (`cua:event`).
     func emit(_ event: String, payload: Any? = nil) {
@@ -421,6 +459,7 @@ public final class WebUIWindowController: NSWindowController, NSWindowDelegate, 
 
     // MARK: - Window
 
+    public func windowDidResize(_ notification: Notification) { centerTrafficLights() }
     public func windowDidEnterFullScreen(_ notification: Notification) { applyInset() }
     public func windowDidExitFullScreen(_ notification: Notification) { applyInset() }
 
@@ -429,6 +468,10 @@ public final class WebUIWindowController: NSWindowController, NSWindowDelegate, 
         window?.saveFrame(usingName: Self.frameName)
         videoSurfaces?.removeAll()
         webView.configuration.userContentController.removeAllScriptMessageHandlers()
+        if dropTargets.window === window {
+            dropTargets.setFrames([:])
+            dropTargets.onTargeted = nil
+        }
         if Self.shared === self { Self.shared = nil }
     }
 }

@@ -89,6 +89,18 @@ extension WebUIBridge {
             input["checking"] = true
             return input
 
+        // The in-app update indicator: Sparkle downloads in the background,
+        // and the page asks to restart.
+        case "update.get": return model.updates.updateState.json
+        case "update.install":
+            guard model.updates.updater != nil else { throw Failure.unsupported("Updates are off in this build") }
+            // The app quits to install: answer first, then start.
+            let answer = model.updates.updateState.json
+            if model.updates.updateState.status == .downloaded {
+                DispatchQueue.main.async { [model] in model.updates.installUpdate() }
+            }
+            return answer
+
         // Settings, launch at login
         case "loginItem.get":
             model.readLoginItem()
@@ -101,6 +113,16 @@ extension WebUIBridge {
         case "loginItem.openSettings":
             await model.press(row: "launch-at-login-approve")
             return NSNull()
+
+        // "Add a machine" and "Share": the account's Teams (Settings, Teams)
+        // and the current one.
+        case "teams.list":
+            await model.reloadTeams()
+            var teams: [[String: Any]] = []
+            if case .ready(let list) = model.teamsState {
+                teams = list.map { ["id": $0.id, "alias": $0.alias, "name": $0.name, "role": $0.role, "plan": $0.plan] }
+            }
+            return ["teams": teams, "currentTeamId": model.settings.currentTeamId.map { $0 as Any } ?? NSNull()] as [String: Any]
 
         // Settings, Devices
         case "devices.get", "devices.enroll", "devices.checkEnrolled", "devices.approve", "devices.rename",
@@ -129,10 +151,15 @@ extension WebUIBridge {
         case "notifications.list":
             guard model.persistent.canCallTools else { throw Failure.unsupported("Notifications need the cua daemon") }
             await model.persistent.pollNotifications()
-            return BridgeValue.encode(model.persistent.feed)
+            return model.persistent.feedRows()
         case "notifications.markAllRead":
             guard model.persistent.canCallTools else { throw Failure.unsupported("Notifications need the cua daemon") }
             await model.persistent.markAllRead()
+            return NSNull()
+        case "notifications.markRead":
+            guard model.persistent.canCallTools else { throw Failure.unsupported("Notifications need the cua daemon") }
+            guard let ids = args["ids"] as? [String] else { throw Failure.badArgs("ids: array of strings") }
+            await model.persistent.markRead(ids: ids)
             return NSNull()
 
         // Usage events
@@ -186,6 +213,22 @@ extension WebUIBridge {
                     ? HostSetupFailure.presenting(LiveSpacesBackend.words(error), as: .signedOut)
                     : HostSetupFailure.presenting(LiveSpacesBackend.words(error)))
             }
+            return hostStatus()
+        case "host.joinWithCode":
+            let relay = args["relay"] as? String
+            guard let code = args["code"] as? String,
+                  let cliArgs = JoinWithCode.arguments(code: code, relay: relay) else {
+                throw Failure.badArgs("code: string")
+            }
+            guard let cua = AppEnvironment.bundledCuaPath else {
+                throw Failure.unsupported("This build has no bundled cua to join with")
+            }
+            do {
+                try await JoinWithCode.run(cua: cua, args: cliArgs)
+            } catch let failed as JoinWithCode.FailedRun {
+                throw Failure(code: "failed", message: failed.message)
+            }
+            await model.host.refresh()
             return hostStatus()
         case "host.action":
             guard model.host.host != nil else { throw Failure.unsupported("This Mac can't be set up for access in this build") }
@@ -657,7 +700,8 @@ extension WebUIBridge {
             cookieDomains: c["cookieDomains"] as? [String],
             exclude: c["exclude"] as? [String] ?? [],
             fromVault: c["fromVault"] as? [String],
-            includePasswords: c["includePasswords"] as? Bool ?? false))
+            includePasswords: c["includePasswords"] as? Bool ?? false,
+            passwordDomains: c["passwordDomains"] as? [String]))
     }
 
     /// A run's report, as the page reads it (`RunReport`).

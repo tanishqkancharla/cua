@@ -23,7 +23,6 @@ mod mpx_owner;
 /// One-shot targeted pointer/keyboard delivery with explicit
 /// auto/background/foreground semantics (embedders).
 pub mod targeted;
-mod x11_app_events;
 
 pub use focus_guard::{FocusGuardReport, FocusSnapshot, SameAppWindow};
 pub use foreground::{with_x11_foreground_opts, FocusAfter, ForegroundOptions, ForegroundReport};
@@ -35,12 +34,13 @@ pub use mpx_keyboard::{
 use anyhow::{anyhow, bail, Context, Result};
 use evdev::uinput::VirtualDevice;
 use evdev::{AttributeSet, EventType, InputEvent, Key, RelativeAxisType};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::fs;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::sleep;
 use std::time::Duration;
@@ -51,6 +51,8 @@ use x11rb::rust_connection::RustConnection;
 const CLICK_DELAY_MS: u64 = 35;
 const DOUBLE_CLICK_DELAY_MS: u64 = 50;
 const KEY_DELAY_MS: u64 = 10;
+const PING_TIMEOUT: Duration = Duration::from_secs(1);
+static PING_SERIAL: AtomicU32 = AtomicU32::new(1);
 
 #[derive(Clone, Debug)]
 pub struct VirtualPointerDrag {
@@ -3389,56 +3391,12 @@ pub fn send_type_text(xid: u64, text: &str) -> Result<()> {
     send_type_text_with_delay(xid, text, 0)
 }
 
-fn type_text_with_preflight<G>(
-    text: &str,
-    keymap: &GetKeyboardMappingReply,
-    mut remap: impl FnMut(char, &mut GetKeyboardMappingReply) -> Result<(u8, Option<G>)>,
-    mut send: impl FnMut(u8, bool) -> Result<()>,
-) -> Result<Vec<G>> {
-    let mut mapping = keymap.clone();
-    let mut guards = Vec::new();
-    let mut resolved = std::collections::HashMap::new();
-    let mut keys = Vec::new();
-    for ch in text.chars() {
-        let key = match resolved.get(&ch).copied() {
-            Some(key) => key,
-            None => {
-                let key = match char_to_keycode_shift(&mapping, mpx_keyboard::keysym_for_char(ch)) {
-                    Some(key) => key,
-                    None => {
-                        let (keycode, guard) = remap(ch, &mut mapping).map_err(|error| {
-                            let needed = text
-                                .chars()
-                                .map(mpx_keyboard::keysym_for_char)
-                                .filter(|keysym| !keymap.keysyms.contains(keysym))
-                                .collect::<std::collections::HashSet<_>>()
-                                .len();
-                            anyhow::anyhow!(
-                                "typed 0 of {} characters: the text needs {needed} spare keycodes: {error:#}",
-                                text.chars().count()
-                            )
-                        })?;
-                        guards.extend(guard);
-                        (keycode, false)
-                    }
-                };
-                resolved.insert(ch, key);
-                key
-            }
-        };
-        keys.push(key);
-    }
-    for (keycode, needs_shift) in keys {
-        send(keycode, needs_shift)?;
-    }
-    Ok(guards)
-}
-
 fn type_text_in_spare_batches<G>(
     text: &str,
     mapping: &GetKeyboardMappingReply,
     mut remap: impl FnMut(char, &mut GetKeyboardMappingReply) -> Result<(u8, Option<G>)>,
     mut send: impl FnMut(u8, bool) -> Result<()>,
+    mut finish: impl FnMut() -> bool,
 ) -> Result<()> {
     let total = text.chars().count();
     let spares = match mapping.keysyms_per_keycode as usize {
@@ -3482,6 +3440,11 @@ fn type_text_in_spare_batches<G>(
             send(keycode, needs_shift)?;
             typed += 1;
         }
+        if !finish() {
+            bail!(
+                "typed {typed} of {total} characters: the client has not confirmed reading borrowed keys; delivery is unknown, inspect before retrying"
+            );
+        }
     }
     Ok(())
 }
@@ -3492,35 +3455,13 @@ pub fn send_type_text_with_delay(xid: u64, text: &str, inter_char_ms: u64) -> Re
     let window = xid as u32;
     let root = conn.setup().roots[0].root;
     let mapping = conn.get_keyboard_mapping(8, 248)?.reply()?;
-    let borrowed_keys = std::cell::RefCell::new(std::collections::HashSet::new());
-    let needs_borrowed_keys = text
-        .chars()
-        .any(|ch| char_to_keycode_shift(&mapping, mpx_keyboard::keysym_for_char(ch)).is_none());
-    let app_events = if needs_borrowed_keys {
-        let barrier = x11_app_events::AppEventBarrier::targeted(&conn, window)?;
-        if barrier.is_none() {
-            tracing::warn!("Target X11 client does not advertise _NET_WM_PING; borrowed-key application delivery remains unverified");
-        }
-        barrier
-    } else {
-        None
-    };
+    let client = RefCell::new(TextClient::new(&conn, Some(window)));
     type_text_in_spare_batches(
         text,
         &mapping,
-        |ch, mapping| {
-            let (keycode, guard) = keycode_for_keysym(
-                &conn,
-                mapping,
-                mpx_keyboard::keysym_for_char(ch),
-                &ch.to_string(),
-            )?;
-            if guard.is_some() {
-                borrowed_keys.borrow_mut().insert(keycode);
-            }
-            Ok((keycode, guard))
-        },
+        |ch, mapping| text_keycode(&mut client.borrow_mut(), mapping, ch),
         |keycode, needs_shift| {
+            client.borrow_mut().record_recipient(keycode);
             let state = if needs_shift {
                 KeyButMask::SHIFT
             } else {
@@ -3564,18 +3505,12 @@ pub fn send_type_text_with_delay(xid: u64, text: &str, inter_char_ms: u64) -> Re
             sleep(Duration::from_millis(KEY_DELAY_MS));
             conn.send_event(false, window, EventMask::KEY_RELEASE, release)?;
             conn.flush()?;
-            if borrowed_keys.borrow().contains(&keycode) {
-                if let Some(barrier) = &app_events {
-                    // Do not reuse or restore this mapping until the actual
-                    // background recipient has processed the preceding key.
-                    barrier.acknowledge()?;
-                }
-            }
             if inter_char_ms > 0 {
                 sleep(Duration::from_millis(inter_char_ms));
             }
             Ok(())
         },
+        || client.borrow_mut().release(),
     )?;
     // Deliver the final release before this short-lived connection closes.
     conn.get_input_focus()?.reply()?;
@@ -3601,38 +3536,13 @@ pub fn send_type_text_xtest(text: &str) -> Result<()> {
         .get(..kpm)
         .and_then(|s| s.iter().copied().find(|&k| k != 0))
         .unwrap_or(50);
-    // Preflight reserves a distinct slot for every unmapped glyph. Retain each
-    // reservation through delivery, and wait for a participating client before
-    // allowing the guard-owning preflight call to restore the mappings.
-    let borrowed_keys = std::cell::RefCell::new(std::collections::HashSet::new());
-    let needs_borrowed_keys = text
-        .chars()
-        .any(|ch| char_to_keycode_shift(&mapping, mpx_keyboard::keysym_for_char(ch)).is_none());
-    let app_events = if needs_borrowed_keys {
-        let barrier = x11_app_events::AppEventBarrier::focused(&conn)?;
-        if barrier.is_none() {
-            tracing::warn!("Focused X11 client does not advertise _NET_WM_PING; borrowed-key application delivery remains unverified");
-        }
-        barrier
-    } else {
-        None
-    };
+    let client = RefCell::new(TextClient::new(&conn, None));
     type_text_in_spare_batches(
         text,
         &mapping,
-        |ch, mapping| {
-            let (keycode, guard) = keycode_for_keysym(
-                &conn,
-                mapping,
-                mpx_keyboard::keysym_for_char(ch),
-                &ch.to_string(),
-            )?;
-            if guard.is_some() {
-                borrowed_keys.borrow_mut().insert(keycode);
-            }
-            Ok((keycode, guard))
-        },
+        |ch, mapping| text_keycode(&mut client.borrow_mut(), mapping, ch),
         |keycode, needs_shift| {
+            client.borrow_mut().record_recipient(keycode);
             if needs_shift {
                 conn.xtest_fake_input(KEY_PRESS_EVENT, shift_kc, 0, x11rb::NONE, 0, 0, 0)?;
             }
@@ -3643,15 +3553,9 @@ pub fn send_type_text_xtest(text: &str) -> Result<()> {
             }
             conn.flush()?;
             sleep(Duration::from_millis(KEY_DELAY_MS));
-            if borrowed_keys.borrow().contains(&keycode) {
-                if let Some(barrier) = &app_events {
-                    // A timeout leaves delivery unknown and stops the remaining
-                    // sequence; no prefix is replayed or rolled back.
-                    barrier.acknowledge()?;
-                }
-            }
             Ok(())
         },
+        || client.borrow_mut().release(),
     )?;
     // Round-trip so the server delivers the final character's key events before
     // this short-lived connection drops (see send_key_xtest — keyboard XTEST
@@ -4248,83 +4152,8 @@ pub(crate) fn key_name_to_keysym(key: &str) -> Result<u32> {
 mod key_name_alias_tests {
     use super::{
         char_to_keycode_shift, key_name_to_keysym, reserve_spare_keycode,
-        type_text_in_spare_batches, type_text_with_preflight, GetKeyboardMappingReply,
+        type_text_in_spare_batches, GetKeyboardMappingReply,
     };
-
-    #[test]
-    fn text_preflight_failure_leaves_target_and_events_unchanged() {
-        let mapping = GetKeyboardMappingReply {
-            keysyms_per_keycode: 2,
-            sequence: 0,
-            keysyms: vec!['a' as u32, 'A' as u32],
-        };
-        for text in ["約ab", "aa約", "a約a"] {
-            let mut target = String::from("existing");
-            let mut events = Vec::new();
-            let result = type_text_with_preflight::<()>(
-                text,
-                &mapping,
-                |_, _| anyhow::bail!("no spare keycode"),
-                |keycode, shift| {
-                    events.extend([keycode, keycode]);
-                    target.push(if shift { 'A' } else { 'a' });
-                    Ok(())
-                },
-            );
-            assert!(result
-                .unwrap_err()
-                .to_string()
-                .starts_with("typed 0 of 3 characters"));
-            assert!(events.is_empty());
-            assert_eq!(target, "existing");
-        }
-    }
-
-    #[test]
-    fn text_preflight_requires_a_spare_for_each_distinct_unmapped_character() {
-        let mapping = GetKeyboardMappingReply {
-            keysyms_per_keycode: 2,
-            sequence: 0,
-            keysyms: vec!['a' as u32, 'A' as u32, 0, 0],
-        };
-        let mut target = String::from("existing");
-        let mut events = Vec::new();
-        let error = type_text_with_preflight::<()>(
-            "a你好",
-            &mapping,
-            |ch, mapping| {
-                reserve_spare_keycode(
-                    mapping,
-                    super::mpx_keyboard::keysym_for_char(ch),
-                    |_, _, _, _| Ok(()),
-                )
-                .map(|(keycode, guard)| (keycode, Some(guard)))
-            },
-            |keycode, _| {
-                events.push(keycode);
-                target.push('a');
-                Ok(())
-            },
-        )
-        .unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            format!(
-                "typed 0 of 3 characters: the text needs 2 spare keycodes: no spare keycode available to remap keysym 0x{:X}",
-                super::mpx_keyboard::keysym_for_char('好')
-            )
-        );
-        assert!(events.is_empty());
-        assert_eq!(target, "existing");
-    }
-
-    struct Restore<'a>(&'a std::cell::Cell<usize>);
-
-    impl Drop for Restore<'_> {
-        fn drop(&mut self) {
-            self.0.set(self.0.get() + 1);
-        }
-    }
 
     #[test]
     fn text_batches_types_more_distinct_unmapped_characters_than_spares() {
@@ -4359,6 +4188,7 @@ mod key_name_alias_tests {
                 log.borrow_mut().push(("send", keycode));
                 Ok(())
             },
+            || true,
         )
         .unwrap();
         assert_eq!(
@@ -4400,6 +4230,7 @@ mod key_name_alias_tests {
                 events.push(keycode);
                 Ok(())
             },
+            || true,
         )
         .unwrap_err();
         assert_eq!(error.to_string(), "typed 2 of 3 characters: keymap changed");
@@ -4407,102 +4238,38 @@ mod key_name_alias_tests {
     }
 
     #[test]
-    fn text_preflight_restores_every_remap_after_success_and_failure() {
+    fn text_batches_stop_before_rebinding_keycodes_the_client_has_not_read() {
         let mapping = GetKeyboardMappingReply {
             keysyms_per_keycode: 2,
             sequence: 0,
-            keysyms: vec!['a' as u32, 'A' as u32, 0, 0, 0, 0],
+            keysyms: vec!['a' as u32, 'A' as u32, 0, 0],
         };
-        for (text, fail_send, ok, sent) in [
-            ("你好你a", false, true, 4),
-            ("你好约", false, false, 0),
-            ("你好", true, false, 1),
+        for (text, result) in [
+            ("你", Err("typed 1 of 1 characters: the client has not confirmed reading borrowed keys; delivery is unknown, inspect before retrying")),
+            ("你好", Err("typed 1 of 2 characters: the client has not confirmed reading borrowed keys; delivery is unknown, inspect before retrying")),
         ] {
-            let restored = std::cell::Cell::new(0);
-            let mut events = 0;
-            let result = type_text_with_preflight(
+            let mut events = Vec::new();
+            let typed = type_text_in_spare_batches(
                 text,
                 &mapping,
                 |ch, mapping| {
                     reserve_spare_keycode(
                         mapping,
                         super::mpx_keyboard::keysym_for_char(ch),
-                        |_, _, _, _| Ok(Restore(&restored)),
+                        |_, _, _, _| Ok(()),
                     )
                     .map(|(keycode, guard)| (keycode, Some(guard)))
                 },
-                |_, _| {
-                    events += 1;
-                    if fail_send {
-                        anyhow::bail!("send failed");
-                    }
+                |keycode, _| {
+                    events.push(keycode);
                     Ok(())
                 },
-            );
-            assert_eq!(result.is_ok(), ok, "{text}");
-            drop(result);
-            assert_eq!(restored.get(), 2, "{text}");
-            assert_eq!(events, sent, "{text}");
+                || false,
+            )
+            .map(|()| events)
+            .map_err(|error| error.to_string());
+            assert_eq!(typed, result.map_err(String::from), "{text}");
         }
-    }
-
-    #[test]
-    fn text_preflight_preserves_shift_order_and_reuses_remaps() {
-        let mapping = GetKeyboardMappingReply {
-            keysyms_per_keycode: 2,
-            sequence: 0,
-            keysyms: vec!['a' as u32, 'A' as u32, 0, 0, 0, 0],
-        };
-        let mut remaps = 0;
-        let mut events = Vec::new();
-        type_text_with_preflight::<()>(
-            "aA你好你",
-            &mapping,
-            |ch, mapping| {
-                remaps += 1;
-                reserve_spare_keycode(
-                    mapping,
-                    super::mpx_keyboard::keysym_for_char(ch),
-                    |_, _, _, _| Ok(()),
-                )
-                .map(|(keycode, guard)| (keycode, Some(guard)))
-            },
-            |keycode, shift| {
-                events.push((keycode, shift));
-                Ok(())
-            },
-        )
-        .unwrap();
-        assert_eq!(remaps, 2);
-        assert_eq!(
-            events,
-            [(8, false), (8, true), (10, false), (9, false), (10, false)]
-        );
-    }
-
-    #[test]
-    fn text_preflight_preserves_keys_with_symbols_in_later_columns() {
-        let mapping = GetKeyboardMappingReply {
-            keysyms_per_keycode: 4,
-            sequence: 0,
-            keysyms: vec!['a' as u32, 'A' as u32, 'b' as u32, 0],
-        };
-        let mut events = Vec::new();
-        type_text_with_preflight::<()>(
-            "bAa",
-            &mapping,
-            |ch, mapping| {
-                assert_eq!(ch, 'b');
-                assert!(mapping.keysyms.contains(&(ch as u32)));
-                Ok((8, None))
-            },
-            |keycode, shift| {
-                events.push((keycode, shift));
-                Ok(())
-            },
-        )
-        .unwrap();
-        assert_eq!(events, [(8, false), (8, true), (8, false)]);
     }
 
     #[test]
@@ -4666,6 +4433,211 @@ fn keycode_for_keysym<'a>(
         format!("Keysym 0x{keysym:X} not in keyboard map for key '{key}' and no spare keycode could be remapped")
     })?;
     Ok((keycode, Some(guard)))
+}
+
+fn text_keycode(
+    client: &mut TextClient<'_>,
+    mapping: &mut GetKeyboardMappingReply,
+    ch: char,
+) -> Result<(u8, Option<()>)> {
+    let keysym = mpx_keyboard::keysym_for_char(ch);
+    let (keycode, guard) = keycode_for_keysym(client.conn, mapping, keysym, &ch.to_string())?;
+    let Some(guard) = guard else {
+        return Ok((keycode, None));
+    };
+    client.borrowed.push(guard);
+    if let Some(window) = client.recipient() {
+        client.ping(window);
+    }
+    Ok((keycode, Some(())))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClientSync {
+    Confirmed,
+    Unsupported,
+    Unanswered,
+}
+
+struct TextClient<'a> {
+    conn: &'a RustConnection,
+    target: Option<Window>,
+    borrowed: Vec<RemappedKeycode<'a>>,
+    sent: Vec<Window>,
+    unanswered: Vec<Window>,
+}
+
+impl<'a> TextClient<'a> {
+    fn new(conn: &'a RustConnection, target: Option<Window>) -> Self {
+        Self {
+            conn,
+            target,
+            borrowed: Vec::new(),
+            sent: Vec::new(),
+            unanswered: Vec::new(),
+        }
+    }
+
+    fn recipient(&self) -> Option<Window> {
+        self.target.or_else(|| {
+            let cookie = self.conn.get_input_focus().ok()?;
+            cookie.reply().ok().map(|reply| reply.focus)
+        })
+    }
+
+    fn record_recipient(&mut self, keycode: u8) {
+        if !self.borrowed.iter().any(|guard| guard.keycode == keycode) {
+            return;
+        }
+        if let Some(window) = self.recipient() {
+            if !self.sent.contains(&window) {
+                self.sent.push(window);
+            }
+        }
+    }
+
+    fn ping(&mut self, window: Window) {
+        if self.unanswered.contains(&window) {
+            return;
+        }
+        if sync_client(self.conn, Some(window)) == ClientSync::Unanswered {
+            self.unanswered.push(window);
+        }
+    }
+
+    fn release(&mut self) -> bool {
+        let sent = std::mem::take(&mut self.sent);
+        for &window in &sent {
+            self.ping(window);
+        }
+        self.borrowed.clear();
+        let unanswered = std::mem::take(&mut self.unanswered);
+        !sent.iter().any(|window| unanswered.contains(window))
+    }
+}
+
+impl Drop for TextClient<'_> {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+fn is_text_client_reply(
+    event: &ClientMessageEvent,
+    root: Window,
+    protocols: Atom,
+    ping: Atom,
+    timestamp: Timestamp,
+    client: Window,
+) -> bool {
+    event.window == root
+        && event.type_ == protocols
+        && event.format == 32
+        && event.data.as_data32() == [ping, timestamp, client, 0, 0]
+}
+
+#[cfg(test)]
+mod borrowed_key_reply_tests {
+    use super::*;
+    #[test]
+    fn only_the_exact_client_timestamp_and_protocol_reply_releases_a_borrowed_key() {
+        let event = ClientMessageEvent::new(32, 1, 2u32, [3, 4, 5, 0, 0]);
+        assert!(is_text_client_reply(&event, 1, 2, 3, 4, 5));
+        for (root, protocols, ping, timestamp, client) in [
+            (9, 2, 3, 4, 5),
+            (1, 9, 3, 4, 5),
+            (1, 2, 9, 4, 5),
+            (1, 2, 3, 9, 5),
+            (1, 2, 3, 4, 9),
+        ] {
+            assert!(!is_text_client_reply(
+                &event, root, protocols, ping, timestamp, client
+            ));
+        }
+        let wrong_format = ClientMessageEvent::new(8, 1, 2u32, [3, 4, 5, 0, 0]);
+        assert!(!is_text_client_reply(&wrong_format, 1, 2, 3, 4, 5));
+        let changed_reserved_fields = ClientMessageEvent::new(32, 1, 2u32, [3, 4, 5, 8, 0]);
+        assert!(!is_text_client_reply(
+            &changed_reserved_fields,
+            1,
+            2,
+            3,
+            4,
+            5
+        ));
+    }
+}
+
+fn sync_client(conn: &RustConnection, window: Option<Window>) -> ClientSync {
+    let atom = |name: &str| {
+        conn.intern_atom(false, name.as_bytes())
+            .ok()?
+            .reply()
+            .ok()
+            .map(|reply| reply.atom)
+    };
+    let (Some(window), Some(protocols), Some(ping)) =
+        (window, atom("WM_PROTOCOLS"), atom("_NET_WM_PING"))
+    else {
+        return ClientSync::Unsupported;
+    };
+    let Some(window) = ping_window(conn, window, protocols, ping) else {
+        return ClientSync::Unsupported;
+    };
+    let root = conn.setup().roots[0].root;
+    let listen = ChangeWindowAttributesAux::new().event_mask(EventMask::SUBSTRUCTURE_NOTIFY);
+    let serial = PING_SERIAL.fetch_add(1, Ordering::Relaxed).max(1);
+    let event = ClientMessageEvent::new(32, window, protocols, [ping, serial, window, 0, 0]);
+    if conn.change_window_attributes(root, &listen).is_err()
+        || conn
+            .send_event(false, window, EventMask::NO_EVENT, event)
+            .is_err()
+        || conn.flush().is_err()
+    {
+        return ClientSync::Unanswered;
+    }
+    let deadline = std::time::Instant::now() + PING_TIMEOUT;
+    while std::time::Instant::now() < deadline {
+        match conn.poll_for_event() {
+            Ok(Some(x11rb::protocol::Event::ClientMessage(pong)))
+                if is_text_client_reply(&pong, root, protocols, ping, serial, window) =>
+            {
+                return ClientSync::Confirmed;
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => sleep(Duration::from_millis(1)),
+            Err(_) => return ClientSync::Unanswered,
+        }
+    }
+    ClientSync::Unanswered
+}
+
+fn ping_window(
+    conn: &RustConnection,
+    focus: Window,
+    protocols: Atom,
+    ping: Atom,
+) -> Option<Window> {
+    if focus == x11rb::NONE || focus == u32::from(InputFocus::POINTER_ROOT) {
+        return None;
+    }
+    let client = !conn.setup().resource_id_mask;
+    let mut window = focus;
+    while window != x11rb::NONE && window & client == focus & client {
+        let protocols = conn
+            .get_property(false, window, protocols, AtomEnum::ATOM, 0, 64)
+            .ok()?
+            .reply()
+            .ok()?;
+        if protocols
+            .value32()
+            .is_some_and(|mut atoms| atoms.any(|atom| atom == ping))
+        {
+            return Some(window);
+        }
+        window = conn.query_tree(window).ok()?.reply().ok()?.parent;
+    }
+    None
 }
 
 fn modifiers_to_state(modifiers: &[&str]) -> KeyButMask {

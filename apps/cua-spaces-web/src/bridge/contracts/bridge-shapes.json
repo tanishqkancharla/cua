@@ -1306,6 +1306,16 @@
             "null"
           ]
         },
+        "fix": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RuntimeFix"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "hostArch": {
           "type": "string"
         },
@@ -1470,6 +1480,78 @@
         "actionLabel"
       ]
     },
+    "MachinePageRow": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "online": {
+          "type": "boolean"
+        },
+        "os": {
+          "type": "string"
+        },
+        "via": {
+          "type": "string"
+        },
+        "current": {
+          "type": "boolean"
+        },
+        "device": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "deviceOnly": {
+          "type": "boolean"
+        },
+        "spaceId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "stoppedSharing": {
+          "type": "boolean"
+        },
+        "lastSeen": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "status": {
+          "type": "string"
+        },
+        "spaces": {
+          "type": "number"
+        },
+        "spacesLabel": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "online",
+        "os",
+        "via",
+        "current",
+        "device",
+        "deviceOnly",
+        "spaceId",
+        "stoppedSharing",
+        "lastSeen",
+        "status",
+        "spaces",
+        "spacesLabel"
+      ]
+    },
     "MachineRow": {
       "type": "object",
       "properties": {
@@ -1566,6 +1648,15 @@
               "type": "null"
             }
           ]
+        },
+        "merged": {
+          "type": "boolean"
+        },
+        "status": {
+          "type": "string"
+        },
+        "spacesLabel": {
+          "type": "string"
         }
       },
       "required": [
@@ -1672,6 +1763,12 @@
         },
         "read": {
           "type": "boolean"
+        },
+        "space": {
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -1879,6 +1976,43 @@
         "visible",
         "appId",
         "targetEpoch"
+      ]
+    },
+    "RuntimeFix": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "enum": [
+            "install-docker",
+            "start-docker",
+            null
+          ]
+        },
+        "label": {
+          "type": "string"
+        },
+        "note": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "busy": {
+          "type": "boolean"
+        },
+        "termsUrl": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "action",
+        "label",
+        "note",
+        "busy",
+        "termsUrl"
       ]
     },
     "SessionSnapshot": {
@@ -2203,6 +2337,12 @@
             "label",
             "registered"
           ]
+        },
+        "accountUrl": {
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -2339,6 +2479,9 @@
         "powerState": {
           "type": "string"
         },
+        "stopReason": {
+          "type": "string"
+        },
         "cloud": {
           "type": "string"
         },
@@ -2461,6 +2604,101 @@
         "storage",
         "mount",
         "cache"
+      ]
+    },
+    "TeamsList": {
+      "type": "object",
+      "properties": {
+        "teams": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "alias": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "role": {
+                "type": "string"
+              },
+              "plan": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "alias",
+              "name",
+              "role",
+              "plan"
+            ]
+          }
+        },
+        "currentTeamId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "teams",
+        "currentTeamId"
+      ]
+    },
+    "UpdateState": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "enum": [
+            "idle",
+            "checking",
+            "available",
+            "downloading",
+            "downloaded",
+            "error"
+          ]
+        },
+        "currentVersion": {
+          "type": "string"
+        },
+        "version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "percent": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "notesUrl": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "status",
+        "currentVersion",
+        "version",
+        "percent",
+        "notesUrl",
+        "message"
       ]
     },
     "VolumeOverview": {
@@ -2763,6 +3001,12 @@
           "items": {
             "$ref": "#/$defs/GpuChoice"
           }
+        },
+        "nameSeed": {
+          "type": [
+            "number",
+            "null"
+          ]
         }
       },
       "required": [
@@ -3390,6 +3634,12 @@
               "type": "null"
             }
           ]
+        },
+        "rows": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MachinePageRow"
+          }
         }
       },
       "required": [
@@ -3571,6 +3821,12 @@
             "label",
             "registered"
           ]
+        },
+        "accountUrl": {
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -3724,6 +3980,12 @@
               ]
             },
             "error": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "stopReason": {
               "type": [
                 "string",
                 "null"
@@ -4083,6 +4345,66 @@
         ]
       }
     },
+    "checklist.get": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "type": "object",
+          "properties": {
+            "done": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "dismissed": {
+              "type": "boolean"
+            },
+            "shown": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "done",
+            "dismissed",
+            "shown"
+          ]
+        }
+      },
+      "required": [
+        "state"
+      ]
+    },
+    "checklist.send": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "type": "object",
+          "properties": {
+            "done": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "dismissed": {
+              "type": "boolean"
+            },
+            "shown": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "done",
+            "dismissed",
+            "shown"
+          ]
+        }
+      },
+      "required": [
+        "state"
+      ]
+    },
     "clouds.connect": {
       "$ref": "#/$defs/CloudProviderWire"
     },
@@ -4200,6 +4522,9 @@
     "host.action": {
       "$ref": "#/$defs/HostStatus"
     },
+    "host.joinWithCode": {
+      "$ref": "#/$defs/HostStatus"
+    },
     "host.openSettings": {
       "type": "null"
     },
@@ -4286,6 +4611,9 @@
       }
     },
     "notifications.markAllRead": {
+      "type": "null"
+    },
+    "notifications.markRead": {
       "type": "null"
     },
     "presence.join": {
@@ -4526,6 +4854,9 @@
         "type": "string"
       }
     },
+    "spaces.fixRuntime": {
+      "type": "null"
+    },
     "spaces.list": {
       "type": "array",
       "items": {
@@ -4713,6 +5044,9 @@
       "items": {
         "type": "string"
       }
+    },
+    "teams.list": {
+      "$ref": "#/$defs/TeamsList"
     },
     "telemetry.track": {
       "type": "null"
@@ -4999,6 +5333,12 @@
           "supported"
         ]
       }
+    },
+    "update.get": {
+      "$ref": "#/$defs/UpdateState"
+    },
+    "update.install": {
+      "$ref": "#/$defs/UpdateState"
     },
     "volume.approve": {
       "type": "null"
@@ -5513,6 +5853,66 @@
         "methods"
       ]
     },
+    "checklist.get": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "type": "object",
+          "properties": {
+            "done": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "dismissed": {
+              "type": "boolean"
+            },
+            "shown": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "done",
+            "dismissed",
+            "shown"
+          ]
+        }
+      },
+      "required": [
+        "state"
+      ]
+    },
+    "checklist.send": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "type": "object",
+          "properties": {
+            "done": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "dismissed": {
+              "type": "boolean"
+            },
+            "shown": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "done",
+            "dismissed",
+            "shown"
+          ]
+        }
+      },
+      "required": [
+        "state"
+      ]
+    },
     "clouds.connect": {
       "$ref": "#/$defs/CloudProviderWire"
     },
@@ -5634,6 +6034,16 @@
         }
       ]
     },
+    "host.joinWithCode": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/WkHostState"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "host.openSettings": {
       "type": "null"
     },
@@ -5736,6 +6146,9 @@
       }
     },
     "notifications.markAllRead": {
+      "type": "null"
+    },
+    "notifications.markRead": {
       "type": "null"
     },
     "relay.usage": {
@@ -6050,6 +6463,9 @@
         "type": "string"
       }
     },
+    "teams.list": {
+      "$ref": "#/$defs/TeamsList"
+    },
     "telemetry.track": {
       "type": "null"
     },
@@ -6346,6 +6762,12 @@
         ]
       }
     },
+    "update.get": {
+      "$ref": "#/$defs/UpdateState"
+    },
+    "update.install": {
+      "$ref": "#/$defs/UpdateState"
+    },
     "volume.approve": {
       "type": "null"
     },
@@ -6387,6 +6809,9 @@
       "type": "null"
     },
     "window.setDragRegions": {
+      "type": "null"
+    },
+    "window.setDropTargets": {
       "type": "null"
     }
   },

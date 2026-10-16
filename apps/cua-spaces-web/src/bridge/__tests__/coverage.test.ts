@@ -15,7 +15,9 @@ import { KEYVAULT_MANAGE_ARGS } from "../ops/keyvault-manage";
 import { KEYVAULT_SETUP_ARGS } from "../ops/keyvault-setup";
 import { STREAM_ARGS } from "../ops/stream";
 import { RELAY_USAGE_ARGS } from "../ops/relay-usage";
+import { CHECKLIST_ARGS } from "../ops/checklist";
 import { PRESENCE_ARGS } from "../ops/presence";
+import { RUNTIME_FIX_ARGS } from "../ops/runtime-fix";
 import type { HostWindow } from "../detect";
 import { ELECTRON_BRIDGE_CHANNEL } from "../electron-channels";
 import { OPERATIONS, type OpArgs, type OpName } from "../protocol";
@@ -86,6 +88,8 @@ const ARGS: { [K in OpName]: OpArgs<K> } = {
   "about.get": {},
   "about.set": { channel: "beta" },
   "about.checkNow": {},
+  "update.get": {},
+  "update.install": {},
   "experiments.get": {},
   "experiments.set": { experiments: { cuaVolume: true } },
   "loginItem.get": {},
@@ -101,10 +105,12 @@ const ARGS: { [K in OpName]: OpArgs<K> } = {
   "devices.createPairingCode": { team: null },
   "devices.pairingCodes": {},
   "devices.revokePairingCode": { id: "pc_demo0" },
+  "teams.list": {},
   "storage.get": {},
   "storage.run": { request: { kind: "clear-cache" } },
   "notifications.list": {},
   "notifications.markAllRead": {},
+  "notifications.markRead": { ids: ["n1"] },
   "telemetry.track": { signals: [{ type: "step", step: "app_launched", ok: true }] },
   "spaces.usage": { spaceId: "s1" },
   "spaces.windows": { spaceId: "s1" },
@@ -114,13 +120,16 @@ const ARGS: { [K in OpName]: OpArgs<K> } = {
   "spaces.droppedFiles": { names: ["notes.txt"] },
   "spaces.sendFiles": { spaceId: "s1", paths: ["/tmp/notes.txt"] },
   "host.setUp": { request: { mode: "relay" } },
+  "host.joinWithCode": { code: "K7QM-4XPB-2RHD" },
   "host.action": { action: "stop-sharing" },
   "host.openSettings": { url: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility" },
   "startup.get": {},
   "startup.act": { action: "allowAccess" },
   ...STREAM_ARGS,
   ...RELAY_USAGE_ARGS,
+  ...CHECKLIST_ARGS,
   ...PRESENCE_ARGS,
+  ...RUNTIME_FIX_ARGS,
 };
 
 const unsupportedOn = (op: OpName, host: "webkit" | "tauri") =>
@@ -155,6 +164,7 @@ function webkitResult(method: string): unknown {
       return { completed: true, mode: "client" };
     case "host.status":
     case "host.setUp":
+    case "host.joinWithCode":
     case "host.action":
       return { configured: false, sharing: false, serviceInstalled: false, serviceRunning: false, serviceKind: "process", clients: [], permissions: [], shareDesktop: true, provideSpaces: false, maxSpaces: 0 };
     case "keyvault.approve":

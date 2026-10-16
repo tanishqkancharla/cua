@@ -284,6 +284,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return false
     }
 
+    /// `cua://add/<CODE>` links: the page's Machines at the code, which it
+    /// confirms before joining. Never joins by itself.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        guard let route = urls.lazy.compactMap(JoinWithCode.route(for:)).first else { return }
+        NSApp.activate()
+        WebUIWindowController.show(model: Self.model, at: .path(route))
+    }
+
     func start(_ model: AppModel) {
         guard !started else { return }
         started = true
@@ -294,6 +302,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.closeWebUI = { WebUIWindowController.closeShared() }
         let controller = NotchController(model: model.notch)
         controller.sidebar = model.dropTargets
+        controller.pageTiles = model.pageDropTargets
         controller.showMain = { WebUIWindowController.actions?.openMain() }
         // Each of these shows its result in the main window (the New UI
         // window while its experiment is on): open it when it was closed

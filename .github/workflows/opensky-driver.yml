@@ -72,6 +72,13 @@ jobs:
         run: |
           mkdir -p ../../../artifacts/opensky-build
           cargo build --locked -p cua-driver 2>&1 | tee ../../../artifacts/opensky-build/build.log
+      - name: Retain this platform's public CLI and MCP contract
+        if: always() && steps.compile.outcome == 'success'
+        working-directory: libs/cua-driver/rust
+        run: |
+          binary=target/debug/cua-driver
+          if [[ "$RUNNER_OS" == "Windows" ]]; then binary="$binary.exe"; fi
+          CUA_DRIVER_RS_HOME="$RUNNER_TEMP/opensky-contract-dump" "$binary" dump-docs --type all --pretty > ../../../artifacts/opensky-build/public-contract-native.json
       - name: Isolated X11 keyboard contracts
         if: always() && runner.os == 'Linux' && steps.compile.outcome == 'success'
         working-directory: libs/cua-driver/rust

@@ -51,6 +51,7 @@ pub const NAME_TCC_SCREEN_RECORDING: &str = "tcc_screen_recording";
 pub const NAME_TCC_EVENT_POSTING: &str = "tcc_event_posting";
 pub const NAME_AX_CAPABILITY: &str = "ax_capability";
 pub const NAME_SCREEN_CAPTURE_CAPABILITY: &str = "screen_capture_capability";
+pub const NAME_WINDOWSERVER_CONNECTION: &str = "windowserver_connection";
 
 /// Checks whose failure marks the whole report as `failed` (vs
 /// `degraded`). Binary, platform, and the MCP session itself are
@@ -388,7 +389,7 @@ Canonical check names:
   macOS  : binary_version, platform_supported, session_active,
            bundle_identity, tcc_accessibility, tcc_screen_recording,
            tcc_event_posting (read-only CGPreflightPostEventAccess),
-           ax_capability, screen_capture_capability
+           ax_capability, screen_capture_capability, windowserver_connection
   Windows: binary_version, platform_supported, session_active,
            ax_capability (via UIA), screen_capture_capability (via DXGI)
   Linux  : binary_version, platform_supported, session_active,
