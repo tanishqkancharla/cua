@@ -512,8 +512,26 @@ async fn invoke_daemon_tool(
     // whether an unapproved name happens to be registered. This also preserves
     // the MCP policy contract now that every call passes through the daemon.
     if let Err(error) = cua_driver_core::authorization::authorize_tool_call(&tool_name, &args) {
-        observe_daemon_error(observation, 1);
-        return DaemonResponse::err(error.to_string(), 1);
+        // Authorization has not admitted registry or platform dispatch. Keep
+        // that terminal refusal machine-readable over the CLI/socket path;
+        // a transport error would incorrectly leave host completion unknown.
+        let code = match &error {
+            cua_driver_core::policy::AuthorizationError::Denied(_) => "permission_denied",
+            cua_driver_core::policy::AuthorizationError::Evaluation(_) => "policy_evaluation_error",
+            cua_driver_core::policy::AuthorizationError::Loading(_) => "policy_loading_error",
+        };
+        let message = error.to_string();
+        let refusal = cua_driver_core::protocol::ToolResult::error(message.clone())
+            .with_structured(serde_json::json!({
+                "status": "refused",
+                "refusal": { "code": code, "message": message },
+                "delivery": "not_dispatched"
+            }));
+        return DaemonResponse::ok(observe_daemon_result(
+            observation,
+            None,
+            serde_json::to_value(refusal).expect("authorization refusal is serializable"),
+        ));
     }
 
     if !known_tool {

@@ -10,6 +10,23 @@ Cua Driver 0.15 separates two facts that earlier releases mixed together:
 The driver reports these facts. The agent harness owns task meaning, visual
 reading, stop/retry decisions, and movement through the action ladder.
 
+## Daemon authorization refusal before dispatch
+
+A direct daemon/CLI request rejected by authorization before registry or platform
+invocation returns an error tool envelope with the original diagnostic and:
+
+```json
+{"status":"refused","refusal":{"code":"permission_denied","message":"Permission denied: …"},"delivery":"not_dispatched"}
+```
+
+Policy loading and evaluation failures at this same boundary use
+`policy_loading_error` and `policy_evaluation_error`. This is an admission result,
+separate from a platform `ActionResult`. The transport succeeds, the tool fails,
+and the CLI exits nonzero while retaining the complete structured envelope.
+Clients can finish that request and admit following authorized work. Permissions
+are unchanged. A timeout, disconnect, or post-dispatch uncertainty retains its
+existing unknown-delivery semantics; it is never replayed or inferred from prose.
+
 ## MCP action result
 
 Every successful action returns a closed `structuredContent` object:

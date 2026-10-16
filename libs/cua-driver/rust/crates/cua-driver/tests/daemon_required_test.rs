@@ -436,24 +436,7 @@ deny:
     ]);
     assert!(driver.available(), "bounded test daemon failed to start");
 
-    let allowed = driver.call("get_config", serde_json::json!({}));
-    assert!(
-        !allowed.is_error(),
-        "allowed call failed: {}",
-        allowed.text()
-    );
-
-    let denied = driver.call("list_apps", serde_json::json!({}));
-    assert!(denied.is_error());
-    assert!(denied
-        .text()
-        .contains("capability manifest denies tool 'list_apps'"));
-
-    let undeclared = driver.call("get_screen_size", serde_json::json!({}));
-    assert!(undeclared.is_error());
-    assert!(undeclared
-        .text()
-        .contains("outside the capability manifest"));
+    assert_manifest_narrows(&mut driver);
 }
 
 #[test]
@@ -522,6 +505,10 @@ fn assert_manifest_narrows(driver: &mut CliDriver) {
         denied.text()
     );
 
+    assert_eq!(denied.structured()["status"], "refused");
+    assert_eq!(denied.structured()["refusal"]["code"], "permission_denied");
+    assert_eq!(denied.structured()["delivery"], "not_dispatched");
+
     let undeclared = driver.call("get_screen_size", serde_json::json!({}));
     assert!(undeclared.is_error());
     assert!(
@@ -531,4 +518,19 @@ fn assert_manifest_narrows(driver: &mut CliDriver) {
         "unexpected undeclared refusal: {}",
         undeclared.text()
     );
+    assert_eq!(undeclared.structured()["status"], "refused");
+    assert_eq!(
+        undeclared.structured()["refusal"]["code"],
+        "permission_denied"
+    );
+    assert_eq!(undeclared.structured()["delivery"], "not_dispatched");
+    // Denial is terminal for this request, not a broken daemon transport.
+    // An allowlisted observation still works after both denied calls.
+    let following = driver.call("get_config", serde_json::json!({}));
+    assert!(
+        !following.is_error(),
+        "allowed observation after refusal: {}",
+        following.text()
+    );
+    assert_eq!(following.structured(), allowed.structured());
 }
