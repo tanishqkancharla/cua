@@ -218,11 +218,8 @@ pub const REPLY_DEADLINE: Duration = Duration::from_millis(crate::tool_schema::T
 /// slow accessibility walks and large screenshots are supported.
 #[cfg(unix)]
 pub fn send_request(socket_path: &str, request: &DaemonRequest) -> anyhow::Result<DaemonResponse> {
-    use std::io::Read;
     use std::os::unix::net::UnixStream;
     use std::time::Instant;
-
-    const READ_POLL: Duration = Duration::from_secs(10);
 
     let mut stream = UnixStream::connect(socket_path)
         .map_err(|error| anyhow::anyhow!("connect to {socket_path}: {error}"))?;
@@ -233,7 +230,23 @@ pub fn send_request(socket_path: &str, request: &DaemonRequest) -> anyhow::Resul
     let write_deadline = Instant::now() + REPLY_DEADLINE;
     crate::socket_io::write_all_with_retry(&mut writer, line.as_bytes(), write_deadline)?;
 
-    let reply_deadline = Instant::now() + REPLY_DEADLINE;
+    read_daemon_response(&mut stream, Instant::now() + REPLY_DEADLINE)
+}
+
+#[cfg(unix)]
+fn read_daemon_response(
+    stream: &mut std::os::unix::net::UnixStream,
+    reply_deadline: std::time::Instant,
+) -> anyhow::Result<DaemonResponse> {
+    use std::io::Read;
+    use std::os::fd::AsRawFd;
+    use std::time::Instant;
+
+    const READ_POLL: Duration = Duration::from_secs(10);
+    // Darwin can reject SO_RCVTIMEO with EINVAL after a peer closes even
+    // though its complete reply is still buffered. Poll a nonblocking socket
+    // against the absolute deadline; never change socket timeouts after send.
+    stream.set_nonblocking(true)?;
     let mut buffer = Vec::with_capacity(64 * 1024);
     let mut chunk = [0_u8; 64 * 1024];
     let response_line = loop {
@@ -243,12 +256,36 @@ pub fn send_request(socket_path: &str, request: &DaemonRequest) -> anyhow::Resul
         let remaining = reply_deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             anyhow::bail!(
-                "timed out after {REPLY_DEADLINE:?} waiting for daemon response (received {} bytes so far); \
+                "reply deadline elapsed waiting for daemon response (received {} bytes so far); \
                  the daemon may still be running the request",
                 buffer.len()
             );
         }
-        stream.set_read_timeout(Some(remaining.min(READ_POLL)))?;
+        let mut ready = libc::pollfd {
+            fd: stream.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // poll uses whole milliseconds. Round a nonzero remainder upward,
+        // then recompute it after every wakeup or interrupted wait.
+        let wait_ms = remaining
+            .min(READ_POLL)
+            .as_millis()
+            .saturating_add(1)
+            .min(i32::MAX as u128) as i32;
+        let polled = unsafe { libc::poll(&mut ready, 1, wait_ms) };
+        if polled < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error.into());
+        }
+        if polled == 0 {
+            continue;
+        }
+        // POLLHUP may accompany readable bytes. Drain them before treating
+        // EOF as empty, and preserve the existing newline/EOF framing rules.
         match stream.read(&mut chunk) {
             Ok(0) if buffer.is_empty() => {
                 anyhow::bail!("daemon closed connection without response");
@@ -326,6 +363,79 @@ mod tests {
                 "a tool may use {budget_ms} ms and the client gives up after {REPLY_DEADLINE:?}"
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_closed_peer_keeps_its_buffered_daemon_reply() {
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+        use std::time::Instant;
+        let (mut client, mut peer) = UnixStream::pair().unwrap();
+        peer.write_all(b"{\"ok\":true,\"result\":{\"answer\":42}}\n")
+            .unwrap();
+        drop(peer);
+        let reply =
+            super::read_daemon_response(&mut client, Instant::now() + Duration::from_secs(1))
+                .expect("a complete buffered reply survives the peer closing before the read");
+        assert!(reply.ok);
+        assert_eq!(reply.result.unwrap()["answer"], 42);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_daemon_reply_wait_obeys_its_remaining_deadline() {
+        use std::os::unix::net::UnixStream;
+        use std::time::Instant;
+        let (mut client, _peer) = UnixStream::pair().unwrap();
+        let started = Instant::now();
+        let error = super::read_daemon_response(&mut client, started + Duration::from_millis(25))
+            .expect_err("an open peer without a reply must not wait for the full polling interval");
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(error
+            .to_string()
+            .contains("the daemon may still be running the request"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_daemon_reply_retains_fragments_until_newline_or_closed_peer() {
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+        use std::time::Instant;
+        let (mut client, mut peer) = UnixStream::pair().unwrap();
+        let server = std::thread::spawn(move || {
+            for fragment in [
+                b"{\"ok\":".as_slice(),
+                b"true,\"result\":",
+                b"{\"answer\":42}}\n",
+            ] {
+                peer.write_all(fragment).unwrap();
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+        let reply =
+            super::read_daemon_response(&mut client, Instant::now() + Duration::from_secs(1))
+                .unwrap();
+        server.join().unwrap();
+        assert!(reply.ok);
+        assert_eq!(reply.result.unwrap()["answer"], 42);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_empty_closed_peer_is_not_a_successful_reply() {
+        use std::os::unix::net::UnixStream;
+        use std::time::Instant;
+        let (mut client, peer) = UnixStream::pair().unwrap();
+        drop(peer);
+        let error =
+            super::read_daemon_response(&mut client, Instant::now() + Duration::from_secs(1))
+                .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "daemon closed connection without response"
+        );
     }
 
     #[test]
