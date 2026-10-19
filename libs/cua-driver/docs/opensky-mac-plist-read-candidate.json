@@ -1,0 +1,39 @@
+{
+  "rounds": 3,
+  "samplesPerSourcePerMode": 18,
+  "warmupPerRound": 1,
+  "readOnly": true,
+  "SDKAcceptance": false,
+  "newScoreRows": 0,
+  "newPaidArms": 0,
+  "source": "034fd65a068f303e863af09ab035b12b94dd27e1",
+  "sourceChange": "231c953c08979b5f46d789a59117510fabfe4eb1",
+  "wholeMacPlatformUnits": 681,
+  "ignoredMacDesktopOwners": 6,
+  "canonicalCargoLockOwnerPassed": true,
+  "primitives": {
+    "running": {
+      "rows": 7,
+      "all42RawSamplesIdentical": true,
+      "baselineMedianMs": 129.1946455,
+      "candidateMedianMs": 5.8385415,
+      "ratio": 0.04519182259763234
+    },
+    "all": {
+      "rows": 82,
+      "all42RawSamplesIdentical": true,
+      "baselineMedianMs": 400.10545849999994,
+      "candidateMedianMs": 9.083207999999999,
+      "ratio": 0.02270203469368564
+    }
+  },
+  "baselineSource": "0358524eaa6ca698cb1b86d555ce763b070c49a0",
+  "runtimeSource": "034fd65a068f303e863af09ab035b12b94dd27e1",
+  "upstreamCommit": "https://github.com/trycua/cua/commit/231c953c08979b5f46d789a59117510fabfe4eb1",
+  "status": "Read-only primitive candidate verified; SDK and installed signed driver remain on9e",
+  "installedDriverReplaced": false,
+  "publishedSDKSourcePinChanged": false,
+  "publicProfiler": "crates/platform-macos/examples/app_inventory_read.rs",
+  "publicProfilerDifference": "Same measured Mac body, with explicit non-Mac refusal added.",
+  "unrelatedUpstreamMergeDeferred": "Full unpublished upstream merge has authorization/browser/signing/generated-contract conflicts; this self-contained Mac plist change alone is adopted."
+}
