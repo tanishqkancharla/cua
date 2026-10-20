@@ -94,6 +94,10 @@ portal-libei = ["platform-linux/portal-libei"]
 embed-resource = "2"
 
 [dev-dependencies]
+# Verify the same TLS verifier/root versions resolved by the shipped ureq client.
+webpki = { package = "rustls-webpki", version = "0.103", features = ["ring"] }
+rustls-pki-types = { version = "1", features = ["std"] }
+webpki-roots = "1"
 # Shared integration-test harness (MCP/CLI transports, child reaping, paths,
 # response accessors). Dev-only — never linked into the shipped driver.
 cua-driver-testkit = { path = "../cua-driver-testkit" }
