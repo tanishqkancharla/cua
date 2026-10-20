@@ -71,14 +71,10 @@ jobs:
             attributes: cua-compositor-build
           - name: Rust unit tests
             attributes: cua-driver-linux-rust-unit
-          # Both policy VMs boot the cua-driver package derivation. Building
-          # them in the same job as the package compiles the workspace once
-          # and reuses it from the local store, instead of once per job.
-          - name: driver package and policy VMs
-            attributes: >-
-              cua-driver-build
-              cua-driver-policy-yaml
-              cua-driver-policy-rego
+          # Canonical upstream also boots its policy VMs. Fork validation
+          # builds the same package without starting virtual machines.
+          - name: ${{ github.repository == 'trycua/cua' && 'driver package and policy VMs' || 'driver package' }}
+            attributes: ${{ github.repository == 'trycua/cua' && 'cua-driver-build cua-driver-policy-yaml cua-driver-policy-rego' || 'cua-driver-build' }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - name: Install Nix
