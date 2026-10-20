@@ -1463,9 +1463,12 @@ fn launch_daemon_with_state_and_wait(
     // actually differs from the default, so the common case keeps the
     // shorter `open` argv (and matches Swift's invocation byte-for-byte).
     let app_name = crate::bundle::app_name();
+    let cli_name = crate::bundle::cli_name();
     let app_path = crate::bundle::app_bundle_path();
     let pass_socket = socket_path != crate::serve::default_socket_path();
-    let open_args = daemon_launch_arguments(app_name, socket_path, state, experimental_history);
+    // Resolve the canonical bundle rather than asking LaunchServices to choose
+    // a same-named copy with potentially different code and TCC grants.
+    let open_args = daemon_launch_arguments(&app_path, socket_path, state, experimental_history);
     // Thread the Claude-Code compat flag through to the daemon. Without this
     // the proxy-spawned daemon always called build_macos_registry() (compat
     // hardcoded false), so `opensky-driver mcp --claude-code-computer-use-compat`
@@ -1479,8 +1482,8 @@ fn launch_daemon_with_state_and_wait(
     // pre-existing daemon keeps whatever surface it launched with.
     let status = Cmd::new("/usr/bin/open")
         // `-n` forces a new instance: OpenSkyDriver.app might already be
-        // running from a previous MCP session, and without `-n`, `open
-        // -a` would re-use it and drop our `--args serve`, leaving no
+        // running from a previous MCP session, and without `-n`, `open`
+        // would re-use it and drop our `--args serve`, leaving no
         // daemon up. `-g` keeps the new instance backgrounded —
         // LSUIElement=true in Info.plist already does this but the
         // flag makes it explicit and matches Swift's invocation.
@@ -1498,14 +1501,14 @@ fn launch_daemon_with_state_and_wait(
         return Err(LaunchDaemonError {
             kind: LaunchDaemonErrorKind::Failed,
             message: format!(
-                "`open -n -g -a {app_name} --args serve{}` exited {:?}. \
-             Check that `{app_path}` is installed.",
+                "launching `{app_path}` exited {:?}{}. Check that {app_name} is installed \
+             at that path, then run `{cli_name} permissions grant`.",
+                status.code(),
                 if pass_socket {
                     format!(" --socket {socket_path}")
                 } else {
                     String::new()
                 },
-                status.code()
             ),
         });
     }
@@ -1761,7 +1764,7 @@ fn restart_managed_daemon_if_present(_executable: &std::path::Path) -> bool {
 
 #[cfg(target_os = "macos")]
 fn daemon_launch_arguments(
-    app_name: &str,
+    app: &str,
     socket_path: &str,
     state: &crate::history_runtime::DaemonLaunchState,
     experimental_history: bool,
@@ -1769,8 +1772,7 @@ fn daemon_launch_arguments(
     let mut args = vec![
         "-n".to_owned(),
         "-g".to_owned(),
-        "-a".to_owned(),
-        app_name.to_owned(),
+        app.to_owned(),
         "--args".to_owned(),
         "serve".to_owned(),
     ];
@@ -1881,14 +1883,10 @@ where
         #[cfg(target_os = "macos")]
         {
             let app_name = crate::bundle::app_name();
-            let socket_suffix = if socket_path != crate::serve::default_socket_path() {
-                format!(" --socket {socket_path}")
-            } else {
-                String::new()
-            };
+            let app_path = crate::bundle::app_bundle_path();
             eprintln!(
                 "{}: mcp launched without {app_name}.app's TCC grants; \
-                 auto-launching the daemon via `open -n -g -a {app_name} --args serve{socket_suffix}` \
+                 auto-launching the installed daemon at `{app_path}` \
                  and proxying MCP requests through it.",
                 crate::bundle::cli_name()
             );
@@ -3564,8 +3562,8 @@ fn run_permissions_status(json: bool, socket: Option<String>) {
             format!(
                 "No {app_name} daemon is running under the driver's own identity ({bundle_id}), \
                  so its real TCC status can't be read from this process. \
-                 Run `{cli_name} permissions grant` to grant + verify, or start the daemon \
-                 (`open -n -g -a {app_name} --args serve`) and re-run this command."
+                 Run `{cli_name} permissions grant` to grant + verify and start the daemon, \
+                 then re-run this command."
             )
         };
         if json {
@@ -5779,6 +5777,30 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn daemon_launch_uses_exact_bundle_path_without_name_lookup() {
+        let state = crate::history_runtime::DaemonLaunchState::default();
+        for app in [
+            crate::bundle::app_bundle_path(),
+            "/tmp/Other apps/Ω/OpenSkyDriver.app".to_owned(),
+        ] {
+            for socket in [
+                crate::serve::default_socket_path(),
+                "/tmp/exact-path.sock".to_owned(),
+            ] {
+                let launch = daemon_launch_arguments(&app, &socket, &state, false);
+                assert_eq!(&launch[..5], ["-n", "-g", &app, "--args", "serve"]);
+                assert!(!launch.iter().any(|arg| arg == "-a"));
+                if socket == crate::serve::default_socket_path() {
+                    assert_eq!(launch.len(), 5);
+                } else {
+                    assert_eq!(&launch[5..], ["--socket", &socket]);
+                }
+            }
+        }
+    }
+
     #[test]
     fn history_relaunch_preserves_authorization_mode_and_every_grant() {
         let grants = args(&["capability:a", "capability:b"]);
@@ -5792,8 +5814,12 @@ mod tests {
             grants,
         };
         #[cfg(target_os = "macos")]
-        let launch =
-            daemon_launch_arguments("OpenSkyDriver", "/tmp/history-test.sock", &state, true);
+        let launch = daemon_launch_arguments(
+            &crate::bundle::app_bundle_path(),
+            "/tmp/history-test.sock",
+            &state,
+            true,
+        );
         #[cfg(not(target_os = "macos"))]
         let launch = daemon_process_arguments("history-test.sock", &state, true);
         assert!(launch
