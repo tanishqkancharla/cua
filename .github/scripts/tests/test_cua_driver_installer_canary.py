@@ -79,6 +79,16 @@ def test_canary_uses_default_resolution_on_every_platform(workflow: dict) -> Non
     assert "$env:CUA_DRIVER_RS_HOME = Join-Path $canary" in windows
 
 
+def test_qualification_checks_release_sources_before_rust_build() -> None:
+    qualification = yaml.safe_load((REPO_ROOT / ".github/workflows/opensky-driver.yml").read_text())
+    steps = qualification["jobs"]["build"]["steps"]
+    source = next(entry for entry in steps if entry.get("name") == "Local installer signing and daemon lifetime owners")
+    build = next(entry for entry in steps if entry.get("name") == "Build development executable")
+    assert steps.index(source) < steps.index(build)
+    for owner in (".github/scripts/tests/test_validate_release_versions.py", "libs/cua-driver/scripts/tests/test_install_local.py", "libs/cua-driver/scripts/tests/test_install_local_signing.py", "libs/cua-driver/scripts/tests/test_install_macos_tcc.py"):
+        assert owner in source["run"]
+
+
 def test_failures_open_one_bug_issue_per_canary(workflow: dict) -> None:
     report = workflow["jobs"]["report"]
     assert set(report["needs"]) == {"check", "canary"}
