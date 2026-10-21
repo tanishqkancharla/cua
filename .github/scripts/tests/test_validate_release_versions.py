@@ -54,7 +54,8 @@ def copy_release_sources(destination: Path, *, source_build: bool = True) -> Non
         shutil.copytree(
             source,
             target,
-            ignore=shutil.ignore_patterns(".build", ".swiftpm", "target", "node_modules"),
+            # Desktop binaries/images are unrelated to release metadata.
+            ignore=shutil.ignore_patterns(".build", ".swiftpm", "target", "node_modules", "fixtures", "test-apps"),
         )
     for relative in (
         "libs/cua/VERSION",
@@ -94,6 +95,14 @@ def copy_release_sources(destination: Path, *, source_build: bool = True) -> Non
         shutil.copy(base / "scripts/_upstream-install.ps1", base / "scripts/install.ps1")
         for suffix in ("sh", "ps1"):
             shutil.copy(base / f"scripts/_upstream-uninstall.{suffix}", base / f"scripts/uninstall.{suffix}")
+
+
+def test_version_fixtures_exclude_desktop_payloads(tmp_path: Path):
+    copy_release_sources(tmp_path)
+    base = tmp_path / "libs/cua-driver"
+    assert not (base / "tests/fixtures").exists()
+    assert not (base / "rust/test-apps").exists()
+    validate(tmp_path, "all")
 
 
 def test_current_release_versions_agree():
