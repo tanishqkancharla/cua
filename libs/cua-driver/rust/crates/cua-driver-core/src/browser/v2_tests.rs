@@ -28,8 +28,8 @@ use super::platform::{
 use super::pointer::BrowserPointerTool;
 use super::refusal::BrowserRefusal;
 use super::tools::{
-    browser_protected_resource_scope, BrowserClickTool, BrowserKeyTool, BrowserSelectTool, BrowserNavigateTool,
-    BrowserPrepareTool, BrowserTypeTool, GetBrowserStateTool,
+    browser_protected_resource_scope, BrowserClickTool, BrowserKeyTool, BrowserNavigateTool,
+    BrowserPrepareTool, BrowserSelectTool, BrowserTypeTool, GetBrowserStateTool,
 };
 use super::types::{
     BrowserClassification, BrowserEngineFamily, BrowserProcessRole, BrowserProduct,

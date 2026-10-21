@@ -53,8 +53,8 @@ use super::semantic::{
     DEFAULT_SEMANTIC_NODE_BUDGET, SEMANTIC_COMPUTED_STYLES,
 };
 use super::store::{
-    format_ref, parse_ref, BrowserStore, BrowserVisibility, FrameIdentity, FrameKind, FrameRef, RefEntry,
-    SemanticContinuation, SnapshotRecord, TabRecord, TargetRecord,
+    format_ref, parse_ref, BrowserStore, BrowserVisibility, FrameIdentity, FrameKind, FrameRef,
+    RefEntry, SemanticContinuation, SnapshotRecord, TabRecord, TargetRecord,
 };
 use super::types::{
     BindingQuality, BrowserClassification, BrowserEngineFamily, BrowserProcessRole,

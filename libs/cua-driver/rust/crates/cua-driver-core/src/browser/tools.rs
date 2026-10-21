@@ -2872,7 +2872,6 @@ impl Tool for BrowserSelectTool {
     }
 }
 
-
 // ── browser_key ──────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4144,8 +4143,11 @@ mod tests {
                 BrowserTypeTool::new(e.clone()).def().clone(),
                 "browser_type",
             ),
-            (BrowserKeyTool::new(e.clone()).def().clone(),
-            BrowserSelectTool::new(e.clone()).def().clone(), "browser_key"),
+            (
+                BrowserKeyTool::new(e.clone()).def().clone(),
+                BrowserSelectTool::new(e.clone()).def().clone(),
+                "browser_key",
+            ),
             (
                 BrowserSelectTool::new(e.clone()).def().clone(),
                 "browser_select",
