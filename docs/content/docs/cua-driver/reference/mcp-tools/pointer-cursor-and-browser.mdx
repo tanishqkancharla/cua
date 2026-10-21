@@ -32,7 +32,7 @@ import { Tab, Tabs } from 'fumadocs-ui/components/tabs';
 | [`browser_click`](#browser_click) | Click a page element (by ref) or viewport coordinates in an exactly-bound tab. | macOS, Linux, Windows |
 | [`browser_type`](#browser_type) | Type text into an exactly-bound tab via the Input domain. | macOS, Linux, Windows |
 | [`browser_key`](#browser_key) | Press one xdotool-style key or modifier combination in an exactly-bound browser tab through trusted CDP Input events. | macOS, Linux, Windows |
-| [`browser_select`](#browser_select) | Select one option of a native HTML &lt;select&gt; ref on an exactly-bound tab without opening its popup. | macOS |
+| [`browser_select`](#browser_select) | Select one option of a native HTML &lt;select&gt; ref on an exactly-bound tab without opening its popup. | macOS, Linux, Windows |
 | [`browser_pointer`](#browser_pointer) | Perform hover, right-click, double-click, scroll, or drag in an exactly-bound browser tab. | macOS, Linux, Windows |
 | [`browser_dialog`](#browser_dialog) | Inspect or resolve a page-owned JavaScript alert, confirm, prompt, or beforeunload dialog on one exactly-bound tab. | macOS, Linux, Windows |
 | [`browser_set_input_files`](#browser_set_input_files) | Assign one or more explicit absolute local files to an exact live &lt;input type=file&gt; ref through CDP. | macOS, Linux, Windows |
@@ -84,7 +84,7 @@ A window-scoped drag (pid + window_id) runs in the background by default: the ge
 </Tab>
 <Tab value="Linux">
 
-Press-drag-release gesture from (from_x, from_y) to (to_x, to_y) in window-local screenshot pixels. Background delivery on X11 is one real held gesture on the session's virtual master pointer (path mpx_pointer: press, interpolated motion, release); it lands on GTK/VCL/Qt/Chromium; a point covered by another application's window is refused (target_occluded), one covered by this app's own dialog is retargeted to it. Headless servers fall back to XSendEvent. duration_ms (default 500), steps (default 20). No focus steal.
+Press-drag-release gesture from (from_x, from_y) to (to_x, to_y) in window-local screenshot pixels. Background delivery on X11 is one real held gesture on the session's virtual master pointer (path mpx_pointer: press, interpolated motion, release); it lands on GTK/VCL/Qt/Chromium; a point covered by another application's window is refused (target_occluded), one covered by this app's own dialog is retargeted to it. Headless servers fall back to XSendEvent. duration_ms (default 500), steps (default 20). No focus steal. Limits and fallbacks: `get_guide({topic:"drag"})`.
 
 **Linux parameters**
 
@@ -109,7 +109,7 @@ Press-drag-release gesture from (from_x, from_y) to (to_x, to_y) in window-local
 </Tab>
 <Tab value="Windows">
 
-Press-drag-release gesture from (from_x, from_y) to (to_x, to_y) in window-local screenshot pixels. duration_ms (default 500) is the wall-clock budget; steps (default 20) interpolates intermediate WM_MOUSEMOVE events along the path. No focus steal. After a zoom call, pass from_zoom=true. Drags that start on a window caption / title bar or resize border (i.e. moving or resizing the window itself) cannot be delivered in the background, the OS move/resize loop needs real pointer input, so they return background_unavailable; re-issue those with delivery_mode:"foreground".
+Press-drag-release gesture from (from_x, from_y) to (to_x, to_y) in window-local screenshot pixels. duration_ms (default 500) is the wall-clock budget; steps (default 20) interpolates intermediate WM_MOUSEMOVE events along the path. No focus steal. After a zoom call, pass from_zoom=true. Drags that start on a window caption / title bar or resize border (i.e. moving or resizing the window itself) cannot be delivered in the background, the OS move/resize loop needs real pointer input, so they return background_unavailable; re-issue those with delivery_mode:"foreground". Limits and fallbacks: `get_guide({topic:"drag"})`.
 
 **Windows parameters**
 
@@ -518,27 +518,9 @@ Effect: mutating. Platforms: macOS, Linux, Windows.
 
 ### `get_browser_state`
 
-Effect: read-only, idempotent. Platforms: macOS, Linux, Windows.
-
-<Tabs items={['macOS', 'Linux', 'Windows']} groupId="platform" persist>
-<Tab value="macOS">
-
 Read-only browser inspection. Mode 1 (bind): pass pid + window_id of a native browser window to classify it, correlate it to a CDP target (exact-or-refuse), and mint a session-scoped target id plus tab ids. A driver-owned headless browser binds with pid alone. Mode 2 (snapshot): pass target_id + tab_id. The dom_refs_v1 compatibility format returns composed DOM refs. semantic_v2 joins accessibility, DOM, layout, and viewport state; ranks visible content before retained/offscreen state; and returns a semantic outline, typed action refs, content refs, scoped reads, and opaque continuation. Never performs setup: a browser that is not attached yet refuses with browser_consent_required or browser_requires_setup, and detail.next_call names the browser_prepare call that attaches it. Use this route for any web page in Chrome, Edge or Brave; desktop pointer tools move the user's pointer. Setup and recovery: `get_guide({topic:"browser"})`.
 
-</Tab>
-<Tab value="Linux">
-
-Read-only browser inspection. Mode 1 (bind): pass pid + window_id of a native browser window to classify it, correlate it to a CDP target (exact-or-refuse), and mint a session-scoped target id plus tab ids. A driver-owned headless browser binds with pid alone. Mode 2 (snapshot): pass target_id + tab_id. The dom_refs_v1 compatibility format returns composed DOM refs. semantic_v2 joins accessibility, DOM, layout, and viewport state; ranks visible content before retained/offscreen state; and returns a semantic outline, typed action refs, content refs, scoped reads, and opaque continuation. Never performs setup: a browser that is not attached yet refuses with browser_consent_required or browser_requires_setup, and detail.next_call names the browser_prepare call that attaches it. Use this route for any web page in Chrome, Edge or Brave; desktop pointer tools move the user's pointer.
-
-</Tab>
-<Tab value="Windows">
-
-Read-only browser inspection. Mode 1 (bind): pass pid + window_id of a native browser window to classify it, correlate it to a CDP target (exact-or-refuse), and mint a session-scoped target id plus tab ids. A driver-owned headless browser binds with pid alone. Mode 2 (snapshot): pass target_id + tab_id. The dom_refs_v1 compatibility format returns composed DOM refs. semantic_v2 joins accessibility, DOM, layout, and viewport state; ranks visible content before retained/offscreen state; and returns a semantic outline, typed action refs, content refs, scoped reads, and opaque continuation. Never performs setup: a browser that is not attached yet refuses with browser_consent_required or browser_requires_setup, and detail.next_call names the browser_prepare call that attaches it. Use this route for any web page in Chrome, Edge or Brave; desktop pointer tools move the user's pointer.
-
-</Tab>
-</Tabs>
-
-**Parameters on every platform**
+Effect: read-only, idempotent. Platforms: macOS, Linux, Windows.
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
@@ -556,27 +538,9 @@ Read-only browser inspection. Mode 1 (bind): pass pid + window_id of a native br
 
 ### `browser_prepare`
 
-Effect: destructive. Platforms: macOS, Linux, Windows.
-
-<Tabs items={['macOS', 'Linux', 'Windows']} groupId="platform" persist>
-<Tab value="macOS">
-
 Attach the browser tools to a browser. For a page in the user's running Chrome, Edge or Brave, call it once with pid, window_id, session and strategy &#123;"kind":"existing_profile"&#125; when get_browser_state refuses with browser_consent_required or browser_requires_setup; then call get_browser_state again and act with browser_click, browser_type or browser_pointer. It attaches, or refuses with nothing changed and says why. Explicitly prepare an owned DevTools endpoint for a browser. pid is required for an existing process or existing-profile attachment, and optional only for allow_launch=true with an isolated profile. Existing endpoints are detected without side effects. Acting setup for an isolated profile follows the runtime permission mode and optional capability manifest. It requires allow_launch=true, launches a separate browser, and never copies, modifies, or terminates the requested user profile. Without pid, only a platform-attested system Chrome/Edge installation (or a root-owned package payload on Linux) is eligible; redirects and user-controlled locations fail closed. Existing-profile attachment is explicit and follows the runtime's immutable permission mode: standard requires an explicit --grant existing-profile launch grant or an embedding authorization host, bounded requires a launch-approved exact resource manifest, and unrestricted requires explicit trusted startup risk acceptance. Ordinary MCP transport approval never proves profile authorization. On proven platforms, an authorized request also permits one bounded exact-window setup: open the recognized browser product's fixed remote-debugging page, toggle its uniquely matched per-instance checkbox, prove the PID-owned loopback endpoint, and close the temporary tab. Every visible effect is reported; ambiguity is refused. Where attaching would bring the browser in front of the user's app (macOS Chrome shows its own remote-debugging prompt in front whenever the driver opens a new browser connection; sessions for the same browser share one approved connection, kept for up to 30 minutes idle and 8 hours in total, so later sessions do not prompt again), existing-profile attachment refuses with background_unavailable unless delivery_mode is "foreground" (the app that was in front is brought back afterwards) or the browser window is on another Space than the user's, where it attaches in the background while the driver reverts the browser's own brief activations. A driver-owned isolated launch result carries an advisory lifecycle object: the browser process ends with the calling session after idle_expires_in_seconds without session activity, an isolated_named profile persists after the session and an isolated_new profile does not, and explicit end, disconnect, revocation or shutdown end it earlier. Setup and recovery: `get_guide({topic:"browser"})`.
 
-</Tab>
-<Tab value="Linux">
-
-Attach the browser tools to a browser. For a page in the user's running Chrome, Edge or Brave, call it once with pid, window_id, session and strategy &#123;"kind":"existing_profile"&#125; when get_browser_state refuses with browser_consent_required or browser_requires_setup; then call get_browser_state again and act with browser_click, browser_type or browser_pointer. It attaches, or refuses with nothing changed and says why. Explicitly prepare an owned DevTools endpoint for a browser. pid is required for an existing process or existing-profile attachment, and optional only for allow_launch=true with an isolated profile. Existing endpoints are detected without side effects. Acting setup for an isolated profile follows the runtime permission mode and optional capability manifest. It requires allow_launch=true, launches a separate browser, and never copies, modifies, or terminates the requested user profile. Without pid, only a platform-attested system Chrome/Edge installation (or a root-owned package payload on Linux) is eligible; redirects and user-controlled locations fail closed. Existing-profile attachment is explicit and follows the runtime's immutable permission mode: standard requires an explicit --grant existing-profile launch grant or an embedding authorization host, bounded requires a launch-approved exact resource manifest, and unrestricted requires explicit trusted startup risk acceptance. Ordinary MCP transport approval never proves profile authorization. On proven platforms, an authorized request also permits one bounded exact-window setup: open the recognized browser product's fixed remote-debugging page, toggle its uniquely matched per-instance checkbox, prove the PID-owned loopback endpoint, and close the temporary tab. Every visible effect is reported; ambiguity is refused. Where attaching would bring the browser in front of the user's app (macOS Chrome shows its own remote-debugging prompt in front whenever the driver opens a new browser connection; sessions for the same browser share one approved connection, kept for up to 30 minutes idle and 8 hours in total, so later sessions do not prompt again), existing-profile attachment refuses with background_unavailable unless delivery_mode is "foreground" (the app that was in front is brought back afterwards) or the browser window is on another Space than the user's, where it attaches in the background while the driver reverts the browser's own brief activations. A driver-owned isolated launch result carries an advisory lifecycle object: the browser process ends with the calling session after idle_expires_in_seconds without session activity, an isolated_named profile persists after the session and an isolated_new profile does not, and explicit end, disconnect, revocation or shutdown end it earlier.
-
-</Tab>
-<Tab value="Windows">
-
-Attach the browser tools to a browser. For a page in the user's running Chrome, Edge or Brave, call it once with pid, window_id, session and strategy &#123;"kind":"existing_profile"&#125; when get_browser_state refuses with browser_consent_required or browser_requires_setup; then call get_browser_state again and act with browser_click, browser_type or browser_pointer. It attaches, or refuses with nothing changed and says why. Explicitly prepare an owned DevTools endpoint for a browser. pid is required for an existing process or existing-profile attachment, and optional only for allow_launch=true with an isolated profile. Existing endpoints are detected without side effects. Acting setup for an isolated profile follows the runtime permission mode and optional capability manifest. It requires allow_launch=true, launches a separate browser, and never copies, modifies, or terminates the requested user profile. Without pid, only a platform-attested system Chrome/Edge installation (or a root-owned package payload on Linux) is eligible; redirects and user-controlled locations fail closed. Existing-profile attachment is explicit and follows the runtime's immutable permission mode: standard requires an explicit --grant existing-profile launch grant or an embedding authorization host, bounded requires a launch-approved exact resource manifest, and unrestricted requires explicit trusted startup risk acceptance. Ordinary MCP transport approval never proves profile authorization. On proven platforms, an authorized request also permits one bounded exact-window setup: open the recognized browser product's fixed remote-debugging page, toggle its uniquely matched per-instance checkbox, prove the PID-owned loopback endpoint, and close the temporary tab. Every visible effect is reported; ambiguity is refused. Where attaching would bring the browser in front of the user's app (macOS Chrome shows its own remote-debugging prompt in front whenever the driver opens a new browser connection; sessions for the same browser share one approved connection, kept for up to 30 minutes idle and 8 hours in total, so later sessions do not prompt again), existing-profile attachment refuses with background_unavailable unless delivery_mode is "foreground" (the app that was in front is brought back afterwards) or the browser window is on another Space than the user's, where it attaches in the background while the driver reverts the browser's own brief activations. A driver-owned isolated launch result carries an advisory lifecycle object: the browser process ends with the calling session after idle_expires_in_seconds without session activity, an isolated_named profile persists after the session and an isolated_new profile does not, and explicit end, disconnect, revocation or shutdown end it earlier.
-
-</Tab>
-</Tabs>
-
-**Parameters on every platform**
+Effect: destructive. Platforms: macOS, Linux, Windows.
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
@@ -688,7 +652,7 @@ Effect: mutating. Platforms: macOS, Linux, Windows.
 
 Select one option of a native HTML &lt;select&gt; ref on an exactly-bound tab without opening its popup. Pass exactly one of label or value; exactly one option must equal it. Refuses non-native, multiple-selection, and disabled selects, disabled options, and zero or ambiguous matches before changing anything. A change dispatches bubbling input and change events; they are synthetic, so verify the page accepted the selection. Selecting the option that is already selected dispatches no events.
 
-Effect: mutating. Platforms: macOS.
+Effect: mutating. Platforms: macOS, Linux, Windows.
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
