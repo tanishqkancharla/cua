@@ -17,7 +17,7 @@
 use rustls_pki_types::{CertificateDer, TrustAnchor, UnixTime};
 use serde_json::Value;
 use std::time::Duration;
-use webpki::{ALL_VERIFICATION_ALGS, EndEntityCert, KeyUsage, anchor_from_trusted_cert};
+use webpki::{anchor_from_trusted_cert, EndEntityCert, KeyUsage, ALL_VERIFICATION_ALGS};
 
 const INTERMEDIATES: &str = include_str!("fixtures/emudhra/impacted-intermediates.json");
 const ROOTS: &str = include_str!("fixtures/emudhra/roots.json");
