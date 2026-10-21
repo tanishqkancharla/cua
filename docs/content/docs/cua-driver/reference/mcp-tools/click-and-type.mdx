@@ -18,9 +18,11 @@ import { Tab, Tabs } from 'fumadocs-ui/components/tabs';
 | [`double_click`](#double_click) | Double-click at (x, y) or on an AX element identified by element_token. | macOS, Linux, Windows |
 | [`right_click`](#right_click) | Right-click against a target pid. | macOS, Linux, Windows |
 | [`type_text`](#type_text) | Insert text via `AXSetAttribute(kAXSelectedText)` into the element given by `element_token`, or the pid's focused element. | macOS, Linux, Windows |
+| [`select_text`](#select_text) | Select one unambiguous occurrence of text in a native editable element, or place the caret immediately before/after it. | macOS |
 | [`press_key`](#press_key) | Press and release one key. | macOS, Linux, Windows |
 | [`hotkey`](#hotkey) | Press a key combination: e.g. | macOS, Linux, Windows |
 | [`set_value`](#set_value) | Set an element's value by `element_token`. | macOS, Linux, Windows |
+| [`native_paste`](#native_paste) | Paste text, HTML or CommonMark into one exact macOS native accessibility control with Cmd+V. | macOS, Linux |
 | [`clipboard_read`](#clipboard_read) | List available system clipboard types and optionally return privacy-sensitive plain text. | macOS, Linux, Windows |
 | [`clipboard_write`](#clipboard_write) | Replace the system clipboard with exactly one value: plain text, an image from an absolute local path, or a file URL from an absolute local path. | macOS, Linux, Windows |
 
@@ -48,7 +50,7 @@ Click a target pid. Prefer `element_token` (from get_window_state): it identifie
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| <span id="click--macos--action"></span>`action` | `string` |  | AX action: press (default), show_menu, pick, confirm, cancel, open, show_alternate_ui, show_default_ui. show_alternate_ui reveals hover-only controls on an element that lists it, without the pointer. |
+| <span id="click--macos--action"></span>`action` | `string` |  | AX action: press (default), show_menu, pick, confirm, cancel, open, show_alternate_ui, show_default_ui, select_collection_item. select_collection_item selects an indexed Mac item only through its independently validated enabled parent AXSelectedChildren capability. show_alternate_ui reveals hover-only controls on an element that lists it, without the pointer. |
 | <span id="click--macos--button"></span>`button` | `"left" \| "right" \| "middle"` |  | Mouse button. Default left. |
 | <span id="click--macos--capture_id"></span>`capture_id` | `string` |  | Optional capture ID from get_window_state or get_desktop_state. With x,y it is consumed atomically; stale or mismatched captures are refused. |
 | <span id="click--macos--count"></span>`count` | `integer` |  | Click count (pixel path only). Default 1. |
@@ -294,9 +296,9 @@ Exactly one of `element_token` or (`x` AND `y`) must be provided. `pid` is requi
 | <span id="right_click--pid"></span>`pid` | `integer` |  | Target process ID. Optional with element_token (the token carries the pid). |
 | <span id="right_click--session"></span>`session` | `string` |  | For multi-call work, prefer a short public session label and repeat it on every call that accepts it. Omit it to use the authenticated transport's implicit lifecycle session. |
 
-## Typing tools
+## Text input and selection tools
 
-Type text into a field or window.
+Type or select text in a field or window.
 
 ### `type_text`
 
@@ -313,7 +315,7 @@ Web content (browser tabs, Slack, VS Code): AXValue is not proof the DOM saw the
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| <span id="type_text--macos--delay_ms"></span>`delay_ms` | `integer` |  | Ms between characters in the CGEvent fallback. Default 30. Range: 0 to 200. |
+| <span id="type_text--macos--delay_ms"></span>`delay_ms` | `integer` |  | Milliseconds between characters in the CGEvent fallback path. Default 30. Zero uses bounded Unicode packets only for a confirmed editable text control in the guarded foreground non-terminal window; other keyboard consumers receive individual character events. Ignored when the AX path succeeds. Range: 0 to 200. |
 | <span id="type_text--macos--delivery_mode"></span>`delivery_mode` | `"background" \| "foreground"` |  | Default "background": AX insert, then CGEvent keys, no focus steal. "foreground": front the window, type, restore; last resort for surfaces (WhatsApp/Catalyst) where background keys do not land. |
 | <span id="type_text--macos--element_token"></span>`element_token` | `string` |  | Element handle `<snapshot_id>:<row>` from get_window_state: row `[11]` of a read whose snapshot_id is s0000002a is "s0000002a:11" (also in `structuredContent.elements[].element_token`). Returns an explicit stale error naming the current snapshots once a newer read supersedes it. |
 | <span id="type_text--macos--pid"></span>`pid` | `integer` |  | Target process ID. |
@@ -387,6 +389,29 @@ Special keys (Return, Escape, arrows, Tab) go through `press_key` / `hotkey`: th
 
 ```json
 {"text":"<text>"}
+```
+
+### `select_text`
+
+Select one unambiguous occurrence of text in a native editable element, or place the caret immediately before/after it. The exact window, element, and resulting UTF-16 selection are verified. Use prefix/suffix to disambiguate repeated text.
+
+Effect: mutating, idempotent. Platforms: macOS.
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| <span id="select_text--element_token"></span>`element_token` | `string` |  | Element handle `<snapshot_id>:<row>` from get_window_state: row `[11]` of a read whose snapshot_id is s0000002a is "s0000002a:11" (also in `structuredContent.elements[].element_token`). Returns an explicit stale error naming the current snapshots once a newer read supersedes it. |
+| <span id="select_text--pid"></span>`pid` | `integer` | required | Process ID owning the editor. |
+| <span id="select_text--prefix"></span>`prefix` | `string` |  | Literal adjacent prefix to disambiguate repeated text. |
+| <span id="select_text--selection_type"></span>`selection_type` | `"text" \| "cursor_before" \| "cursor_after"` |  | Select the occurrence (text, default), or place the caret before/after it. |
+| <span id="select_text--session"></span>`session` | `string` |  | For multi-call work, prefer a short public session label and repeat it on every call that accepts it. Omit it to use the authenticated transport's implicit lifecycle session. |
+| <span id="select_text--suffix"></span>`suffix` | `string` |  | Literal adjacent suffix to disambiguate repeated text. |
+| <span id="select_text--text"></span>`text` | `string` | required | Non-empty literal text to select in the editor value. |
+| <span id="select_text--window_id"></span>`window_id` | `integer` |  | Exact native window ID containing the observed editor. |
+
+**Example arguments**
+
+```json
+{"pid":1,"text":"<text>"}
 ```
 
 ## Key and shortcut tools
@@ -582,7 +607,7 @@ Recognized modifiers: ctrl/control, shift, alt, win/windows. Non-modifier keys u
 
 ## Value and clipboard tools
 
-Set element values and read or write the clipboard.
+Set element values, paste, and read or write the clipboard.
 
 ### `set_value`
 
@@ -599,6 +624,7 @@ A Finder file name cell (list or icon view, not being edited) is renamed through
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
+| <span id="set_value--macos--delivery_mode"></span>`delivery_mode` | `"background" \| "foreground"` |  | Default background preserves semantic AX writes. Foreground keeps the exact window active and verifies focus of native text controls before writing; this does not submit the field. |
 | <span id="set_value--macos--session"></span>`session` | `string` |  | For multi-call work, prefer a short public session label and repeat it on every call that accepts it. |
 | <span id="set_value--macos--value"></span>`value` | `string` | required | New value, coerced to the element's type. |
 | <span id="set_value--macos--window_id"></span>`window_id` | `integer` |  | Window ID. Omit with element_token. |
@@ -651,6 +677,62 @@ For free-form text entry that the target accepts via keystrokes only, prefer `ty
 
 ```json
 {"value":"<value>"}
+```
+
+### `native_paste`
+
+Effect: destructive. Platforms: macOS, Linux.
+
+<Tabs items={['macOS', 'Linux', 'Windows']} groupId="platform" persist>
+<Tab value="macOS">
+
+Paste text, HTML or CommonMark into one exact macOS native accessibility control with Cmd+V. Requires an exact pid and window_id, verifies the same focused AX element before the clipboard write and key dispatch, and succeeds only when AXValue read-back equals the expected UTF-16-range insertion. Rich payloads are imported by AppKit and written as RTF plus their exact plain string; this receipt proves text insertion, not every visual style. Observe resulting formatting. clipboard_policy:"leave" retains the payload. clipboard_policy:"restore" snapshots supported prior item representations privately (up to 64 items,128 types per item,32 MiB total), refuses unreadable/unstable snapshots before mutation, and restores after verified insertion or proved no-input refusal only while its own clipboard token/payload remains. Restoration is separately reported; an observed newer writer or unknown input skips restoration. NSPasteboard has no atomic compare-and-restore, so the last ownership-check/write can still race. delivery_mode:"background" (default) never fronts the target. delivery_mode:"foreground" briefly fronts the exact target for one physical HID Cmd+V chord, revalidates the AX target and clipboard immediately before that chord, then restores the prior frontmost app. After dispatch, any unverified result is reported as effect:"unknown" and must not be replayed automatically.
+
+**macOS parameters**
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| <span id="native_paste--macos--clipboard_policy"></span>`clipboard_policy` | `"leave" \| "restore"` | required | Required. leave retains the payload; restore privately snapshots supported prior item representations and restores after proved insertion/no-input while the own token/payload remains. Newer observed writers and unknown input skip restoration; final check/write is not atomic. |
+| <span id="native_paste--macos--delivery_mode"></span>`delivery_mode` | `"background" \| "foreground"` |  | Best-effort-background ladder rung (default "background"). "background": posts one PID-routed Cmd+V without fronting the target. "foreground": briefly front the exact target, revalidate the retained AX target and clipboard immediately before one physical HID Cmd+V chord, then restore the prior frontmost app. Choose the delivery mode before dispatch; never replay an uncertain paste. |
+| <span id="native_paste--macos--format"></span>`format` | `"text" \| "md" \| "html"` | `"text"` | text is plain; html is imported by AppKit; md is CommonMark rendered to HTML then imported. Rich clipboard data is RTF plus its exact plain string. |
+| <span id="native_paste--macos--pid"></span>`pid` | `integer` | required | Exact target process ID. |
+| <span id="native_paste--macos--text"></span>`text` | `string` | required | Source to paste (at most 16 KiB UTF-8). |
+| <span id="native_paste--macos--window_id"></span>`window_id` | `integer` | required | Exact target CGWindowID. |
+
+</Tab>
+<Tab value="Linux">
+
+Paste plaintext into one exact X11 native editable with one foreground Ctrl+V. Requires exact PID/window, explicit foreground delivery and clipboard_policy leave. Proves focused AT-SPI identity, current value/selection and clipboard payload before input, then exact value after input. Leaves the payload clipboard; observed external writers are not overwritten. AT-SPI PasteText and replacement typing are never fallbacks. Rich formats and Wayland refuse before mutation. Unknown input must not be replayed; observe actual application state and use the host completion/drain contract after client timeout.
+
+**Linux parameters**
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| <span id="native_paste--linux--clipboard_policy"></span>`clipboard_policy` | `"leave"` | required | Required leave policy: retain the payload clipboard; observed newer writers are not overwritten. Linux does not restore prior formats. |
+| <span id="native_paste--linux--delivery_mode"></span>`delivery_mode` | `"background" \| "foreground"` |  | Choose foreground before dispatch: activates and confirms this exact X11 window, sends one Ctrl+V and leaves the target active. Background/default refuses before clipboard mutation or input; no implicit escalation or replay. |
+| <span id="native_paste--linux--format"></span>`format` | `"text"` | `"text"` | Plaintext only; HTML and Markdown refuse before mutation. |
+| <span id="native_paste--linux--pid"></span>`pid` | `integer` | required | Exact target process ID; must own the observed X11 window. Minimum: 1. |
+| <span id="native_paste--linux--text"></span>`text` | `string` | required | Plaintext clipboard payload,1..16384 UTF-8 bytes. |
+| <span id="native_paste--linux--window_id"></span>`window_id` | `integer` | required | Exact observed X11 window ID belonging to pid; no first-window fallback. Minimum: 1. |
+
+</Tab>
+<Tab value="Windows">
+
+Not available on Windows.
+
+</Tab>
+</Tabs>
+
+**Parameters on every platform**
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| <span id="native_paste--session"></span>`session` | `string` |  | For multi-call work, prefer a short public session label and repeat it on every call that accepts it. Omit it to use the authenticated transport's implicit lifecycle session. |
+
+**Example arguments**
+
+```json
+{"pid":1,"window_id":1,"text":"<text>","clipboard_policy":"leave"}
 ```
 
 ### `clipboard_read`

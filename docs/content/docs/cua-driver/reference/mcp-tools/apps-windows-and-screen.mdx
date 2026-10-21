@@ -18,6 +18,7 @@ import { Tab, Tabs } from 'fumadocs-ui/components/tabs';
 | [`list_windows`](#list_windows) | List top-level windows known to WindowServer, including off-screen ones (minimized, other Space, hidden): layer-0 only without `pid`, every layer with `pid`. | macOS, Linux, Windows |
 | [`launch_app`](#launch_app) | Launch a macOS app in the background: the target does NOT come to the foreground. | macOS, Linux, Windows |
 | [`kill_app`](#kill_app) | Force-terminate a process by pid (kill -9 equivalent on macOS / Linux; taskkill /F equivalent on Windows). | macOS, Linux, Windows |
+| [`close_window`](#close_window) | Cooperatively close one exact top-level window without activating it, then independently verify that the original window identity disappeared. | macOS, Linux, Windows |
 | [`bring_to_front`](#bring_to_front) | Persistently activate an app and leave it in the foreground. | macOS, Linux, Windows |
 | [`set_window_frame`](#set_window_frame) | Set one exact top-level window's frame in the desktop-coordinate space reported by list_windows and verify the resulting geometry through an independent readback. | macOS, Linux, Windows |
 | [`invoke_menu`](#invoke_menu) | Resolve an exact application-menu path one live native level at a time and invoke its final item through accessibility APIs. | macOS, Linux, Windows |
@@ -54,7 +55,7 @@ List macOS apps, both currently running and installed-but-not-running, with per-
 
 - running: is a process for this app live? (pid is 0 when false)
 - active: is it the system-frontmost app? (implies running)
-- launch_path: filesystem path to the `.app` bundle, when known. Pass this to `launch_app` to start the app cold.
+- launch_path: filesystem path to the `.app` bundle, when known. Pass this as `name` to `launch_app` to start the app cold.
 - kind: `"desktop"` for `.app` bundles on macOS.
 - last_used: RFC3339 timestamp from the bundle's filesystem mtime, when readable.
 
@@ -122,7 +123,8 @@ Per record: window_id, pid, app_name, title, bounds, layer, z_index, is_on_scree
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| <span id="list_windows--macos--on_screen_only"></span>`on_screen_only` | `boolean` |  | Drop windows not on the current Space. |
+| <span id="list_windows--macos--include_document_urls"></span>`include_document_urls` | `boolean` |  | With an explicit pid, include each exact AXWindow's AXDocument as document_url (null when unavailable). Read-only; never matches a document by its title. Default false. |
+| <span id="list_windows--macos--on_screen_only"></span>`on_screen_only` | `boolean` |  | When true, drop windows not on the current Space. Default false. |
 | <span id="list_windows--macos--pid"></span>`pid` | `integer` |  | Only this pid's windows, on every layer. |
 
 </Tab>
@@ -174,7 +176,7 @@ Effect: mutating, idempotent. Platforms: macOS, Linux, Windows.
 
 Launch a macOS app in the background: the target does NOT come to the foreground.
 
-Provide either `bundle_id` (preferred: unambiguous, e.g. `com.apple.calculator`) or `name` (e.g. "Calculator"). If both are given, bundle_id wins.
+Provide either `bundle_id` (preferred: unambiguous, e.g. `com.apple.calculator`) or `name` (e.g. "Calculator", or the absolute `.app` path from `list_apps` `launch_path`). If both are given, bundle_id wins.
 
 Optional `urls` are handed to the app as open targets: for Finder, pass a folder path to open a backgrounded Finder window there.
 
@@ -195,7 +197,7 @@ Returns the launched app's pid, bundle_id, name, and a `windows` array (same sha
 | <span id="launch_app--macos--additional_arguments"></span>`additional_arguments` | `string[]` |  | Extra arguments appended after --args when launching. |
 | <span id="launch_app--macos--bundle_id"></span>`bundle_id` | `string` |  | App bundle identifier, e.g. com.apple.calculator. Preferred over name. |
 | <span id="launch_app--macos--creates_new_application_instance"></span>`creates_new_application_instance` | `boolean` |  | When true, force a new app instance even if already running (open -n). Use for concurrent multi-agent/multi-session work so each session gets an isolated instance + window instead of sharing one: on single-instance apps (e.g. Calculator) every caller otherwise gets the same window and the sessions clobber each other. |
-| <span id="launch_app--macos--name"></span>`name` | `string` |  | App display name. Used only when bundle_id is absent. |
+| <span id="launch_app--macos--name"></span>`name` | `string` |  | App display name, or absolute path to a .app bundle (e.g. launch_path from list_apps). Used only when bundle_id is absent. |
 | <span id="launch_app--macos--urls"></span>`urls` | `string[]` |  | Optional file paths or URLs to open with the app (e.g. a folder path for Finder). |
 | <span id="launch_app--macos--webkit_inspector_port"></span>`webkit_inspector_port` | `integer` |  | Open a WebKit inspector server on this port (sets WEBKIT_INSPECTOR_SERVER env var). |
 
@@ -258,17 +260,17 @@ Effect: destructive, idempotent. Platforms: macOS, Linux, Windows.
 <Tabs items={['macOS', 'Linux', 'Windows']} groupId="platform" persist>
 <Tab value="macOS">
 
-Force-terminate a process by pid (kill -9 equivalent on macOS / Linux; taskkill /F equivalent on Windows). Use as escalation when the cooperative close path (hotkey cmd+q on macOS, click-the-X on Windows) failed to make the process exit. Unsaved state is lost: prefer the cooperative path first.
+Force-terminate a process by pid (kill -9 equivalent on macOS / Linux; taskkill /F equivalent on Windows). Use as escalation when the cooperative close_window path failed to make the process exit. Unsaved state is lost: prefer the cooperative path first.
 
 </Tab>
 <Tab value="Linux">
 
-Force-terminate a process by pid (kill -9 equivalent on Linux). Use as escalation when the cooperative close path failed to make the process exit. Unsaved state is lost: prefer the cooperative path first.
+Force-terminate a process by pid (kill -9 equivalent on Linux). Use as escalation when the cooperative close_window path failed to make the process exit. Unsaved state is lost: prefer the cooperative path first.
 
 </Tab>
 <Tab value="Windows">
 
-Force-terminate a process by pid. Use when the standard close path (Alt+F4 / WM_CLOSE via `click` on the X button) fails to make the process exit: typical for UWP / WinUI3 apps (Calculator, Photos, modern Notepad) that route WM_CLOSE into a suspended-but-resident state. Equivalent to `taskkill /F /PID <pid>`. Unsaved state is lost. Prefer the click-the-X path first; only escalate to `kill_app` when polite close didn't terminate.
+Force-terminate a process by pid. Use when the cooperative close_window path fails to make the process exit: typical for UWP / WinUI3 apps (Calculator, Photos, modern Notepad) that route WM_CLOSE into a suspended-but-resident state. Equivalent to `taskkill /F /PID <pid>`. Unsaved state is lost. Prefer close_window; only escalate to `kill_app` when cooperative close didn't terminate.
 
 </Tab>
 </Tabs>
@@ -286,6 +288,24 @@ Force-terminate a process by pid. Use when the standard close path (Alt+F4 / WM_
 {"pid":1}
 ```
 
+### `close_window`
+
+Cooperatively close one exact top-level window without activating it, then independently verify that the original window identity disappeared. The operation never falls back to hotkeys, menu labels, coordinates, or process termination. Missing, mismatched, ambiguous, disabled, unsupported, confirmation-required, and unconfirmed no-op outcomes fail closed.
+
+Effect: destructive. Platforms: macOS, Linux, Windows.
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| <span id="close_window--pid"></span>`pid` | `integer` | required | Process ID of the application that owns the exact window. Minimum: 1. |
+| <span id="close_window--session"></span>`session` | `string` |  | For multi-call work, prefer a short public session label and repeat it on every call that accepts it. Omit it to use the authenticated transport's implicit lifecycle session. |
+| <span id="close_window--window_id"></span>`window_id` | `integer` | required | Exact native window ID from list_windows; no app-wide close fallback. Minimum: 1. |
+
+**Example arguments**
+
+```json
+{"pid":1,"window_id":1}
+```
+
 ### `bring_to_front`
 
 Effect: mutating, idempotent. Platforms: macOS, Linux, Windows.
@@ -299,8 +319,9 @@ Persistently activate an app and leave it in the foreground. Most input does not
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| <span id="bring_to_front--macos--pid"></span>`pid` | `integer` | required | Process ID of the app to activate. |
-| <span id="bring_to_front--macos--window_id"></span>`window_id` | `integer` |  | CGWindowID to verify as the focused, frontmost window. Omit to activate the app only. |
+| <span id="bring_to_front--macos--activation_scope"></span>`activation_scope` | `"exact_window" \| "app_menu"` |  | Default exact_window. app_menu requires window_id and verifies only the persistent app-global menu context. |
+| <span id="bring_to_front--macos--pid"></span>`pid` | `integer` | required | Process ID of the application to activate. |
+| <span id="bring_to_front--macos--window_id"></span>`window_id` | `integer` |  | Exact native window ID from list_windows; verifies this window is focused. |
 
 </Tab>
 <Tab value="Linux">
@@ -369,9 +390,27 @@ Effect: mutating, idempotent. Platforms: macOS, Linux, Windows.
 
 ### `invoke_menu`
 
+Effect: destructive. Platforms: macOS, Linux, Windows.
+
+<Tabs items={['macOS', 'Linux', 'Windows']} groupId="platform" persist>
+<Tab value="macOS">
+
 Resolve an exact application-menu path one live native level at a time and invoke its final item through accessibility APIs. Missing, ambiguous, disabled, or structurally mismatched segments fail closed; this tool never falls back to pixels. Menu paths and refusals: `get_guide({topic:"menus"})`.
 
-Effect: destructive. Platforms: macOS, Linux, Windows.
+</Tab>
+<Tab value="Linux">
+
+Resolve an exact application-menu path one live native level at a time and invoke its final item through accessibility APIs. Missing, ambiguous, disabled, or structurally mismatched segments fail closed; this tool never falls back to pixels.
+
+</Tab>
+<Tab value="Windows">
+
+Resolve an exact application-menu path one live native level at a time and invoke its final item through accessibility APIs. Missing, ambiguous, disabled, or structurally mismatched segments fail closed; this tool never falls back to pixels.
+
+</Tab>
+</Tabs>
+
+**Parameters on every platform**
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
@@ -434,8 +473,10 @@ Refusals: `window_id_not_found`; `window_owner_pid_mismatch` names the real `own
 | <span id="get_window_state--macos--max_dimension"></span>`max_dimension` | `integer` |  | Optional cap on the returned screenshot's long edge, in pixels (aspect ratio preserved): the cheap path for a small preview / thumbnail. Applied on top of the session/global max_image_dimension ceiling; the tighter of the two wins. Omit for the configured default. Minimum: 1. |
 | <span id="get_window_state--macos--max_elements"></span>`max_elements` | `integer` |  | Cap on AX nodes walked (depth-first; markdown and elements truncate together). Default 250 (2 000 with full_output:true); the response states when the tree was cut. Minimum: 1. |
 | <span id="get_window_state--macos--max_image_dimension"></span>`max_image_dimension` | `integer` |  | Per-call override for the returned screenshot's long edge in pixels. An explicit value wins over the session/global setting; 0 returns native resolution. Omit to preserve configured behavior. Minimum: 0. |
+| <span id="get_window_state--macos--native_row_scope"></span>`native_row_scope` | `"visible" \| "all"` |  | Mac native rows only. Requires full_output:true (no since diff). visible walks authoritative AXVisibleRows plus AXSelectedRows, leaving other native rows unread with collapsed_rows metadata. Unknown visibility keeps all rows. all or omission retains the bounded full walk. Web content is unchanged. |
 | <span id="get_window_state--macos--pid"></span>`pid` | `integer` | required | Target process ID. |
-| <span id="get_window_state--macos--query"></span>`query` | `string` |  | Case-insensitive substring filter: returns matching rows plus ancestors; element_index values are not renumbered. Try this before a full read. |
+| <span id="get_window_state--macos--probe_only"></span>`probe_only` | `boolean` |  | Default false. Check exact ownership and AXWindow matching with a bounded walk without replacing action caches, snapshot tokens or screenshot bindings. Returns only pid, window_id, probe_only, window_matched and a degraded_reason when unresolved. No controls or screenshot are returned. Incompatible with query, screenshot_out_file, include_screenshot:true or include_accessibility_tree:false. |
+| <span id="get_window_state--macos--query"></span>`query` | `string` |  | Case-insensitive filter for tree_markdown and structured elements. Returns matching actionable rows plus their actionable ancestors without renumbering element_index values. |
 | <span id="get_window_state--macos--screenshot_out_file"></span>`screenshot_out_file` | `string` |  | When set, write the PNG to this file path (~ expanded) instead of embedding base64 in the response. The structured output will contain screenshot_file_path instead. |
 | <span id="get_window_state--macos--session"></span>`session` | `string` |  | For multi-call work, prefer a short public session label and repeat it on every call that accepts it. |
 | <span id="get_window_state--macos--window_id"></span>`window_id` | `integer` | required | Target window ID from list_windows. |

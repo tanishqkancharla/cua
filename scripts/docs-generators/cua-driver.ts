@@ -200,46 +200,10 @@ export const CLI_GROUPS: CliGroup[] = [
     ],
   },
   {
-    slug: 'daemon',
-    title: 'Daemon',
-    summary: 'Run, stop and inspect the daemon, its sessions and autostart',
-    commands: ['serve', 'stop', 'status', 'sessions', 'revoke', 'autostart'],
-  },
-  {
-    slug: 'permissions',
-    title: 'Permissions and diagnostics',
-    summary: 'Native platform status, macOS permission grants and diagnostic probes',
-    commands: ['permissions', 'doctor', 'diagnose'],
-  },
-  {
-    slug: 'recording',
-    title: 'Trajectory recording',
-    summary: 'Record, inspect and render action trajectories',
-    commands: ['recording'],
-  },
-  {
-    slug: 'history',
-    title: 'Computer History',
-    summary: 'The encrypted, metadata-only Computer History preview',
-    commands: ['history'],
-  },
-  {
-    slug: 'config',
-    title: 'Configuration',
-    summary: 'Driver configuration, telemetry, cursor themes and cursor motion',
-    commands: ['config', 'telemetry', 'cursor-theme', 'cursor'],
-  },
-  {
-    slug: 'extensions',
-    title: 'Skills and extensions',
-    summary: 'The agent skill pack, signed extensions and the perception parser',
-    commands: ['skills', 'extension', 'perception'],
-  },
-  {
-    slug: 'updates',
-    title: 'Updates',
-    summary: 'Check for and apply updates, and choose the release channel',
-    commands: ['check-update', 'update', 'channel'],
+    slug: 'skills-recording-and-history',
+    title: 'Skills, recording and history',
+    summary: 'The agent skill pack, signed extensions and the perception parser; trajectory recording; the Computer History preview',
+    commands: ['skills', 'extension', 'perception', 'recording', 'history'],
   },
 ];
 
@@ -503,7 +467,7 @@ export function referenceFiles(
   const own = mcpSnapshot(docs.mcp);
   snapshots.set(platform, own);
   const files = new Map<string, string>();
-  for (const [p, content] of renderReference(docs.cli, snapshots)) files.set(path.join(outDir, p), content);
+  for (const [p, content] of renderReference(docs.cli, snapshots)) files.set(path.join(outDir, p), content.replace(/[ \t]+$/gm, ''));
   files.set(path.join(specDir, 'cua-driver.json'), stableJson(docs.cli));
   files.set(snapshotPath(platform, specDir), stableJson(own));
   return files;

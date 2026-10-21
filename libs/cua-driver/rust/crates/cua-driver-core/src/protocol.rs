@@ -411,7 +411,8 @@ Chrome/Edge/Brave: `get_browser_state({{pid, window_id}})`, `detail.next_call` (
 
 `start_session` is optional; repeat a short `session` label on every call that accepts it. On continuation/recent-work call `history_status`; if ready, one bounded initial `history_query` before broad discovery.{permission_line}
 
-Guides: `get_guide({{topic}})` (drag,browser,permissions,batching,menus), `skill://cua-driver/SKILL.md`{platform_skill_pointer}."#    )
+Guides: `get_guide({{topic}})` (drag,browser,permissions,batching,menus), `skill://cua-driver/SKILL.md`{platform_skill_pointer}."#
+    )
 }
 
 #[cfg(test)]
