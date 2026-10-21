@@ -607,45 +607,11 @@ impl Tool for HotkeyTool {
                             )?;
                             Ok(())
                         }
-                        // Screen Sharing is an input forwarder: modifier flags
-                        // on a PID-routed base-key event are not relayed to the
-                        // guest. Emit the physical modifier down/base/up
-                        // sequence through the guarded foreground HID path.
-                        (true, false, Some(wid), None)
-                            if crate::input::keyboard::is_screen_sharing_pid(pid) =>
-                        {
-                            crate::input::skylight::with_foreground_hid_activation(
-                                pid as libc::pid_t,
-                                wid,
-                                || crate::input::keyboard::press_key_bare_global(&key, &m),
-                            )?;
-                            Ok(())
-                        }
-                        // Closing a Safari tab needs the exact window to stay
-                        // key through AppKit's close dispatch. The fast menu
-                        // shortcut path can restore the prior app before
-                        // Cmd+W is consumed, silently leaving the tab open.
-                        (true, false, Some(wid), None)
-                            if key.eq_ignore_ascii_case("w")
-                                && m.iter()
-                                    .any(|modifier| modifier.eq_ignore_ascii_case("cmd")) =>
-                        {
-                            crate::input::skylight::with_foreground_hid_activation(
-                                pid as libc::pid_t,
-                                wid,
-                                || crate::input::keyboard::hotkey_no_auth(pid, &key, &m),
-                            )?;
-                            Ok(())
-                        }
-                        // Foreground shortcuts must reach the guarded HID queue.
-                        // Brief menu activation plus PID-routed flags can return
-                        // before Safari consumes Cmd+[ or creates its new window.
-                        // Keep the exact window active through physical delivery.
                         (true, false, Some(wid), None) => {
                             crate::input::skylight::with_foreground_hid_activation(
                                 pid as libc::pid_t,
                                 wid,
-                                || crate::input::keyboard::press_key_global(&key, &m),
+                                || crate::input::keyboard::press_key_bare_global(&key, &m),
                             )?;
                             Ok(())
                         }
