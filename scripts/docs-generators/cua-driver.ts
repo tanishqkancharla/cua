@@ -8,9 +8,9 @@
  *
  * - docs/content/docs/cua-driver/reference/index.mdx (the Reference index)
  * - docs/content/docs/cua-driver/reference/cli/ (one page per command group)
- * - docs/content/docs/cua-driver/reference/mcp-tools/ (one page per tool
- *   category, every platform on one page: tabs where macOS, Linux and
- *   Windows differ)
+ * - docs/content/docs/cua-driver/reference/mcp-tools/ (an index and a few
+ *   pages of tool categories, MCP_PAGES; every platform on one page: tabs
+ *   where macOS, Linux and Windows differ)
  * - scripts/docs-generators/cli-specs/cua-driver.json (the CLI, host
  *   independent: the CLI-shape lane's oracle)
  * - scripts/docs-generators/cli-specs/cua-driver-mcp-<platform>.json (the
@@ -48,6 +48,7 @@ import { readHeader } from './lib/headers';
 import {
   type JsonSchema,
   type McpCategory,
+  type McpPage,
   type McpReference,
   type McpToolEntry,
   mcpIndexRows,
@@ -186,10 +187,17 @@ export function getLatestReleasedVersion(git: GitRunner = runGit): string {
 
 export const CLI_GROUPS: CliGroup[] = [
   {
-    slug: 'mcp',
-    title: 'Tools and MCP',
-    summary: 'Serve MCP, print client config, and list, describe or call tools from the shell',
-    commands: ['mcp', 'mcp-config', 'list-tools', 'describe', 'call', 'manifest', 'dump-docs'],
+    slug: 'serve-and-configure',
+    title: 'Serve, configure and update',
+    summary:
+      'Serve MCP and call tools from the shell; run the daemon; grant permissions and diagnose; configure the driver, telemetry and cursor; update and pick a release channel',
+    commands: [
+      'mcp', 'mcp-config', 'list-tools', 'describe', 'call', 'manifest', 'dump-docs',
+      'serve', 'stop', 'status', 'sessions', 'revoke', 'autostart',
+      'permissions', 'doctor', 'diagnose',
+      'config', 'telemetry', 'cursor-theme', 'cursor',
+      'check-update', 'update', 'channel',
+    ],
   },
   {
     slug: 'daemon',
@@ -325,7 +333,7 @@ export const MCP_CATEGORIES: Array<McpCategory & { tools: string[] }> = [
     slug: 'browser-input',
     title: 'Browser input tools',
     summary: 'Exact browser input over CDP: clicks, typing, pointer, dialogs, files and downloads',
-    tools: ['browser_click', 'browser_type', 'browser_key', 'browser_pointer', 'browser_dialog', 'browser_set_input_files', 'browser_download'],
+    tools: ['browser_click', 'browser_type', 'browser_key', 'browser_select', 'browser_pointer', 'browser_dialog', 'browser_set_input_files', 'browser_download'],
   },
   {
     slug: 'sessions',
@@ -348,8 +356,36 @@ export const MCP_CATEGORIES: Array<McpCategory & { tools: string[] }> = [
   {
     slug: 'maintenance',
     title: 'Configuration and maintenance tools',
-    summary: 'Configuration, permissions, health, updates and extensions',
-    tools: ['get_config', 'set_config', 'check_permissions', 'health_report', 'check_for_update', 'install_extension'],
+    summary: 'Configuration, permissions, health, updates, extensions and on-demand guides',
+    tools: ['get_config', 'set_config', 'check_permissions', 'health_report', 'check_for_update', 'install_extension', 'get_guide'],
+  },
+];
+
+/** The MCP tool pages: several categories each. */
+export const MCP_PAGES: McpPage[] = [
+  {
+    slug: 'apps-windows-and-screen',
+    title: 'Apps, windows and screen',
+    summary: 'Apps and windows, window state and screenshots, the screen, and lifecycle sessions',
+    categories: ['apps-and-windows', 'window-state', 'screen', 'sessions'],
+  },
+  {
+    slug: 'click-and-type',
+    title: 'Click and type',
+    summary: 'Clicks, typing, keys and shortcuts, element values and the clipboard',
+    categories: ['click', 'double-and-right-click', 'keyboard', 'keys-and-shortcuts', 'values-and-clipboard'],
+  },
+  {
+    slug: 'pointer-cursor-and-browser',
+    title: 'Pointer, cursor and browser',
+    summary: 'Drag, scroll and move the pointer; the agent cursor; web pages and browser input',
+    categories: ['pointer', 'agent-cursor', 'page', 'browser-input'],
+  },
+  {
+    slug: 'batch-recording-and-settings',
+    title: 'Batch, recording and settings',
+    summary: 'Run several actions in one call, record and replay trajectories, and configuration and maintenance',
+    categories: ['batch', 'recording', 'maintenance'],
   },
 ];
 
@@ -414,6 +450,7 @@ export function mcpReference(snapshots: Map<ReferencePlatform, McpSnapshot>, ver
     tools: mergeTools(snapshots),
     header: readHeader('cua-driver', 'mcp-tools'),
     platforms: referencePlatforms.map((p) => p.name),
+    pages: MCP_PAGES,
   };
 }
 

@@ -45,7 +45,7 @@ TYPES = [
     ("keyvault/client.rs", "keyvault::client", ["KvOutcome"]),
     ("billing.rs", "billing", ["BillingCard", "BillingCredit", "BillingStatus", "CreditNotice"]),
     ("drive_settings.rs", "drive_settings", ["DriveMountInput", "DriveS3Input", "DriveStorageInput", "DriveCheckInput", "DriveCacheInput", "StorageInput", "DriveStorageUpdate", "StorageForm", "StorageField", "StorageRequest", "StorageState", "StorageAction"]),
-    ("onboarding.rs", "onboarding", ["OnboardingStep", "DriveStepRequest", "StorageChoice", "OnboardingMode", "OnboardingState", "OnboardingAction", "StepDot", "UsageToggle", "ModeChoice", "OnboardingView", "DriveCard", "PresentationCard", "OnboardingCopy", "OnboardingCheckbox"]),
+    ("onboarding.rs", "onboarding", ["OnboardingStep", "DriveStepRequest", "StorageChoice", "OnboardingMode", "OnboardingState", "OnboardingAction", "OnboardingTodoId", "OnboardingTodo", "StepDot", "UsageToggle", "ModeChoice", "OnboardingView", "DriveCard", "PresentationCard", "OnboardingCopy", "OnboardingCheckbox"]),
     ("onboarding_preview.rs", "onboarding_preview", ["PreviewPoint", "NotchPreview", "MenuPreviewRow", "MenuPreview", "PresentationPreview", "PreviewFrame"]),
     ("driver_preview.rs", "driver_preview", ["PreviewSegment", "PreviewWindow", "DriverPreview", "DriverFrame"]),
     ("drive_mount_preview.rs", "drive_mount_preview", ["DriveMountPreview", "DriveMountFrame"]),
@@ -69,7 +69,8 @@ TYPES = [
     ("checklist.rs", "checklist", ["ChecklistStep", "ChecklistState", "ChecklistAction", "ChecklistSeen", "ChecklistTransition", "ChecklistRow", "ChecklistView"]),
     ("palette.rs", "palette", ["Keybinding", "PaletteEntry"]),
     ("teams.rs", "teams", ["TeamPersonInput", "TeamInput", "TeamsState", "TeamsInput"]),
-    ("relay_usage.rs", "relay_usage", ["RelayUsageTeam", "RelayUsage", "RelayAllowanceNotice", "RelayUsageView"]),
+    ("relay_usage.rs", "relay_usage", ["RelayUsageTeam", "RelayUsage", "RelayAllowanceNotice", "PlanLink", "PlanCard", "RelayUsageView"]),
+    ("resources.rs", "resources", ["DiskLevel", "DiskWarning", "ComputerResources", "GuestUsage", "DiskOnHost", "SpaceResources", "ResourcesSnapshot", "ResourceTone", "ResourceRow", "WarningView", "ThisMacView", "SpaceResourcesView", "ComputerView", "ResourcesView"]),
 ]
 
 # FFI names that read better than the plain prefix.

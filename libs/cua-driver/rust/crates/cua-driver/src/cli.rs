@@ -48,6 +48,8 @@ pub enum Command {
     },
     McpConfig {
         client: Option<String>,
+        /// Skip installing the skill pack for `client` (`--no-skills`).
+        no_skills: bool,
     },
     Serve {
         socket: Option<String>,
@@ -134,6 +136,8 @@ pub enum Command {
     },
     Doctor {
         json: bool,
+        /// macOS: make LaunchServices forget every other copy of the app.
+        fix: bool,
     },
     Diagnose,
     /// `opensky-driver permissions status|grant [--json]` — report TCC status
@@ -860,7 +864,10 @@ pub fn parse_command() -> Command {
             grants: grants.clone(),
         },
         Some("list-tools") => Command::ListTools,
-        Some("mcp-config") => Command::McpConfig { client: mcp_client },
+        Some("mcp-config") => Command::McpConfig {
+            client: mcp_client,
+            no_skills: args.iter().any(|a| a == "--no-skills"),
+        },
         Some("serve") => Command::Serve {
             socket,
             pid_file: flag_value(&args, "--pid-file"),
@@ -976,7 +983,8 @@ pub fn parse_command() -> Command {
             // `--json` switches to machine-readable output for scripting.
             // Bare flag — no value, position-independent.
             let json = args.iter().any(|a| a == "--json");
-            Command::Doctor { json }
+            let fix = args.iter().any(|a| a == "--fix");
+            Command::Doctor { json, fix }
         }
         Some("diagnose") => Command::Diagnose,
         Some("permissions") => {
@@ -1505,7 +1513,7 @@ fn launch_daemon_with_state_and_wait(
              at that path, then run `{cli_name} permissions grant`.",
                 status.code(),
                 if pass_socket {
-                    format!(" --socket {socket_path}")
+                    format!(" (socket {socket_path})")
                 } else {
                     String::new()
                 },
@@ -2102,8 +2110,11 @@ pub fn build_manifest() -> serde_json::Value {
                   { "name": "--socket", "type": "string", "description": "Override the required daemon socket path." }
               ] },
             { "name": "mcp-config",
-              "description": "Print client-specific connection guidance (MCP config where supported).",
-              "args": [ { "name": "--client", "type": "string", "description": "One of: claude, codex, cursor, hermes, antigravity, openclaw, opencode, pi, prime-agent, qwen, droid, zcode. Omit for the generic snippet." } ] },
+              "description": "Print client-specific connection guidance (MCP config where supported) and, with --client, install the skill pack for that agent.",
+              "args": [
+                  { "name": "--client", "type": "string", "description": "One of: claude, codex, cursor, hermes, antigravity, openclaw, opencode, pi, prime-agent, qwen, droid, zcode. Omit for the generic snippet." },
+                  { "name": "--no-skills", "type": "flag", "description": "With --client, do not install the cua-driver skill pack for that agent." }
+              ] },
             { "name": "manifest",
               "description": "Emit this machine-readable description of the CLI surface.",
               "args": [ { "name": "--pretty", "type": "flag", "description": "Pretty-print the JSON." } ] },
@@ -2148,7 +2159,10 @@ pub fn build_manifest() -> serde_json::Value {
               ] },
             { "name": "doctor",
               "description": "Self-diagnose probes for runtime prerequisites (permissions, accessibility, capture, etc.).",
-              "args": [ { "name": "--json", "type": "flag", "description": "Machine-readable doctor report." } ] },
+              "args": [
+                  { "name": "--json", "type": "flag", "description": "Machine-readable doctor report." },
+                  { "name": "--fix", "type": "flag", "description": "macOS: make LaunchServices forget every other copy of CuaDriver.app (no files are deleted)." }
+              ] },
             { "name": "diagnose",
               "description": "Emit a developer-focused diagnostic dump suitable for bug reports.",
               "args": [] },
@@ -2228,7 +2242,14 @@ pub fn build_manifest() -> serde_json::Value {
 /// `--client <name>` selects one of: claude, codex, cursor, hermes,
 /// antigravity, openclaw, opencode, pi, prime-agent, qwen, droid, zcode.
 /// Omit for the generic JSON snippet.
-pub fn run_mcp_config(client: Option<&str>) {
+///
+/// A named client also gets the skill pack for its agent, because agents
+/// connected over MCP rarely read the skill resource on their own. One line
+/// on stderr (stdout stays the pasteable config) says where it went; pass
+/// `no_skills` (`--no-skills`) to leave the agent's skills folder alone. Only a
+/// failure to print the config exits nonzero: a skill pack that cannot be
+/// installed is reported and does not fail the command.
+pub fn run_mcp_config(client: Option<&str>, no_skills: bool) {
     let binary = std::env::current_exe()
         .ok()
         .and_then(|p| p.to_str().map(str::to_owned))
@@ -2456,6 +2477,15 @@ pub fn run_mcp_config(client: Option<&str>) {
         Some(other) => {
             eprintln!("Unknown client '{other}'. Valid: claude, codex, cursor, antigravity, openclaw, opencode, hermes, pi, prime-agent, qwen, droid, zcode.");
             process::exit(2);
+        }
+    }
+
+    // A client that got past the match above is a known one.
+    if let Some(client) = client.filter(|client| !client.is_empty()) {
+        if !no_skills {
+            if let Some(line) = crate::skills::install_for_client_line(client) {
+                eprintln!("{line}");
+            }
         }
     }
 }
@@ -4541,11 +4571,11 @@ fn cli_docs_literal() -> serde_json::Value {
             },
             {
                 "name": "mcp-config",
-                "abstract": "Print client-specific connection guidance (MCP config where supported).",
-                "discussion": "Supported clients include claude, codex, cursor, antigravity, openclaw, opencode, hermes, pi, prime-agent, qwen, droid, and zcode.",
+                "abstract": "Print client-specific connection guidance (MCP config where supported) and install the skill pack for that agent.",
+                "discussion": "Supported clients include claude, codex, cursor, antigravity, openclaw, opencode, hermes, pi, prime-agent, qwen, droid, and zcode. With --client, the cua-driver skill pack is also installed for that agent (not for qwen, droid or zcode, which have no skills folder), and one line on stderr says where; --no-skills skips it.",
                 "arguments": no_args,
                 "options": [{"name":"client","short_name":null,"help":"Client name to print configuration for.","type":"String","default_value":null,"is_optional":true}],
-                "flags": no_flags,
+                "flags": [{"name":"no-skills","short_name":null,"help":"With --client, do not install the cua-driver skill pack for that agent.","default_value":false}],
                 "subcommands": no_subcommands
             },
             {
@@ -4665,10 +4695,10 @@ fn cli_docs_literal() -> serde_json::Value {
             {
                 "name": "doctor",
                 "abstract": "Run platform-aware diagnostic probes.",
-                "discussion": "Exit code is non-zero when any probe is an error.",
+                "discussion": "Exit code is non-zero when any probe is an error. On macOS it warns about other copies of CuaDriver.app that macOS can launch instead of the installed one, and about permission rows tied to a different path or version.",
                 "arguments": no_args,
                 "options": no_options,
-                "flags": [{"name":"json","short_name":null,"help":"Emit the probe report as JSON.","default_value":false}],
+                "flags": [{"name":"json","short_name":null,"help":"Emit the probe report as JSON.","default_value":false},{"name":"fix","short_name":null,"help":"macOS: make LaunchServices forget every other copy of CuaDriver.app. No files are deleted.","default_value":false}],
                 "subcommands": no_subcommands
             },
             {
@@ -4832,7 +4862,8 @@ const CLI_EXAMPLES: &[(&str, &[(&str, &str)])] = &[
     ("permissions grant", &[("opensky-driver permissions grant", "Request the grants for OpenSkyDriver.app")]),
     ("mcp-config", &[
         ("opensky-driver mcp-config", "Print a generic mcpServers entry"),
-        ("opensky-driver mcp-config --client codex", "Print setup for Codex"),
+        ("opensky-driver mcp-config --client codex", "Print setup for Codex and install its skill pack"),
+        ("opensky-driver mcp-config --client codex --no-skills", "Print setup for Codex only"),
     ]),
     ("recording", &[("opensky-driver recording", "Print the current recording state")]),
     ("recording start", &[("opensky-driver recording start ~/cua-trajectories/demo1", "Record turns into a directory")]),
@@ -4870,6 +4901,7 @@ const CLI_EXAMPLES: &[(&str, &[(&str, &str)])] = &[
     ("doctor", &[
         ("opensky-driver doctor", "Run the diagnostic probes"),
         ("opensky-driver doctor --json", "Emit the probe report as JSON"),
+        ("opensky-driver doctor --fix", "macOS: make macOS forget extra copies of the app (deletes no files)"),
     ]),
     ("diagnose", &[("opensky-driver diagnose", "Print an install and permission report to paste into an issue")]),
     ("autostart", &[("opensky-driver autostart status", "Check the autostart entry")]),
@@ -5432,11 +5464,13 @@ pub fn run_config_cmd(
 ///
 /// See [`crate::doctor`] for the probe catalog. Output is plain text by
 /// default; `--json` switches to a machine-readable shape for scripting.
+/// `--fix` (macOS) also makes LaunchServices forget every other copy of the
+/// app; it never deletes a file.
 /// Exit code is `0` when every probe is `[ok]` or `[warn]`, non-zero when
 /// at least one `[err]` probe failed (e.g. the binary cannot resolve its
 /// own install dir).
-pub fn run_doctor_cmd(json: bool) {
-    let report = crate::doctor::run();
+pub fn run_doctor_cmd(json: bool, fix: bool) {
+    let report = crate::doctor::run(fix);
 
     if json {
         let val = report.to_json();
@@ -5842,6 +5876,27 @@ mod tests {
         assert!(launch
             .windows(2)
             .any(|pair| pair == ["--socket", "/tmp/history-test.sock"]));
+    }
+
+    /// The daemon must be launched from the exact installed bundle path. `open -a
+    /// CuaDriver` lets LaunchServices pick any registered copy named CuaDriver
+    /// (an old version in the Trash or a benchmark folder), which then owns the
+    /// permission prompts and the System Settings entry.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn daemon_launch_targets_the_exact_bundle_path_not_the_app_name() {
+        let launch = daemon_launch_arguments(
+            "/Applications/CuaDriver.app",
+            &crate::serve::default_socket_path(),
+            &crate::history_runtime::DaemonLaunchState::default(),
+            false,
+        );
+        assert_eq!(
+            launch,
+            ["-n", "-g", "/Applications/CuaDriver.app", "--args", "serve"]
+        );
+        assert!(!launch.contains(&"-a".to_owned()));
+        assert!(!launch.contains(&"CuaDriver".to_owned()));
     }
 
     #[test]

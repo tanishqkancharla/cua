@@ -356,6 +356,7 @@ const BROWSER_BOUND_INPUT_OPERATIONS: &[&str] = &[
     "browser_click",
     "browser_type",
     "browser_key",
+    "browser_select",
     "browser_pointer",
 ];
 const BROWSER_BOUND_INPUT_SCOPE_KEYS: &[&str] = &[
@@ -879,6 +880,7 @@ pub fn advertised_risk_for(tool: &str) -> RiskAssessment {
         | "get_agent_cursor_state"
         | "get_recording_state"
         | "check_for_update"
+        | "get_guide"
         | "health_report"
         | "probe" => RiskClass::R0,
 
@@ -935,6 +937,7 @@ pub fn advertised_risk_for(tool: &str) -> RiskAssessment {
         | "browser_click"
         | "browser_type"
         | "browser_key"
+        | "browser_select"
         | "browser_pointer"
         | "history_status"
         | "history_query"
@@ -1979,6 +1982,10 @@ mod tests {
         );
         assert_eq!(
             ids("browser_click", serde_json::json!({})),
+            vec!["browser_bound_input"]
+        );
+        assert_eq!(
+            ids("browser_select", serde_json::json!({})),
             vec!["browser_bound_input"]
         );
         assert_eq!(
