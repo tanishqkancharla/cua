@@ -51,7 +51,7 @@ impl Sandbox {
     }
 
     fn stage(&self) -> PathBuf {
-        self.driver_home.join("skills").join("cua-driver")
+        self.driver_home.join("skills").join("opensky-driver")
     }
 }
 
@@ -161,32 +161,36 @@ mod placement {
     /// (made first, as the agent does on its first run) and the link the
     /// skill pack must land at.
     const AGENTS: &[(&str, &str, &[&str])] = &[
-        ("claude", ".claude", &[".claude/skills/cua-driver"]),
-        ("claude-code", ".claude", &[".claude/skills/cua-driver"]),
-        ("codex", ".codex", &[".agents/skills/cua-driver"]),
-        ("cursor", ".cursor", &[".agents/skills/cua-driver"]),
-        ("pi", ".pi/agent", &[".agents/skills/cua-driver"]),
-        ("openclaw", ".openclaw", &[".openclaw/skills/cua-driver"]),
+        ("claude", ".claude", &[".claude/skills/opensky-driver"]),
+        ("claude-code", ".claude", &[".claude/skills/opensky-driver"]),
+        ("codex", ".codex", &[".agents/skills/opensky-driver"]),
+        ("cursor", ".cursor", &[".agents/skills/opensky-driver"]),
+        ("pi", ".pi/agent", &[".agents/skills/opensky-driver"]),
+        (
+            "openclaw",
+            ".openclaw",
+            &[".openclaw/skills/opensky-driver"],
+        ),
         (
             "opencode",
             ".config/opencode",
-            &[".config/opencode/skills/cua-driver"],
+            &[".config/opencode/skills/opensky-driver"],
         ),
-        ("hermes", ".hermes", &[".hermes/skills/cua-driver"]),
+        ("hermes", ".hermes", &[".hermes/skills/opensky-driver"]),
         (
             "prime-agent",
             ".prime/agent",
-            &[".prime/agent/skills/cua-driver"],
+            &[".prime/agent/skills/opensky-driver"],
         ),
         (
             "antigravity",
             ".gemini/config",
-            &[".gemini/config/skills/cua-driver"],
+            &[".gemini/config/skills/opensky-driver"],
         ),
         (
             "gemini",
             ".gemini/antigravity-cli",
-            &[".gemini/antigravity-cli/skills/cua-driver"],
+            &[".gemini/antigravity-cli/skills/opensky-driver"],
         ),
     ];
 
@@ -241,13 +245,13 @@ mod placement {
         assert!(output.status.success());
         assert_linked_to_the_pack(
             &sandbox,
-            &sandbox.home.join(".gemini/config/skills/cua-driver"),
+            &sandbox.home.join(".gemini/config/skills/opensky-driver"),
         );
         assert_linked_to_the_pack(
             &sandbox,
             &sandbox
                 .home
-                .join(".gemini/antigravity-cli/skills/cua-driver"),
+                .join(".gemini/antigravity-cli/skills/opensky-driver"),
         );
         assert_eq!(only_line(&output).matches("skill pack").count(), 1);
     }
@@ -287,13 +291,16 @@ mod placement {
             "{}",
             stderr(&second)
         );
-        assert_linked_to_the_pack(&sandbox, &sandbox.home.join(".agents/skills/cua-driver"));
+        assert_linked_to_the_pack(
+            &sandbox,
+            &sandbox.home.join(".agents/skills/opensky-driver"),
+        );
     }
 
     #[test]
     fn a_skill_folder_the_user_made_is_never_replaced() {
         let sandbox = Sandbox::new();
-        let mine = sandbox.home.join(".claude/skills/cua-driver");
+        let mine = sandbox.home.join(".claude/skills/opensky-driver");
         fs::create_dir_all(&mine).unwrap();
         fs::write(mine.join("SKILL.md"), "my own notes").unwrap();
 
@@ -328,7 +335,7 @@ mod placement {
             "the checkout behind the link must not be rewritten"
         );
         assert!(
-            fs::symlink_metadata(sandbox.home.join(".claude/skills/cua-driver"))
+            fs::symlink_metadata(sandbox.home.join(".claude/skills/opensky-driver"))
                 .unwrap()
                 .file_type()
                 .is_symlink()
