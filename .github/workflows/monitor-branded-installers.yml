@@ -36,6 +36,7 @@ on:
       - "libs/cua-driver/scripts/_install-common.psm1"
       - "libs/cua-driver/scripts/_install-common.sh"
       - "libs/cua-driver/scripts/_install-rust.sh"
+      - "libs/cua-driver/scripts/_upstream-install.ps1"
       - "libs/cua-driver/scripts/install.ps1"
       - "libs/cua-driver/scripts/install.sh"
   workflow_dispatch:

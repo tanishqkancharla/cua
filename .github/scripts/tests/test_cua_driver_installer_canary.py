@@ -39,6 +39,7 @@ def test_canary_runs_often_and_after_every_installer_change(workflow: dict) -> N
     for required in (
         ".github/release-state/cua-driver-rs-*",
         "libs/cua-driver/scripts/_install-rust.sh",
+        "libs/cua-driver/scripts/_upstream-install.ps1",
         "libs/cua-driver/scripts/install.sh",
         "libs/cua-driver/scripts/install.ps1",
     ):
