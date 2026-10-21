@@ -380,7 +380,7 @@ fn agent_instructions() -> String {
     // exception to "system prompts belong to the user"; the steps and
     // guardrails live in MACOS.md ("Install and approve permissions").
     let permission_line = if cfg!(target_os = "macos") {
-        "\n\nmacOS: if `check_permissions` shows Accessibility or Screen Recording off, ask the user; approve Cua Driver's own prompts only if the owner explicitly authorized it (MACOS.md)."
+        "\n\nmacOS: `check_permissions` off? ask the user; approve OpenSky Driver's own prompts only if the owner explicitly authorized it (MACOS.md)."
     } else {
         ""
     };
@@ -397,22 +397,21 @@ fn agent_instructions() -> String {
     };
 
     format!(
-        r#"OpenSky Driver: background GUI automation. No shell: for non-GUI outcomes use an app API/SDK, CLI or filesystem and read the result back there.
+        r#"OpenSky Driver. No shell: non-GUI outcomes use app API/SDK/CLI/filesystem; read the result back there.
 
-1. `list_windows({{app:"Name"}})` or `launch_app` for `pid` and `window_id`.
-2. Read narrowly: `get_window_state` with `query:"Save"`. Re-read with `since:"latest"`.
-3. Act by `element_token` ({tree_kind}): row `[N]` is `<snapshot_id>:N`. Pixels only for surfaces missing from the tree.
-4. Act through `run_steps({{steps:[{{tool,args}}],observe:{{}}}})`, even for one step: stops at the first failure, returns what changed.{script_line}
-5. Verify at checkpoints, not after every action: `verify_state(pid, window_id, expect)`. `unknown` and `effect:"unverifiable"` are not success.
+1. `list_windows({{app:"Name"}})`/`launch_app` → `pid`, `window_id`.
+2. Read narrowly: `get_window_state`, `query:"Save"`, `since:"latest"`.
+3. Act by `element_token`: row `[N]`=`<snapshot_id>:N` ({tree_kind}); pixels for missing surfaces.
+4. `run_steps({{steps:[{{tool,args}}],observe:{{}}}})`: stops on failure, reports changes.{script_line}
+5. Verify at checkpoints, not after every action: `verify_state(pid,window_id,expect)`; `unknown` and `effect:"unverifiable"` are not success.
 
-Use the narrowest semantic route first: `set_window_frame` plus `list_windows` for geometry, typed browser tools for pages. Stay in the background; `delivery_mode:"foreground"` only if refused or unverifiable.
+Use the narrowest semantic route first: `set_window_frame` plus `list_windows` for geometry; typed browser tools for pages. Background by default; `delivery_mode:"foreground"` after refusal/unverifiable.
 
-Chrome/Edge/Brave page: `get_browser_state({{pid, window_id}})`, its `detail.next_call` (`browser_prepare`) if refused, then `browser_click`/`browser_type`/`browser_pointer` (hover, drag); never desktop pointer tools.
+Chrome/Edge/Brave: `get_browser_state({{pid, window_id}})`, `detail.next_call` (`browser_prepare`) if refused; `browser_click`/`browser_type`/`browser_pointer` (hover, drag); never desktop pointer tools.
 
-`start_session` is optional; repeat a short `session` label on every call that accepts it. On continuation/recent-work, call `history_status`; if ready, make one bounded initial `history_query` before broad discovery.{permission_line}
+`start_session` is optional; repeat a short `session` label on every call that accepts it. On continuation/recent-work call `history_status`; if ready, one bounded initial `history_query` before broad discovery.{permission_line}
 
-Guides: `get_guide({{topic}})` (drag, browser, permissions, batching, menus), `skill://cua-driver/SKILL.md`{platform_skill_pointer}."#
-    )
+Guides: `get_guide({{topic}})` (drag,browser,permissions,batching,menus), `skill://cua-driver/SKILL.md`{platform_skill_pointer}."#    )
 }
 
 #[cfg(test)]
@@ -554,7 +553,7 @@ mod agent_instruction_tests {
     #[test]
     fn macos_instructions_gate_permission_approval_on_owner_authorization() {
         let instructions = agent_instructions();
-        let has_line = instructions.contains("Cua Driver's own prompts");
+        let has_line = instructions.contains("OpenSky Driver's own prompts");
         assert_eq!(
             has_line,
             cfg!(target_os = "macos"),
@@ -565,7 +564,7 @@ mod agent_instruction_tests {
             // explicit owner authorization; MACOS.md holds the detail.
             assert!(instructions.contains("ask the user"));
             assert!(instructions.contains(
-                "approve Cua Driver's own prompts only if the owner explicitly authorized it"
+                "approve OpenSky Driver's own prompts only if the owner explicitly authorized it"
             ));
             assert!(instructions.contains("(MACOS.md)"));
             assert!(instructions.contains("`check_permissions`"));

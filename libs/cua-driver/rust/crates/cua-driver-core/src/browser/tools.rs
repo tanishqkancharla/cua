@@ -4145,7 +4145,6 @@ mod tests {
             ),
             (
                 BrowserKeyTool::new(e.clone()).def().clone(),
-                BrowserSelectTool::new(e.clone()).def().clone(),
                 "browser_key",
             ),
             (
@@ -4181,6 +4180,7 @@ mod tests {
             BrowserClickTool::new(e.clone()).def().clone(),
             BrowserTypeTool::new(e.clone()).def().clone(),
             BrowserKeyTool::new(e.clone()).def().clone(),
+            BrowserSelectTool::new(e.clone()).def().clone(),
             BrowserDialogTool::new(e.clone()).def().clone(),
             BrowserSetInputFilesTool::new(e.clone()).def().clone(),
             BrowserDownloadTool::new(e.clone()).def().clone(),
