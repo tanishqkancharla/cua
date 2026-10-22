@@ -1354,8 +1354,9 @@ struct KeyboardRoute {
 
 /// Best-effort-background ladder for `type_text`.
 ///
-/// - `delivery_mode == Background` (default): AX insert → read-back; on a
-///   silent/unreadable accept, CGEvent keystrokes → read-back. Never fronts.
+/// - `delivery_mode == Background` (default): AX insert → read-back; only an
+///   AX rejection permits CGEvent keystrokes → read-back. An acknowledged but
+///   unobservable edit returns uncertainty without replay. Never fronts.
 /// - `delivery_mode == Foreground`: the agent's explicit last resort — briefly
 ///   front `window_id`, insert at the current cursor, restore, then read-back.
 ///
@@ -1729,6 +1730,18 @@ fn type_text_in_key_window(
             None => AxAttempt::Rejected,
             Some(TypedProgress::Complete | TypedProgress::Partial(_)) => unreachable!(),
         };
+        // A successful AX setter may consume input and clear its displayed
+        // value. Unchanged/unreadable readback is not a rejection: posting the
+        // same text as keystrokes would replay an already accepted edit.
+        if matches!(ax_attempt, AxAttempt::Unchanged | AxAttempt::Unverifiable) {
+            let idx_str = idx_opt.map(|i| format!(" [{i}]")).unwrap_or_default();
+            return Ok(TypeTextDelivery::Typed(TypeTextOutcome {
+                detail: format!(" via acknowledged AX write into{idx_str} {role} \"{title}\""),
+                path: PATH_AX,
+                verified: false,
+                delivered_chars: None,
+            }));
+        }
         tracing::debug!(
             "AX write did not land for {role} \"{title}\" (err={err}); \
              falling back to CGEvent keystrokes"
