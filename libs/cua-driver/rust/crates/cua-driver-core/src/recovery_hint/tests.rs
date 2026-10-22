@@ -610,6 +610,11 @@ fn unverifiable_actions_read_what_changed() {
                 "{tool} {effect}"
             );
             assert_eq!(call_value(&hint), read_changes, "{tool} {effect}");
+            if tool == "type_text" {
+                assert!(hint.hint.contains("application effect is unverified"));
+                assert!(hint.hint.contains("do not retry automatically"));
+                assert!(!hint.hint.contains("was delivered"));
+            }
         }
     }
     let click = hint_for("click", &seed, false, json!({"effect": "unverifiable"}));
