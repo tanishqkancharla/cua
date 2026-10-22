@@ -1291,7 +1291,8 @@ fn cgevent_type_verified(
     // particular, Chromium can acknowledge the posting process while a long
     // tail remains queued. Poll the AX value until the complete payload is
     // visible instead of treating any growth as success. If the deadline
-    // expires after observable growth, surface the exact partial count.
+    // expires, only native readback can establish a partial delivery count;
+    // a web handler can retain a prefix after consuming the entire request.
     let deadline = std::time::Instant::now() + DELIVERY_DRAIN_TIMEOUT;
     Ok(await_typed_delivery(
         before,
@@ -1321,13 +1322,13 @@ fn await_typed_delivery(
             TypedProgress::Unverifiable => return (false, None),
             TypedProgress::Unchanged => {
                 // Native unchanged values can report zero delivery. Web fields
-                // may clear themselves after consuming input; the deadline
-                // branch below must withhold zero-delivery retry advice.
+                // may clear or retain a short value after consuming input;
+                // the deadline branch must withhold suffix-retry advice.
                 best_partial.get_or_insert(0);
             }
         }
         if std::time::Instant::now() >= deadline {
-            if best_partial == Some(0) && is_web() {
+            if is_web() {
                 best_partial = None;
             }
             return (false, best_partial);
@@ -1680,11 +1681,14 @@ fn type_text_in_key_window(
         } else {
             None
         };
-        // AXValue is not renderer evidence in web content. An unchanged echo
-        // there cannot prove that zero characters landed, so blind retry is
-        // unsafe even though no synthesis has run yet.
-        let unchanged_web_readback = ax_progress == Some(TypedProgress::Unchanged)
-            && target_in_web_area(pid, Some((element as usize, idx_opt)), window_id);
+        // AXValue is not renderer evidence in web content. An unchanged or
+        // partial echo cannot establish how many characters were consumed;
+        // a handler may retain only a prefix of a fully consumed request.
+        let uncertain_web_readback =
+            matches!(
+                ax_progress,
+                Some(TypedProgress::Unchanged | TypedProgress::Partial(_))
+            ) && target_in_web_area(pid, Some((element as usize, idx_opt)), window_id);
         // An AX insert bypasses NSTextView's edit model, so a document is
         // not marked edited and would never save the new text (DS-07).
         let document = if ax_progress == Some(TypedProgress::Complete) {
@@ -1715,11 +1719,11 @@ fn type_text_in_key_window(
                 detail: format!(" via partial AX write into{idx_str} {role} \"{title}\""),
                 path: PATH_AX,
                 verified: false,
-                delivered_chars: Some(delivered_chars),
+                delivered_chars: (!uncertain_web_readback).then_some(delivered_chars),
             }));
         }
         ax_attempt = match ax_progress {
-            Some(TypedProgress::Unchanged) if unchanged_web_readback => AxAttempt::Unverifiable,
+            Some(TypedProgress::Unchanged) if uncertain_web_readback => AxAttempt::Unverifiable,
             Some(TypedProgress::Unchanged) => AxAttempt::Unchanged,
             Some(TypedProgress::Unverifiable) => AxAttempt::Unverifiable,
             None => AxAttempt::Rejected,
@@ -2217,7 +2221,7 @@ mod tests {
     }
 
     #[test]
-    fn delivery_web_keeps_polling_and_preserves_positive_progress() {
+    fn delivery_web_keeps_polling_but_withholds_partial_retry_counts() {
         for complete in [true, false] {
             let mut reads = 0;
             let result = await_typed_delivery(
@@ -2237,7 +2241,7 @@ mod tests {
                         .to_owned(),
                     )
                 },
-                || panic!("positive progress must not probe ancestry"),
+                || true,
             );
             assert!(reads >= 2);
             assert_eq!(
@@ -2245,7 +2249,7 @@ mod tests {
                 if complete {
                     (true, Some(5))
                 } else {
-                    (false, Some(2))
+                    (false, None)
                 }
             );
         }
