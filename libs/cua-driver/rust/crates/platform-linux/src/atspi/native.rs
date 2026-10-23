@@ -3906,6 +3906,11 @@ pub fn element_bounds_ref(
         .then(x11_display_size)
         .flatten();
     let origin_attested = native_wayland_origin_attested(pid, xid);
+    let gtk_x11_origin = if offset.is_some() && !crate::wayland::is_wayland() {
+        x11_window_origin(xid)
+    } else {
+        None
+    };
     bounded_for(
         REF_ACTION_BUDGET,
         async {
@@ -3921,15 +3926,29 @@ pub fn element_bounds_ref(
                 Some(Err(e)) => return Err(anyhow!("Component unavailable: {e}")),
                 None => return Err(anyhow!("cached element did not answer in time")),
             };
+            let window_extents = if coord == CoordType::Window {
+                call(component.get_extents(CoordType::Window))
+                    .await
+                    .and_then(|result| result.ok())
+            } else {
+                None
+            };
             if coord == CoordType::Window {
                 if let Some(Ok(raw)) = call(component.get_extents(CoordType::Screen)).await {
-                    if screen_answer_overrides_window(raw, display, origin_attested) {
+                    if screen_answer_overrides_window(raw, display, origin_attested)
+                        && !x11_screen_is_window_local(raw, window_extents, gtk_x11_origin)
+                    {
                         return project_screen_extents(raw, (0, 0), None)
                             .ok_or_else(|| anyhow!("cached element reports no on-screen extents"));
                     }
                 }
             }
-            let extents = match call(component.get_extents(coord)).await {
+            let extents_result = if let Some(raw) = window_extents {
+                Some(Ok(raw))
+            } else {
+                call(component.get_extents(coord)).await
+            };
+            let extents = match extents_result {
                 Some(Ok(extents)) => extents,
                 Some(Err(e)) => return Err(anyhow!("getExtents failed: {e}")),
                 None => return Err(anyhow!("getExtents did not answer in time")),
@@ -6084,6 +6103,19 @@ pub(crate) fn screen_extents_trusted(
     }
 }
 
+/// GTK4 4.8 can return Window extents unchanged as Screen, including
+/// plausible positive child coordinates. Identical answers contradict a
+/// nonzero, exact X11 GTK window origin; reconstruct from Window instead.
+/// At the root origin equality alone proves nothing. Non-GTK and Wayland
+/// callers pass no GTK X11 origin and retain their existing policy.
+pub(crate) fn x11_screen_is_window_local(
+    screen: (i32, i32, i32, i32),
+    window: Option<(i32, i32, i32, i32)>,
+    gtk_x11_origin: Option<(i32, i32)>,
+) -> bool {
+    window == Some(screen) && gtk_x11_origin.is_some_and(|origin| origin != (0, 0))
+}
+
 /// Whether a `CoordType::Screen` answer may override the Window-relative
 /// reconstruction. GTK3 on native Wayland reports window-local values as
 /// `Screen` (no display bounds exist to reject them), so a compositor-attested
@@ -6973,6 +7005,13 @@ async fn element_bounds_for_visited(
     let origin_attested = bounded_blocking(move || native_wayland_origin_attested(pid, xid))
         .await
         .unwrap_or(false);
+    let gtk_x11_origin = if offset.is_some() && !crate::wayland::is_wayland() {
+        bounded_blocking(move || x11_window_origin(xid))
+            .await
+            .flatten()
+    } else {
+        None
+    };
     let queries = scoped_component_nodes(&action_nodes, scoped_frame, |node| {
         (node.frame_ordinal, node.has_component)
     })
@@ -6982,14 +7021,28 @@ async fn element_bounds_for_visited(
         // A trustworthy Screen answer wins over the Window reconstruction
         // (see `screen_extents_trusted`); web content keeps its document
         // origin path.
+        let window_extents = if coord == CoordType::Window {
+            call(comp.get_extents(CoordType::Window))
+                .await
+                .and_then(|result| result.ok())
+        } else {
+            None
+        };
         if coord == CoordType::Window && !node.in_web_doc {
             if let Some(Ok(raw)) = call(comp.get_extents(CoordType::Screen)).await {
-                if screen_answer_overrides_window(raw, display, origin_attested) {
+                if screen_answer_overrides_window(raw, display, origin_attested)
+                    && !x11_screen_is_window_local(raw, window_extents, gtk_x11_origin)
+                {
                     return project_screen_extents(raw, (0, 0), None).map(|bounds| (idx, bounds));
                 }
             }
         }
-        if let Some(Ok((x, y, w, h))) = call(comp.get_extents(coord)).await {
+        let extents = if let Some(raw) = window_extents {
+            Some(Ok(raw))
+        } else {
+            call(comp.get_extents(coord)).await
+        };
+        if let Some(Ok((x, y, w, h))) = extents {
             let document_origin = if node.in_web_doc {
                 web_document_origin
             } else {
@@ -7109,6 +7162,29 @@ mod screen_override_tests {
             project_screen_extents(local, (955, 349), None),
             Some((967, 560, 917, 34))
         );
+    }
+
+    #[test]
+    fn gtk4_window_local_screen_extents_need_nonzero_native_origin() {
+        let raw = (29, 192, 342, 32);
+        let origin = Some((426, 288));
+        assert!(super::x11_screen_is_window_local(raw, Some(raw), origin));
+        assert_eq!(
+            project_screen_extents(raw, (440, 300), None),
+            Some((469, 492, 342, 32))
+        );
+        assert!(!super::x11_screen_is_window_local(
+            raw,
+            Some(raw),
+            Some((0, 0))
+        ));
+        assert!(!super::x11_screen_is_window_local(raw, Some(raw), None));
+        assert!(!super::x11_screen_is_window_local(raw, None, origin));
+        assert!(!super::x11_screen_is_window_local(
+            (469, 492, 342, 32),
+            Some(raw),
+            origin
+        ));
     }
 
     #[test]

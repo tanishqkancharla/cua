@@ -6449,7 +6449,25 @@ fn decide_foreground_element_placement(
             None
         }
     };
-    if showing == Some(false) {
+    let point_proves_showing = showing == Some(false)
+        && !observed.in_web_content
+        && placement.is_some_and(|(placed_xid, sx, sy)| {
+            xid == Some(placed_xid)
+                && crate::x11::window_info(placed_xid).is_some_and(|w| {
+                    let (x, y) = (sx.round() as i32, sy.round() as i32);
+                    w.pid == Some(pid)
+                        && x >= w.x
+                        && y >= w.y
+                        && x < w.x + w.width as i32
+                        && y < w.y + w.height as i32
+                        && observed.object_ref.as_ref().is_some_and(|oref| {
+                            crate::atspi::native::hit_test::gtk_point_proves_showing(
+                                pid, placed_xid, oref, x, y,
+                            )
+                        })
+                })
+        });
+    if showing == Some(false) && !point_proves_showing {
         return (
             xid,
             ForegroundElementPlacement::NoPoint {

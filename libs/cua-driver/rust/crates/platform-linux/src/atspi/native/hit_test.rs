@@ -68,11 +68,11 @@ const REDIRECT_CHILDREN_CAP: usize = 512;
 async fn describe_node(node: &HitNode<'_>) -> PointOwner {
     let role = call(node.acc.get_role_name())
         .await
-        .and_then(Result::ok)
+        .and_then(|result| result.ok())
         .unwrap_or_default();
     let name = call(node.acc.name())
         .await
-        .and_then(Result::ok)
+        .and_then(|result| result.ok())
         .unwrap_or_default();
     PointOwner {
         object_ref: ObjectRef {
@@ -186,6 +186,7 @@ async fn gtk_screen_extents_collapsed(
     conn: &AccessibilityConnection,
     observed: &RawObjectRef,
     display: Option<(u32, u32)>,
+    client_origin: (i32, i32),
 ) -> bool {
     let Some(Ok(acc)) = call(accessible_for(conn, observed)).await else {
         return false;
@@ -199,7 +200,11 @@ async fn gtk_screen_extents_collapsed(
     let Some(Ok(raw)) = call(component.get_extents(CoordType::Screen)).await else {
         return false;
     };
+    let window = call(component.get_extents(CoordType::Window))
+        .await
+        .and_then(|result| result.ok());
     !screen_extents_trusted(raw, display)
+        || super::x11_screen_is_window_local(raw, window, Some(client_origin))
 }
 
 /// Who owns screen point `(sx, sy)` of window `xid` in `pid`'s application,
@@ -242,7 +247,7 @@ pub fn point_ownership(
             // a no-op there and the CSD inverse above it does not disturb VCL
             // (LibreOffice has no `_GTK_FRAME_EXTENTS`).
             let collapsed = gtk_inset.is_some()
-                && gtk_screen_extents_collapsed(conn, &observed_raw, display).await;
+                && gtk_screen_extents_collapsed(conn, &observed_raw, display, client_origin).await;
             let (win_x, win_y) =
                 window_coords_for_hit((sx, sy), client_origin, gtk_inset, collapsed);
             let (hit_x, hit_y) = match scoped {
@@ -284,7 +289,7 @@ pub fn point_ownership(
                 let observed_name = match call(accessible_for(conn, &observed_raw)).await {
                     Some(Ok(acc)) => call(acc.name())
                         .await
-                        .and_then(Result::ok)
+                        .and_then(|result| result.ok())
                         .unwrap_or_default(),
                     _ => String::new(),
                 };
@@ -407,4 +412,16 @@ mod tests {
         drop(display);
         assert_eq!(ownership, PointOwnership::Unknown);
     }
+}
+
+/// GTK4 4.8 omits Showing on mapped children. Permit an exception only
+/// inside an exact GTK X11 window when its native point query names the
+/// very same observed object (or its descendant). Unknown, redirect and
+/// mismatch remain refusals; this sends no input and changes no focus.
+pub fn gtk_point_proves_showing(pid: u32, xid: u64, observed: &ObjectRef, x: i32, y: i32) -> bool {
+    gtk_frame_extents(xid).is_some()
+        && matches!(
+            point_ownership(pid, xid, observed, x, y),
+            PointOwnership::Owned
+        )
 }
