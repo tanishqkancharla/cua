@@ -1287,20 +1287,14 @@ fn cgevent_type_verified(
         crate::input::keyboard::type_text_with_delay(pid, text, delay_ms)?;
     }
 
-    // CGEvent posting is asynchronous with respect to the renderer. In
-    // particular, Chromium can acknowledge the posting process while a long
-    // tail remains queued. Poll the AX value until the complete payload is
-    // visible instead of treating any growth as success. If the deadline
-    // expires, only native readback can establish a partial delivery count;
-    // a web handler can retain a prefix after consuming the entire request.
+    // Event posting is asynchronous with respect to the application. Wait for
+    // complete readback, but never infer a consumed-character count from a
+    // retained prefix: native editors and web handlers can both transform or
+    // clear their displayed value after consuming the entire request.
     let deadline = std::time::Instant::now() + DELIVERY_DRAIN_TIMEOUT;
-    Ok(await_typed_delivery(
-        before,
-        text,
-        deadline,
-        || read_axvalue_bound(pid, element_ptr_and_idx, window_id),
-        || target_in_web_area(pid, element_ptr_and_idx, window_id),
-    ))
+    Ok(await_typed_delivery(before, text, deadline, || {
+        read_axvalue_bound(pid, element_ptr_and_idx, window_id)
+    }))
 }
 
 fn await_typed_delivery(
@@ -1308,30 +1302,16 @@ fn await_typed_delivery(
     text: &str,
     deadline: std::time::Instant,
     mut read_value: impl FnMut() -> Option<String>,
-    is_web: impl FnOnce() -> bool,
 ) -> (bool, Option<usize>) {
-    let mut best_partial = None;
     loop {
         let after = read_value();
         match typed_progress(before, after.as_deref(), text) {
             TypedProgress::Complete => return (true, Some(text.chars().count())),
-            TypedProgress::Partial(delivered) => {
-                best_partial =
-                    Some(best_partial.map_or(delivered, |best: usize| best.max(delivered)));
-            }
             TypedProgress::Unverifiable => return (false, None),
-            TypedProgress::Unchanged => {
-                // Native unchanged values can report zero delivery. Web fields
-                // may clear or retain a short value after consuming input;
-                // the deadline branch must withhold suffix-retry advice.
-                best_partial.get_or_insert(0);
-            }
+            TypedProgress::Partial(_) | TypedProgress::Unchanged => {}
         }
         if std::time::Instant::now() >= deadline {
-            if is_web() {
-                best_partial = None;
-            }
-            return (false, best_partial);
+            return (false, None);
         }
         std::thread::sleep(DELIVERY_DRAIN_POLL_INTERVAL);
     }
@@ -2160,13 +2140,9 @@ mod tests {
                 TypedProgress::Unverifiable
             );
             assert_eq!(
-                await_typed_delivery(
-                    Some(before),
-                    text,
-                    std::time::Instant::now(),
-                    || Some(after.to_owned()),
-                    || panic!("unverifiable normalized values must not probe ancestry"),
-                ),
+                await_typed_delivery(Some(before), text, std::time::Instant::now(), || Some(
+                    after.to_owned()
+                ),),
                 (false, None),
                 "changed contents must not recommend retrying the whole input"
             );
@@ -2189,42 +2165,34 @@ mod tests {
                 reads += 1;
                 values.pop_front().flatten()
             },
-            || false,
         );
         assert_eq!(delivery, (true, Some(text.chars().count())));
         assert_eq!(reads, 2, "completion must wait past the prefix readback");
     }
 
     #[test]
-    fn drained_prefix_reports_the_delivered_character_count() {
+    fn drained_prefix_cannot_establish_consumed_character_count() {
         let delivery = await_typed_delivery(
             Some(""),
             "BEGIN-payload-END",
             std::time::Instant::now(),
             || Some("BEGIN".to_owned()),
-            || false,
         );
-        assert_eq!(delivery, (false, Some(5)));
+        assert_eq!(delivery, (false, None));
     }
 
     #[test]
-    fn delivery_unchanged_web_is_unverifiable() {
-        for web in [true, false] {
-            assert_eq!(
-                await_typed_delivery(
-                    Some(""),
-                    "hello",
-                    std::time::Instant::now(),
-                    || Some(String::new()),
-                    || web,
-                ),
-                (false, if web { None } else { Some(0) }),
-            );
-        }
+    fn delivery_unchanged_is_unverifiable() {
+        assert_eq!(
+            await_typed_delivery(Some(""), "hello", std::time::Instant::now(), || Some(
+                String::new()
+            ),),
+            (false, None),
+        );
     }
 
     #[test]
-    fn delivery_web_keeps_polling_but_withholds_partial_retry_counts() {
+    fn delivery_keeps_polling_but_withholds_partial_retry_counts() {
         for complete in [true, false] {
             let mut reads = 0;
             let result = await_typed_delivery(
@@ -2244,7 +2212,6 @@ mod tests {
                         .to_owned(),
                     )
                 },
-                || true,
             );
             assert!(reads >= 2);
             assert_eq!(
@@ -2259,15 +2226,9 @@ mod tests {
     }
 
     #[test]
-    fn delivery_unreadable_does_not_probe_ancestry() {
+    fn delivery_unreadable_is_unverifiable() {
         assert_eq!(
-            await_typed_delivery(
-                Some(""),
-                "hello",
-                std::time::Instant::now(),
-                || None,
-                || panic!("unreadable values must not probe ancestry"),
-            ),
+            await_typed_delivery(Some(""), "hello", std::time::Instant::now(), || None,),
             (false, None),
         );
     }
