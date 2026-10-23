@@ -1671,25 +1671,16 @@ fn type_text_in_key_window(
         let role = unsafe { copy_string_attr(element, "AXRole") }.unwrap_or_default();
         let title = unsafe { copy_string_attr(element, "AXTitle") }.unwrap_or_default();
         let err = unsafe { set_string_attr(element, "AXSelectedText", text) };
-        // Classify the atomic write before considering synthesis. Complete AX
-        // delivery returns immediately. Partial delivery is surfaced as such
-        // instead of appending the full payload again. When synthesis would
-        // exceed its transport-safe budget, rejected/unchanged AX writes fail
-        // safely and unreadable AX state is reported as indeterminate.
+        // Classify the atomic write before considering synthesis. Only complete
+        // readback verifies delivery. A retained prefix cannot establish how
+        // much of an acknowledged request the application consumed; it must
+        // neither produce a suffix retry offset nor trigger another edit.
         let after = unsafe { copy_string_attr(element, "AXValue") };
         let ax_progress = if err == kAXErrorSuccess {
             Some(typed_progress(before.as_deref(), after.as_deref(), text))
         } else {
             None
         };
-        // AXValue is not renderer evidence in web content. An unchanged or
-        // partial echo cannot establish how many characters were consumed;
-        // a handler may retain only a prefix of a fully consumed request.
-        let uncertain_web_readback =
-            matches!(
-                ax_progress,
-                Some(TypedProgress::Unchanged | TypedProgress::Partial(_))
-            ) && target_in_web_area(pid, Some((element as usize, idx_opt)), window_id);
         // An AX insert bypasses NSTextView's edit model, so a document is
         // not marked edited and would never save the new text (DS-07).
         let document = if ax_progress == Some(TypedProgress::Complete) {
@@ -1714,17 +1705,16 @@ fn type_text_in_key_window(
                 delivered_chars: Some(text.chars().count()),
             }));
         }
-        if let Some(TypedProgress::Partial(delivered_chars)) = ax_progress {
+        if let Some(TypedProgress::Partial(_)) = ax_progress {
             let idx_str = idx_opt.map(|i| format!(" [{i}]")).unwrap_or_default();
             return Ok(TypeTextDelivery::Typed(TypeTextOutcome {
-                detail: format!(" via partial AX write into{idx_str} {role} \"{title}\""),
+                detail: format!(" via acknowledged AX write into{idx_str} {role} \"{title}\""),
                 path: PATH_AX,
                 verified: false,
-                delivered_chars: (!uncertain_web_readback).then_some(delivered_chars),
+                delivered_chars: None,
             }));
         }
         ax_attempt = match ax_progress {
-            Some(TypedProgress::Unchanged) if uncertain_web_readback => AxAttempt::Unverifiable,
             Some(TypedProgress::Unchanged) => AxAttempt::Unchanged,
             Some(TypedProgress::Unverifiable) => AxAttempt::Unverifiable,
             None => AxAttempt::Rejected,
