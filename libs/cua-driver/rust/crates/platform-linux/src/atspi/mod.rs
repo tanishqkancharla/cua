@@ -318,6 +318,20 @@ pub fn perform_action_observed(element: &cache::CachedElement) -> Result<(String
     native::perform_action_ref(object_ref)
 }
 
+/// Foreground single-click fallback. An exact native editable receives
+/// Component.GrabFocus, never its activate/submit action. Web actions and
+/// background activation keep their existing route.
+pub fn perform_foreground_action_observed(
+    element: &cache::CachedElement,
+) -> Result<(String, bool, bool)> {
+    let Some(object_ref) = element.object_ref.as_ref() else {
+        return Err(
+            native::CachedElementGone("observed element has no D-Bus address".into()).into(),
+        );
+    };
+    native::perform_foreground_action_ref(object_ref, !element.in_web_content)
+}
+
 /// Whether the exact object a snapshot observed is on screen right now
 /// (its own state set carries `Showing`). Never re-walks.
 pub fn element_showing_observed(element: &cache::CachedElement) -> Result<bool> {

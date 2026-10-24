@@ -2360,9 +2360,10 @@ fn listing_state(role_lower: &str, state: &StateSet) -> (bool, bool) {
     }
 }
 
-/// Description note for an indexed element that is not on screen.
+/// Missing Showing is not proof of invisibility: GTK4 4.8 omits it on
+/// mapped children. Do not instruct an agent to scroll a visible field away.
 const OFFSCREEN_NOTE: &str =
-    "off-screen: scroll it into view before a pixel action; element actions still reach it";
+    "screen visibility is unconfirmed by AT-SPI; inspect the current screenshot; element actions remain available";
 
 /// How many leading children of a menubar menu the closed-menu peek reads
 /// (gail puts a state-less tearoff item first).
@@ -3833,6 +3834,13 @@ pub(crate) fn read_native_paste_target(object_ref: &ObjectRef) -> Result<PasteTe
 /// `Ok((action_name, suspected_noop))`. Errors when the object no longer
 /// exists so the caller can fall back to resolving the index afresh.
 pub fn perform_action_ref(object_ref: &ObjectRef) -> Result<(String, bool, bool)> {
+    perform_foreground_action_ref(object_ref, false)
+}
+
+pub(crate) fn perform_foreground_action_ref(
+    object_ref: &ObjectRef,
+    focus_native_editable: bool,
+) -> Result<(String, bool, bool)> {
     bounded_for(
         REF_ACTION_BUDGET,
         async {
@@ -3842,6 +3850,31 @@ pub fn perform_action_ref(object_ref: &ObjectRef) -> Result<(String, bool, bool)
                 .proxies()
                 .await
                 .map_err(|e| anyhow!("interface proxies unavailable: {e}"))?;
+            if focus_native_editable {
+                let editable = matches!(call(acc.get_state()).await, Some(Ok(state))
+                    if state.contains(State::Editable) && state.contains(State::Focusable) && state.contains(State::Visible));
+                if editable {
+                    let component = proxies
+                        .component()
+                        .await
+                        .map_err(|e| anyhow!("Component unavailable before focus: {e}"))?;
+                    // Once dispatched, neither a timeout nor a negative/unconfirmed
+                    // result permits activation or a second route. Focus can have
+                    // changed even when the reply/readback is missing.
+                    let _ack = call(component.grab_focus()).await;
+                    let deadline = tokio::time::Instant::now() + Duration::from_millis(500);
+                    let mut focused = false;
+                    while tokio::time::Instant::now() < deadline {
+                        if matches!(call(acc.get_state()).await, Some(Ok(state)) if state.contains(State::Focused))
+                        {
+                            focused = true;
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                    return Ok(("grab_focus".to_owned(), false, !focused));
+                }
+            }
             let ap = proxies
                 .action()
                 .await

@@ -413,29 +413,3 @@ mod tests {
         assert_eq!(ownership, PointOwnership::Unknown);
     }
 }
-
-/// GTK4 4.8 omits Showing on mapped children. Permit an exception only
-/// inside an exact GTK X11 window when its native point query names the
-/// very same observed object (or its descendant). Unknown, redirect and
-/// mismatch remain refusals; this sends no input and changes no focus.
-pub fn gtk_point_proves_showing(pid: u32, xid: u64, observed: &ObjectRef, x: i32, y: i32) -> bool {
-    if gtk_frame_extents(xid).is_none() {
-        return false;
-    }
-    let visible: Result<bool> = bounded_for(
-        INPUT_QUERY_BUDGET,
-        async {
-            let conn = shared_connection().await?;
-            let (acc, _) = live_accessible(conn, observed).await?;
-            Ok(
-                matches!(call(acc.get_state()).await, Some(Ok(state)) if state.contains(State::Visible)),
-            )
-        },
-        || Ok(false),
-    );
-    visible.unwrap_or(false)
-        && matches!(
-            point_ownership(pid, xid, observed, x, y),
-            PointOwnership::Owned
-        )
-}
