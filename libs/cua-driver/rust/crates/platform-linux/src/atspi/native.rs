@@ -3841,6 +3841,7 @@ pub(crate) fn perform_foreground_action_ref(
     object_ref: &ObjectRef,
     focus_native_editable: bool,
 ) -> Result<(String, bool, bool)> {
+    let focus_dispatched = AtomicU8::new(0);
     bounded_for(
         REF_ACTION_BUDGET,
         async {
@@ -3861,6 +3862,7 @@ pub(crate) fn perform_foreground_action_ref(
                     // Once dispatched, neither a timeout nor a negative/unconfirmed
                     // result permits activation or a second route. Focus can have
                     // changed even when the reply/readback is missing.
+                    focus_dispatched.store(1, Ordering::Relaxed);
                     let _ack = call(component.grab_focus()).await;
                     let deadline = tokio::time::Instant::now() + Duration::from_millis(500);
                     let mut focused = false;
@@ -3908,7 +3910,15 @@ pub(crate) fn perform_foreground_action_ref(
                 unacknowledged,
             ))
         },
-        || Err(anyhow!("perform_action (cached element) timed out")),
+        || {
+            if focus_dispatched.load(Ordering::Relaxed) != 0 {
+                Ok(("grab_focus".to_owned(), false, true))
+            } else {
+                Err(anyhow!(
+                    "perform_action (cached element) timed out before focus dispatch"
+                ))
+            }
+        },
     )
 }
 
