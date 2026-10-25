@@ -323,7 +323,7 @@ pub fn perform_action_observed(element: &cache::CachedElement) -> Result<(String
 /// background activation keep their existing route.
 pub fn perform_foreground_action_observed(
     element: &cache::CachedElement,
-) -> Result<(String, bool, bool)> {
+) -> Result<native::ForegroundActionResult> {
     let Some(object_ref) = element.object_ref.as_ref() else {
         return Err(
             native::CachedElementGone("observed element has no D-Bus address".into()).into(),

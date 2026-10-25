@@ -3830,17 +3830,95 @@ pub(crate) fn read_native_paste_target(object_ref: &ObjectRef) -> Result<PasteTe
     )
 }
 
+/// A foreground focus rejection is distinct from an unconfirmed dispatch.
+#[derive(Debug)]
+pub enum ForegroundActionResult {
+    Action {
+        name: String,
+        suspected_noop: bool,
+        unacknowledged: bool,
+    },
+    FocusUnsupported,
+}
+
+fn focus_reply_is_unsupported(error: &atspi::zbus::Error) -> bool {
+    match error {
+        atspi::zbus::Error::MethodError(name, _, _) => {
+            name.as_str() == "org.freedesktop.DBus.Error.NotSupported"
+        }
+        atspi::zbus::Error::FDO(error) => {
+            matches!(error.as_ref(), atspi::zbus::fdo::Error::NotSupported(_))
+        }
+        // A local Unsupported, a missing reply, or a transport error is not
+        // an authoritative rejection by the addressed toolkit.
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod focus_reply_tests {
+    use super::focus_reply_is_unsupported;
+    use atspi::zbus::{Error, Message};
+
+    fn wire_error(name: &str) -> Error {
+        let call = Message::method_call("/org/a11y/atspi/accessible/test", "GrabFocus")
+            .unwrap()
+            .build(&())
+            .unwrap();
+        let reply = Message::error(&call.header(), name)
+            .unwrap()
+            .build(&"toolkit reply")
+            .unwrap();
+        Error::from(reply)
+    }
+
+    #[test]
+    fn explicit_remote_not_supported_is_a_focus_capability_rejection() {
+        assert!(focus_reply_is_unsupported(&wire_error(
+            "org.freedesktop.DBus.Error.NotSupported"
+        )));
+        assert!(focus_reply_is_unsupported(&Error::from(
+            atspi::zbus::fdo::Error::NotSupported(String::new())
+        )));
+    }
+
+    #[test]
+    fn uncertain_or_local_errors_never_become_a_toolkit_rejection() {
+        for name in [
+            "org.freedesktop.DBus.Error.NoReply",
+            "org.freedesktop.DBus.Error.Timeout",
+            "org.freedesktop.DBus.Error.UnknownObject",
+            "org.freedesktop.DBus.Error.UnknownMethod",
+        ] {
+            assert!(!focus_reply_is_unsupported(&wire_error(name)), "{name}");
+        }
+        assert!(!focus_reply_is_unsupported(&Error::Unsupported));
+        assert!(!focus_reply_is_unsupported(&Error::Failure(
+            "org.freedesktop.DBus.Error.NotSupported".to_owned()
+        )));
+    }
+}
+
 /// [`perform_action`] on a snapshot-cached element identity. Same contract:
 /// `Ok((action_name, suspected_noop))`. Errors when the object no longer
 /// exists so the caller can fall back to resolving the index afresh.
 pub fn perform_action_ref(object_ref: &ObjectRef) -> Result<(String, bool, bool)> {
-    perform_foreground_action_ref(object_ref, false)
+    match perform_foreground_action_ref(object_ref, false)? {
+        ForegroundActionResult::Action {
+            name,
+            suspected_noop,
+            unacknowledged,
+        } => Ok((name, suspected_noop, unacknowledged)),
+        ForegroundActionResult::FocusUnsupported => {
+            Err(anyhow!("native foreground focus is unsupported"))
+        }
+    }
 }
 
 pub(crate) fn perform_foreground_action_ref(
     object_ref: &ObjectRef,
     focus_native_editable: bool,
-) -> Result<(String, bool, bool)> {
+) -> Result<ForegroundActionResult> {
     let focus_dispatched = AtomicU8::new(0);
     bounded_for(
         REF_ACTION_BUDGET,
@@ -3863,7 +3941,10 @@ pub(crate) fn perform_foreground_action_ref(
                     // result permits activation or a second route. Focus can have
                     // changed even when the reply/readback is missing.
                     focus_dispatched.store(1, Ordering::Relaxed);
-                    let _ack = call(component.grab_focus()).await;
+                    let ack = call(component.grab_focus()).await;
+                    if matches!(&ack, Some(Err(error)) if focus_reply_is_unsupported(error)) {
+                        return Ok(ForegroundActionResult::FocusUnsupported);
+                    }
                     let deadline = tokio::time::Instant::now() + Duration::from_millis(500);
                     let mut focused = false;
                     while tokio::time::Instant::now() < deadline {
@@ -3874,7 +3955,11 @@ pub(crate) fn perform_foreground_action_ref(
                         }
                         tokio::time::sleep(Duration::from_millis(20)).await;
                     }
-                    return Ok(("grab_focus".to_owned(), false, !focused));
+                    return Ok(ForegroundActionResult::Action {
+                        name: "grab_focus".to_owned(),
+                        suspected_noop: false,
+                        unacknowledged: !focused,
+                    });
                 }
             }
             let ap = proxies
@@ -3904,15 +3989,19 @@ pub(crate) fn perform_foreground_action_ref(
                 }
             };
             tokio::time::sleep(Duration::from_millis(50)).await;
-            Ok((
-                actions.get(chosen).cloned().unwrap_or_default(),
-                suspected_noop || rejected,
+            Ok(ForegroundActionResult::Action {
+                name: actions.get(chosen).cloned().unwrap_or_default(),
+                suspected_noop: suspected_noop || rejected,
                 unacknowledged,
-            ))
+            })
         },
         || {
             if focus_dispatched.load(Ordering::Relaxed) != 0 {
-                Ok(("grab_focus".to_owned(), false, true))
+                Ok(ForegroundActionResult::Action {
+                    name: "grab_focus".to_owned(),
+                    suspected_noop: false,
+                    unacknowledged: true,
+                })
             } else {
                 Err(anyhow!(
                     "perform_action (cached element) timed out before focus dispatch"

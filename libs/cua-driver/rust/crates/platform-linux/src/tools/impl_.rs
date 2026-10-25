@@ -2769,6 +2769,68 @@ fn input_error_result(e: anyhow::Error) -> ToolResult {
     }
 }
 
+/// Refusal describes the widget request without hiding foreground activation.
+fn unsupported_foreground_focus(
+    idx: usize,
+    pid: u32,
+    reason: &str,
+    report: crate::input::ForegroundReport,
+) -> ToolResult {
+    ToolResult::error(format!(
+        "native_focus_unavailable: element [{idx}] (pid {pid}) rejected Component.GrabFocus \
+         as unsupported. No pointer or text input was sent; the authorized window activation \
+         may already have changed window focus. Observe a fresh screenshot and explicitly \
+         choose coordinates if needed; no fallback or replay was attempted."
+    )).with_structured(json!({
+        "code": "native_focus_unavailable",
+        "effect": "refused",
+        "verified": false,
+        "path": "ax_fg",
+        "delivery_mode": "foreground",
+        "ax_action": "grab_focus",
+        "native_error": "org.freedesktop.DBus.Error.NotSupported",
+        "bounds_reason": reason,
+        "element_index": idx,
+        "pointer_input_sent": false,
+        "text_input_sent": false,
+        "foreground": report.to_json(),
+        "focus_after": report.focus_after.as_str(),
+        "evidence": [{"kind": "native_api_result", "detail":
+            "toolkit rejected widget focus as unsupported; foreground window activation may already have occurred"}],
+    }))
+}
+
+#[cfg(test)]
+mod foreground_focus_refusal_tests {
+    use super::*;
+
+    #[test]
+    fn a_window_change_cannot_promote_unsupported_focus_to_delivered_input() {
+        let report = crate::input::ForegroundReport {
+            already_active: false,
+            retried_activation: false,
+            confirm_ms: 1,
+            focus_after: crate::input::FocusAfter::Target,
+            window_change: Some("owned window changed".to_owned()),
+            window_change_owned: true,
+        };
+        assert!(report.window_change_confirms());
+        let result = unsupported_foreground_focus(3, 42, "visibility unconfirmed", report);
+        assert_eq!(result.is_error, Some(true));
+        let value = result.structured_content.unwrap();
+        assert_eq!(value["code"], "native_focus_unavailable");
+        assert_eq!(value["effect"], "refused");
+        assert_eq!(value["verified"], false);
+        assert_eq!(value["pointer_input_sent"], false);
+        assert_eq!(value["text_input_sent"], false);
+        assert_eq!(value["foreground"]["activated"], true);
+        assert_eq!(value["focus_after"], "target");
+        assert!(!value["evidence"]
+            .to_string()
+            .contains("real input delivered"));
+    }
+}
+
 /// Structured payload for a completed foreground transaction.
 fn foreground_structured(
     path: &str,
@@ -6350,7 +6412,18 @@ impl ClickTool {
                 )
                 .await;
                 match result {
-                    Ok(Ok(((action, suspected_noop, unacknowledged), report))) => {
+                    Ok(Ok((
+                        crate::atspi::native::ForegroundActionResult::FocusUnsupported,
+                        report,
+                    ))) => unsupported_foreground_focus(idx, pid, &reason, report),
+                    Ok(Ok((
+                        crate::atspi::native::ForegroundActionResult::Action {
+                            name: action,
+                            suspected_noop,
+                            unacknowledged,
+                        },
+                        report,
+                    ))) => {
                         let mut extra = serde_json::Map::new();
                         extra.insert("ax_action".into(), json!(action));
                         extra.insert("bounds_reason".into(), json!(reason));
